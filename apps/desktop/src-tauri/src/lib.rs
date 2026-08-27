@@ -627,6 +627,19 @@ mod tests {
             .execute(&mut connection)
             .await
             .expect("legacy module should insert");
+            sqlx::query(
+                "INSERT INTO modules (id, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("corrupt-module")
+            .bind("Corrupt but preserved")
+            .bind(1_i64)
+            .bind("recover me")
+            .bind("not valid JSON")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-02T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("legacy SQLite could contain externally modified data");
 
             sqlx::raw_sql(include_str!("../migrations/0002_module_revision_history.sql"))
                 .execute(&mut connection)
@@ -641,6 +654,17 @@ mod tests {
             assert_eq!(row.get::<i64, _>("revision"), 4);
             assert_eq!(row.get::<String, _>("source_text"), "legacy source");
             assert_eq!(row.get::<String, _>("module_json"), legacy_json);
+
+            let corrupt_row = sqlx::query(
+                "SELECT revision, source_text, module_json FROM modules WHERE id=?",
+            )
+            .bind("corrupt-module")
+            .fetch_one(&mut connection)
+            .await
+            .expect("migration should preserve malformed legacy rows instead of aborting");
+            assert_eq!(corrupt_row.get::<i64, _>("revision"), 1);
+            assert_eq!(corrupt_row.get::<String, _>("source_text"), "recover me");
+            assert_eq!(corrupt_row.get::<String, _>("module_json"), "not valid JSON");
 
             sqlx::query(
                 "INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

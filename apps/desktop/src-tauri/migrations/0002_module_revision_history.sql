@@ -22,7 +22,13 @@ INSERT INTO modules_with_revision_history (
 )
 SELECT
   id,
-  CAST(COALESCE(json_extract(module_json, '$.revision'), 1) AS INTEGER),
+  CAST(
+    CASE
+      WHEN json_valid(module_json) THEN COALESCE(json_extract(module_json, '$.revision'), 1)
+      ELSE 1
+    END
+    AS INTEGER
+  ),
   title,
   schema_version,
   source_text,
