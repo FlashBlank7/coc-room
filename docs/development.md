@@ -125,4 +125,4 @@ pnpm build:windows
 
 NSIS 安装包输出到 `apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`；不同 Tauri/Cargo 环境也可能省略 target triple 这一层，可在 `apps/desktop/src-tauri/target/release/bundle/nsis/` 查找。首版没有商业代码签名，Windows SmartScreen 可能提示未知发布者。
 
-CI 的 Windows job 使用本地默认 relay origin 构建可安装性产物，并在临时目录静默安装、启动检查后卸载；发布前应显式设置生产 `VITE_RELAY_URL` 并完成自有节点验证。
+CI 的 Windows job 会优先使用手工运行时的 `relay_url` 输入，其次使用仓库变量 `PUBLIC_RELAY_URL`，都未设置时才回退到 `http://127.0.0.1:8787`。它会构建 NSIS，在临时目录静默安装，精确启动桌面主程序后卸载。发布前应设置生产 HTTPS origin，并先运行 `pnpm --filter @coc-room/relay smoke -- https://...` 验收节点。
