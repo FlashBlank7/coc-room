@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
 import {
   modulePackageSchema,
   roomEventSchema,
@@ -56,11 +57,55 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
 }
 
+async function initializeSmokeSchema(db: Database): Promise<void> {
+  // Alternate smoke databases do not pass through the plugin's default-db
+  // migration hook. Keep this deliberately limited to the room tables used by
+  // the two-process session diagnostic.
+  await db.execute("PRAGMA foreign_keys = ON");
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS rooms (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      local_role TEXT NOT NULL CHECK (local_role IN ('host', 'player')),
+      local_peer_id TEXT NOT NULL,
+      host_peer_id TEXT NOT NULL,
+      invite_token TEXT NOT NULL,
+      join_token TEXT,
+      relay_url TEXT NOT NULL,
+      last_seq INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS room_events (
+      room_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      sender_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      event_json TEXT NOT NULL,
+      PRIMARY KEY (room_id, event_id),
+      UNIQUE (room_id, seq),
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_room_events_sequence ON room_events(room_id, seq)");
+}
+
 class SqliteRepository implements LocalRepository {
   private constructor(private readonly db: Database) {}
 
   static async open(): Promise<SqliteRepository> {
-    return new SqliteRepository(await Database.load("sqlite:coc-room.db"));
+    let databaseName = "coc-room.db";
+    if (isTauriRuntime()) {
+      const smokeDatabase = await invoke<string | null>("network_smoke_database");
+      if (smokeDatabase) databaseName = smokeDatabase;
+    }
+    const db = await Database.load(`sqlite:${databaseName}`);
+    if (databaseName !== "coc-room.db") await initializeSmokeSchema(db);
+    return new SqliteRepository(db);
   }
 
   async saveRoom(room: RoomRecord): Promise<void> {

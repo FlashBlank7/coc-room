@@ -8,11 +8,12 @@ import {
 } from "./network-diagnostic";
 
 export type NetworkProcessRole = "host" | "player";
+export type NetworkSmokeMode = NetworkDiagnosticMode | "session-direct" | "session-relay";
 
 export interface NetworkSmokeRendezvous {
   protocolVersion: 1;
   runId: string;
-  mode: NetworkDiagnosticMode;
+  mode: NetworkSmokeMode;
   roomId: string;
   hostPeerId: string;
   joinToken: string;

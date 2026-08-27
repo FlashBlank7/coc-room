@@ -166,7 +166,7 @@ jobs:
               Select-Object -First 1
             if (-not $app) { throw "Built desktop executable was not found" }
 
-            foreach ($mode in @("direct", "relay", "storage")) {
+            foreach ($mode in @("direct", "relay", "session-direct", "session-relay", "storage")) {
               $env:COC_ROOM_NETWORK_SMOKE = "1"
               $env:COC_ROOM_NETWORK_SMOKE_URL = "http://127.0.0.1:8787"
               $env:COC_ROOM_NETWORK_SMOKE_MODE = $mode
@@ -185,6 +185,11 @@ jobs:
                   $env:COC_ROOM_NETWORK_SMOKE_RUN_ID = $runId
                   $env:COC_ROOM_NETWORK_SMOKE_ROLE = "host"
                   $env:COC_ROOM_NETWORK_SMOKE_RESULT = $hostResultPath
+                  if ($mode -like "session-*") {
+                    $env:COC_ROOM_NETWORK_SMOKE_DATABASE = "$runId-host.db"
+                  } else {
+                    Remove-Item Env:COC_ROOM_NETWORK_SMOKE_DATABASE -ErrorAction SilentlyContinue
+                  }
                   $hostProcess = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
 
                   foreach ($attempt in 1..120) {
@@ -198,6 +203,9 @@ jobs:
 
                   $env:COC_ROOM_NETWORK_SMOKE_ROLE = "player"
                   $env:COC_ROOM_NETWORK_SMOKE_RESULT = $playerResultPath
+                  if ($mode -like "session-*") {
+                    $env:COC_ROOM_NETWORK_SMOKE_DATABASE = "$runId-player.db"
+                  }
                   $playerProcess = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
                   if ($hostProcess.Id -eq $playerProcess.Id) { throw "Network smoke did not launch distinct processes" }
 
@@ -225,12 +233,27 @@ jobs:
                       throw "Desktop $mode report role or mode does not match its process"
                     }
                     if ($report.details.runId -ne $runId) { throw "Desktop $mode report escaped its run ID" }
-                    if ($report.details.path -ne $mode) { throw "Desktop $mode used $($report.details.path) instead" }
-                    if ($report.details.outgoingPayloadBytes -le 65536 -or $report.details.incomingPayloadBytes -le 65536) {
-                      throw "Desktop $mode did not exchange large payloads in both directions"
+                    $expectedPath = if ($mode -like "session-*") { $mode -replace "^session-", "" } else { $mode }
+                    if ($report.details.path -ne $expectedPath) { throw "Desktop $mode used $($report.details.path) instead" }
+                    if ($mode -like "session-*") {
+                      if ($report.details.events.Count -ne 3) { throw "Desktop $mode did not converge on three RoomSession events" }
+                      if (-not $report.details.duplicateWasIdempotent -or -not $report.details.reconnectReplayVerified -or -not $report.details.cleanupVerified) {
+                        throw "Desktop $mode did not verify idempotency, replay, and cleanup"
+                      }
+                    } else {
+                      if ($report.details.outgoingPayloadBytes -le 65536 -or $report.details.incomingPayloadBytes -le 65536) {
+                        throw "Desktop $mode did not exchange large payloads in both directions"
+                      }
+                      if (-not $report.details.bidirectionalAcknowledgements) {
+                        throw "Desktop $mode did not verify bidirectional receipt"
+                      }
                     }
-                    if (-not $report.details.bidirectionalAcknowledgements) {
-                      throw "Desktop $mode did not verify bidirectional receipt"
+                  }
+                  if ($mode -like "session-*") {
+                    $hostReport = Get-Content -LiteralPath $hostResultPath -Raw | ConvertFrom-Json
+                    $playerReport = Get-Content -LiteralPath $playerResultPath -Raw | ConvertFrom-Json
+                    if (($hostReport.details.events | ConvertTo-Json -Depth 20 -Compress) -ne ($playerReport.details.events | ConvertTo-Json -Depth 20 -Compress)) {
+                      throw "Desktop $mode host and player event logs diverged"
                     }
                   }
                 } finally {
@@ -239,10 +262,16 @@ jobs:
                   foreach ($path in @($coordinationPath, $hostResultPath, $playerResultPath)) {
                     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
                   }
+                  if ($mode -like "session-*") {
+                    $databaseRoot = Join-Path $env:APPDATA "org.coc-room.desktop"
+                    Get-ChildItem -LiteralPath $databaseRoot -Filter "$runId-*.db" -File -ErrorAction SilentlyContinue |
+                      Remove-Item -Force -ErrorAction SilentlyContinue
+                  }
                   if (Test-Path -LiteralPath $runDirectory) { Remove-Item -LiteralPath $runDirectory -Force }
                   Remove-Item Env:COC_ROOM_NETWORK_SMOKE_COORDINATION -ErrorAction SilentlyContinue
                   Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RUN_ID -ErrorAction SilentlyContinue
                   Remove-Item Env:COC_ROOM_NETWORK_SMOKE_ROLE -ErrorAction SilentlyContinue
+                  Remove-Item Env:COC_ROOM_NETWORK_SMOKE_DATABASE -ErrorAction SilentlyContinue
                 }
                 continue
               }
@@ -329,12 +358,54 @@ jobs:
           if ($process.HasExited) { throw "Installed desktop app exited during startup" }
           Stop-Process -Id $process.Id -Force
 
+          $installedSmokeId = [guid]::NewGuid().ToString("N")
+          $installedSmokeResult = Join-Path $env:RUNNER_TEMP "installed-storage-smoke-$installedSmokeId.json"
+          $installedSmokeExports = Join-Path $env:RUNNER_TEMP "installed-storage-smoke-$installedSmokeId"
+          New-Item -ItemType Directory -Path $installedSmokeExports | Out-Null
+          $env:COC_ROOM_NETWORK_SMOKE = "1"
+          $env:COC_ROOM_NETWORK_SMOKE_MODE = "storage"
+          $env:COC_ROOM_NETWORK_SMOKE_RESULT = $installedSmokeResult
+          $env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR = $installedSmokeExports
+          $storageProcess = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
+          try {
+            foreach ($attempt in 1..240) {
+              if (Test-Path -LiteralPath $installedSmokeResult -PathType Leaf) { break }
+              if ($storageProcess.HasExited) { throw "Installed storage smoke exited before reporting" }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not (Test-Path -LiteralPath $installedSmokeResult -PathType Leaf)) {
+              throw "Installed storage smoke did not report within 120 seconds"
+            }
+            $installedReport = Get-Content -LiteralPath $installedSmokeResult -Raw | ConvertFrom-Json
+            if (-not $installedReport.ok -or -not $installedReport.details.cleanupVerified) {
+              throw "Installed storage smoke failed: $($installedReport.message)"
+            }
+            if ($installedReport.details.sidecarProvider -ne "mock" -or $installedReport.details.persistedEvents -ne 1) {
+              throw "Installed storage smoke did not verify packaged sidecar and SQLite persistence"
+            }
+            foreach ($exportName in @("transcript.md", "transcript.html")) {
+              $exportPath = Join-Path $installedSmokeExports $exportName
+              if (-not (Test-Path -LiteralPath $exportPath -PathType Leaf)) {
+                throw "Installed storage smoke did not create $exportName"
+              }
+            }
+          } finally {
+            if (-not $storageProcess.HasExited) { Stop-Process -Id $storageProcess.Id -Force }
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RESULT -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $installedSmokeResult) { Remove-Item -LiteralPath $installedSmokeResult -Force }
+            if (Test-Path -LiteralPath $installedSmokeExports) { Remove-Item -LiteralPath $installedSmokeExports -Recurse -Force }
+          }
+
           $uninstaller = Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -Recurse |
             Where-Object { $_.Name -match "uninstall" } |
             Select-Object -First 1
           if (-not $uninstaller) { throw "NSIS uninstaller was not found" }
           $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall exited with $($uninstall.ExitCode)" }
+          if (Test-Path -LiteralPath $app.FullName -PathType Leaf) { throw "NSIS uninstall left the installed desktop executable" }
       - uses: actions/upload-artifact@v6
         with:
           name: coc-room-windows-x64-nsis

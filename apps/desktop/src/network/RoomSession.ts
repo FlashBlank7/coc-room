@@ -150,14 +150,18 @@ export class RoomSession {
     this.syncCollectors.clear();
   }
 
-  async submit(type: RoomCommandV1["type"], payload: RoomCommandV1["payload"]): Promise<void> {
+  async submit(
+    type: RoomCommandV1["type"],
+    payload: RoomCommandV1["payload"],
+    commandId = globalThis.crypto.randomUUID(),
+  ): Promise<void> {
     if (!this.isHostAvailable) {
       throw new Error("房主当前离线，房间已暂停；房主回来后再继续操作");
     }
     const command = roomCommandSchema.parse({
       protocolVersion: 1,
       roomId: this.options.room.id,
-      commandId: globalThis.crypto.randomUUID(),
+      commandId,
       sender: this.participant,
       sentAt: new Date().toISOString(),
       type,

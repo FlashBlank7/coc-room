@@ -229,8 +229,14 @@ fn parse_network_smoke_config(
     let mode = mode
         .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_MODE is required".to_string())?
         .to_string();
-    if !matches!(mode.as_str(), "direct" | "relay" | "storage") {
-        return Err("network smoke mode must be direct, relay, or storage".to_string());
+    if !matches!(
+        mode.as_str(),
+        "direct" | "relay" | "storage" | "session-direct" | "session-relay"
+    ) {
+        return Err(
+            "network smoke mode must be direct, relay, storage, session-direct, or session-relay"
+                .to_string(),
+        );
     }
     let relay_url = if mode == "storage" {
         None
@@ -251,9 +257,14 @@ fn parse_network_smoke_config(
     let has_process_coordination =
         process_role.is_some() || coordination_path.is_some() || run_id.is_some();
     let process_role = if has_process_coordination {
-        if !matches!(mode.as_str(), "direct" | "relay") {
+        if !matches!(
+            mode.as_str(),
+            "direct" | "relay" | "session-direct" | "session-relay"
+        ) {
             return Err(
-                "multi-process smoke is available only for direct or relay mode".to_string(),
+                "multi-process smoke is available only for direct, relay, session-direct, or "
+                    .to_string()
+                    + "session-relay mode",
             );
         }
         let role = process_role
@@ -431,11 +442,36 @@ fn read_network_smoke_rendezvous() -> Result<Option<NetworkSmokeRendezvous>, Str
 }
 
 #[tauri::command]
+fn network_smoke_database() -> Result<Option<String>, String> {
+    if std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref() != Some("1") {
+        return Ok(None);
+    }
+    let mode = std::env::var("COC_ROOM_NETWORK_SMOKE_MODE").unwrap_or_default();
+    if !matches!(mode.as_str(), "session-direct" | "session-relay") {
+        return Ok(None);
+    }
+    let name = std::env::var("COC_ROOM_NETWORK_SMOKE_DATABASE")
+        .map_err(|_| "session smoke database name is required".to_string())?;
+    if !(5..=100).contains(&name.len())
+        || !name.ends_with(".db")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err("session smoke database name must be a safe .db file name".to_string());
+    }
+    Ok(Some(name))
+}
+
+#[tauri::command]
 fn finish_network_smoke(app: tauri::AppHandle, report: NetworkSmokeReport) -> Result<(), String> {
     if std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref() != Some("1") {
         return Err("network smoke mode is not enabled".to_string());
     }
-    if !matches!(report.mode.as_str(), "direct" | "relay" | "storage")
+    if !matches!(
+        report.mode.as_str(),
+        "direct" | "relay" | "storage" | "session-direct" | "session-relay"
+    )
         || report.message.len() > 4_000
     {
         return Err("network smoke report is invalid".to_string());
@@ -890,6 +926,7 @@ pub fn run() {
             network_smoke_config,
             publish_network_smoke_rendezvous,
             read_network_smoke_rendezvous,
+            network_smoke_database,
             finish_network_smoke,
             write_storage_smoke_exports,
             select_module_source,
@@ -1056,6 +1093,18 @@ mod tests {
         .expect("enabled smoke should return a configuration");
         assert_eq!(config.process_role.as_deref(), Some("host"));
         assert_eq!(config.run_id.as_deref(), Some("run_1234567890abcdef"));
+        let session_config = parse_network_smoke_config(
+            Some("1"),
+            Some("http://127.0.0.1:8787"),
+            Some("session-relay"),
+            Some("player"),
+            Some(&coordination_text),
+            Some("run_1234567890abcdef"),
+        )
+        .expect("RoomSession multi-process configuration should be accepted")
+        .expect("enabled RoomSession smoke should return a configuration");
+        assert_eq!(session_config.mode, "session-relay");
+        assert_eq!(session_config.process_role.as_deref(), Some("player"));
         assert!(parse_network_smoke_config(
             Some("1"),
             None,

@@ -13,8 +13,13 @@ import { runNetworkDiagnostic, type NetworkDiagnosticMode } from "./lib/network-
 import {
   runProcessNetworkDiagnostic,
   type NetworkProcessRole,
+  type NetworkSmokeMode,
   type NetworkSmokeRendezvous,
 } from "./lib/process-network-diagnostic";
+import {
+  runProcessRoomSessionDiagnostic,
+  type RoomSessionSmokeMode,
+} from "./lib/process-room-session-diagnostic";
 import {
   getModuleParserProvenance,
   parseModule,
@@ -24,7 +29,7 @@ import {
 import { createStorageSmokeMarker } from "./lib/storage-smoke";
 import "./styles.css";
 
-type AutomatedSmokeMode = NetworkDiagnosticMode | "storage";
+type AutomatedSmokeMode = NetworkSmokeMode | "storage";
 
 interface NetworkSmokeConfig {
   relayUrl?: string;
@@ -70,16 +75,26 @@ async function runAutomatedSmoke(config: NetworkSmokeConfig): Promise<void> {
   try {
     const result = config.mode === "storage"
       ? await runStorageSmoke()
+      : (config.mode === "session-direct" || config.mode === "session-relay") && config.processRole
+        ? await runProcessRoomSessionDiagnostic({
+          relayOrigin: requireRelayUrl(config),
+          mode: config.mode as RoomSessionSmokeMode,
+          role: config.processRole,
+          runId: requireProcessRunId(config),
+          repository: await getRepository(),
+          publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
+          readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
+        })
       : config.processRole
         ? await runProcessNetworkDiagnostic({
           relayOrigin: requireRelayUrl(config),
-          mode: config.mode,
+          mode: config.mode as NetworkDiagnosticMode,
           role: config.processRole,
           runId: requireProcessRunId(config),
           publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
           readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
         })
-        : await runNetworkDiagnostic(requireRelayUrl(config), config.mode);
+        : await runNetworkDiagnostic(requireRelayUrl(config), config.mode as NetworkDiagnosticMode);
     root.render(<SmokeStatus message={`${smokeModeLabel(config.mode)}自检通过`} />);
     await invoke("finish_network_smoke", {
       report: {
@@ -250,6 +265,8 @@ function requireProcessRunId(config: NetworkSmokeConfig): string {
 }
 
 function smokeModeLabel(mode: AutomatedSmokeMode): string {
+  if (mode === "session-direct") return "RoomSession WebRTC direct";
+  if (mode === "session-relay") return "RoomSession forced relay";
   if (mode === "direct") return "WebRTC 直连";
   if (mode === "relay") return "强制中继";
   return "SQLite、导出与 sidecar";
