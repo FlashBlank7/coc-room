@@ -88,6 +88,12 @@ The compiled LangGraph is linear at the document level:
 5. validate the complete `ModulePackageV1`;
 6. summarize issues for editor review.
 
+The extraction Schema preserves location aliases, NPC traits and explicit CoC character
+statistics, core-clue flags, and independent player-facing handouts with scene links.
+Every one of these entities carries verified source references. Chapters are deliberately
+not part of the fragment Schema: chapter grouping is created manually in the editor, so
+the parser always returns an empty chapter list instead of inventing a structure.
+
 Empty, incomplete/truncated, invalid JSON, and schema-invalid responses are retried only
 for their source chunk. Non-retryable HTTP failures stop that chunk immediately. The
 Responses API call is non-streaming and uses `POST /responses`, `text.format.type =

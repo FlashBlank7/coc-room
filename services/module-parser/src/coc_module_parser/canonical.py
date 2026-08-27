@@ -302,6 +302,10 @@ def _append_features(description: str, features: list[str]) -> str:
     return (description + suffix)[:20_000]
 
 
+def _unique_ids(values: list[str], limit: int) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))[:limit]
+
+
 def to_canonical_package(
     package: ModulePackageV1,
     *,
@@ -311,12 +315,43 @@ def to_canonical_package(
 ) -> CanonicalModulePackageV1:
     source_id = stable_id("source", package.source.sha256)
     generated = _timestamp(generated_at)
-    handout_by_clue: dict[str, str] = {
-        clue.id: stable_id("handout", clue.id)
-        for clue in package.clues
-        if clue.handout_text
+    used_handout_ids = {
+        item.id
+        for item in (
+            package.chapters
+            + package.scenes
+            + package.locations
+            + package.npcs
+            + package.clues
+            + package.handouts
+            + package.suggested_checks
+            + package.keeper_notes
+        )
     }
-    handouts = [
+    handout_by_clue: dict[str, str] = {}
+    for clue in package.clues:
+        if not clue.handout_text:
+            continue
+        suffix = 0
+        candidate = stable_id("handout", clue.id)
+        while candidate in used_handout_ids:
+            suffix += 1
+            candidate = stable_id("handout", f"{clue.id}:{suffix}")
+        used_handout_ids.add(candidate)
+        handout_by_clue[clue.id] = candidate
+
+    independent_handouts = [
+        CanonicalHandoutV1(
+            id=handout.id,
+            name=handout.title,
+            title=handout.title,
+            description=handout.description,
+            content=handout.content,
+            sourceRefs=_source_refs(handout.source_refs, source_id),
+        )
+        for handout in package.handouts
+    ]
+    legacy_clue_handouts = [
         CanonicalHandoutV1(
             id=handout_by_clue[clue.id],
             name=clue.title[:240],
@@ -328,6 +363,14 @@ def to_canonical_package(
         for clue in package.clues
         if clue.id in handout_by_clue
     ]
+    handouts = (independent_handouts + legacy_clue_handouts)[:5_000]
+    emitted_handout_ids = {handout.id for handout in handouts}
+    handouts_by_scene: dict[str, list[str]] = {}
+    for handout in package.handouts:
+        if handout.id not in emitted_handout_ids:
+            continue
+        for scene_id in handout.scene_ids:
+            handouts_by_scene.setdefault(scene_id, []).append(handout.id)
     overview = package.overview[:50_000]
     summary = (package.overview or normalized_text)[:8_000]
     authors = [package.metadata.author[:160]] if package.metadata.author else []
@@ -375,11 +418,23 @@ def to_canonical_package(
                 locationIds=scene.location_ids[:100],
                 npcIds=scene.npc_ids[:200],
                 clueIds=scene.clue_ids[:200],
-                handoutIds=[
-                    handout_by_clue[clue_id]
-                    for clue_id in scene.clue_ids
-                    if clue_id in handout_by_clue
-                ][:200],
+                handoutIds=_unique_ids(
+                    [
+                        *[
+                            handout_id
+                            for handout_id in scene.handout_ids
+                            if handout_id in emitted_handout_ids
+                        ],
+                        *handouts_by_scene.get(scene.id, []),
+                        *[
+                            handout_by_clue[clue_id]
+                            for clue_id in scene.clue_ids
+                            if clue_id in handout_by_clue
+                            and handout_by_clue[clue_id] in emitted_handout_ids
+                        ],
+                    ],
+                    200,
+                ),
                 suggestedCheckIds=scene.suggested_check_ids[:100],
                 keeperNotes="\n\n".join(scene.keeper_notes)[:20_000],
                 sourceRefs=_source_refs(scene.source_refs, source_id),
@@ -391,7 +446,7 @@ def to_canonical_package(
                 id=location.id,
                 name=location.name[:240],
                 description=_append_features(location.description, location.features),
-                aliases=[],
+                aliases=location.aliases,
                 sourceRefs=_source_refs(location.source_refs, source_id),
             )
             for location in package.locations[:2_000]
@@ -404,6 +459,16 @@ def to_canonical_package(
                 role=npc.role[:1_000],
                 motivation="\n".join(npc.motivations)[:4_000],
                 traits=[trait[:500] for trait in npc.traits[:100] if trait],
+                character=(
+                    CanonicalCharacterV1(
+                        characteristics=npc.character.characteristics,
+                        skills=npc.character.skills,
+                        hitPoints=npc.character.hit_points,
+                        sanity=npc.character.sanity,
+                    )
+                    if npc.character is not None
+                    else None
+                ),
                 sourceRefs=_source_refs(npc.source_refs, source_id),
             )
             for npc in package.npcs[:5_000]
@@ -414,12 +479,12 @@ def to_canonical_package(
                 name=clue.title[:240],
                 description=clue.content[:20_000],
                 revealText=(clue.handout_text or "")[:20_000],
-                isCore=False,
+                isCore=clue.is_core,
                 sourceRefs=_source_refs(clue.source_refs, source_id),
             )
             for clue in package.clues[:5_000]
         ],
-        handouts=handouts[:5_000],
+        handouts=handouts,
         suggestedChecks=[
             CanonicalSuggestedCheckV1(
                 id=check.id,

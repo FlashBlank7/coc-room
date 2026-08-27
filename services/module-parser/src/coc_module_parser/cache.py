@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from .models import ModuleFragmentV1
 
 
-CACHE_VERSION = "module-fragment-cache-v2"
+CACHE_VERSION = "module-fragment-cache-v3-lossless-entities"
 
 
 @dataclass(frozen=True, slots=True)

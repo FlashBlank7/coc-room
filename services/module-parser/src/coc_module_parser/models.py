@@ -70,7 +70,34 @@ class LocationV1(StrictModel):
     name: str = Field(min_length=1, max_length=300)
     description: str = Field(default="", max_length=30_000)
     features: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Alternative names for this same place stated in the source.",
+    )
     source_refs: list[SourceRefV1] = Field(default_factory=list)
+
+    @field_validator("aliases")
+    @classmethod
+    def unique_aliases(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        if any(len(value) > 160 for value in cleaned):
+            raise ValueError("location aliases must contain at most 160 characters")
+        return cleaned
+
+
+class CharacterV1(StrictModel):
+    characteristics: dict[str, int] = Field(default_factory=dict)
+    skills: dict[str, int] = Field(default_factory=dict)
+    hit_points: int | None = Field(default=None, ge=0, le=99)
+    sanity: int | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("characteristics", "skills")
+    @classmethod
+    def validate_percentages(cls, values: dict[str, int]) -> dict[str, int]:
+        if any(isinstance(value, bool) or not 0 <= value <= 100 for value in values.values()):
+            raise ValueError("characteristic and skill values must be integers from 0 to 100")
+        return values
 
 
 class NPCV1(StrictModel):
@@ -78,9 +105,21 @@ class NPCV1(StrictModel):
     name: str = Field(min_length=1, max_length=300)
     description: str = Field(default="", max_length=30_000)
     role: str = Field(default="", max_length=1_000)
-    motivations: list[str] = Field(default_factory=list)
-    traits: list[str] = Field(default_factory=list)
+    motivations: list[str] = Field(default_factory=list, max_length=100)
+    traits: list[str] = Field(default_factory=list, max_length=100)
+    character: CharacterV1 | None = Field(
+        default=None,
+        description="Only CoC statistics explicitly printed in the source; never infer values.",
+    )
     source_refs: list[SourceRefV1] = Field(default_factory=list)
+
+    @field_validator("traits")
+    @classmethod
+    def validate_traits(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        if any(len(value) > 500 for value in cleaned):
+            raise ValueError("NPC traits must contain at most 500 characters")
+        return cleaned
 
 
 class ClueV1(StrictModel):
@@ -98,6 +137,10 @@ class ClueV1(StrictModel):
             "Exact player-safe text explicitly present in the source. Leave null when the "
             "source does not provide a handout or player-facing wording."
         ),
+    )
+    is_core: bool = Field(
+        default=False,
+        description="True only when the source makes this clue essential to progression.",
     )
     scene_ids: list[str] = Field(default_factory=list)
     location_ids: list[str] = Field(default_factory=list)
@@ -128,8 +171,22 @@ class SceneV1(StrictModel):
     location_ids: list[str] = Field(default_factory=list)
     npc_ids: list[str] = Field(default_factory=list)
     clue_ids: list[str] = Field(default_factory=list)
+    handout_ids: list[str] = Field(default_factory=list, max_length=200)
     suggested_check_ids: list[str] = Field(default_factory=list)
     keeper_notes: list[str] = Field(default_factory=list)
+    source_refs: list[SourceRefV1] = Field(default_factory=list)
+
+
+class HandoutV1(StrictModel):
+    id: str = Field(pattern=ENTITY_ID_PATTERN)
+    title: str = Field(min_length=1, max_length=240)
+    description: str = Field(default="", max_length=20_000)
+    content: str = Field(
+        min_length=1,
+        max_length=50_000,
+        description="Exact player-facing document text from the source, not a keeper summary.",
+    )
+    scene_ids: list[str] = Field(default_factory=list)
     source_refs: list[SourceRefV1] = Field(default_factory=list)
 
 
@@ -172,6 +229,7 @@ class ModulePackageV1(StrictModel):
     locations: list[LocationV1] = Field(default_factory=list)
     npcs: list[NPCV1] = Field(default_factory=list)
     clues: list[ClueV1] = Field(default_factory=list)
+    handouts: list[HandoutV1] = Field(default_factory=list, max_length=5_000)
     suggested_checks: list[SuggestedCheckV1] = Field(default_factory=list)
     keeper_notes: list[KeeperNoteV1] = Field(default_factory=list)
     relations: list[EntityRelationV1] = Field(default_factory=list)
@@ -187,6 +245,7 @@ class ModulePackageV1(StrictModel):
             ("location", self.locations),
             ("npc", self.npcs),
             ("clue", self.clues),
+            ("handout", self.handouts),
             ("suggested_check", self.suggested_checks),
             ("keeper_note", self.keeper_notes),
         ]
@@ -203,6 +262,7 @@ class ModulePackageV1(StrictModel):
         location_ids = {item.id for item in self.locations}
         npc_ids = {item.id for item in self.npcs}
         clue_ids = {item.id for item in self.clues}
+        handout_ids = {item.id for item in self.handouts}
         check_ids = {item.id for item in self.suggested_checks}
 
         def require(values: list[str], allowed: set[str], context: str) -> None:
@@ -216,6 +276,7 @@ class ModulePackageV1(StrictModel):
             require(scene.location_ids, location_ids, f"scene {scene.id} locations")
             require(scene.npc_ids, npc_ids, f"scene {scene.id} npcs")
             require(scene.clue_ids, clue_ids, f"scene {scene.id} clues")
+            require(scene.handout_ids, handout_ids, f"scene {scene.id} handouts")
             require(
                 scene.suggested_check_ids,
                 check_ids,
@@ -224,6 +285,8 @@ class ModulePackageV1(StrictModel):
         for clue in self.clues:
             require(clue.scene_ids, scene_ids, f"clue {clue.id} scenes")
             require(clue.location_ids, location_ids, f"clue {clue.id} locations")
+        for handout in self.handouts:
+            require(handout.scene_ids, scene_ids, f"handout {handout.id} scenes")
         for check in self.suggested_checks:
             if check.scene_id is not None:
                 require([check.scene_id], scene_ids, f"suggested check {check.id}")
@@ -239,6 +302,7 @@ class ModulePackageV1(StrictModel):
             + self.locations
             + self.npcs
             + self.clues
+            + self.handouts
             + self.suggested_checks
             + self.keeper_notes
             + self.relations
@@ -268,6 +332,7 @@ class ModuleFragmentV1(StrictModel):
     locations: list[LocationV1] = Field(default_factory=list)
     npcs: list[NPCV1] = Field(default_factory=list)
     clues: list[ClueV1] = Field(default_factory=list)
+    handouts: list[HandoutV1] = Field(default_factory=list, max_length=5_000)
     suggested_checks: list[SuggestedCheckV1] = Field(default_factory=list)
     keeper_notes: list[KeeperNoteV1] = Field(default_factory=list)
     relations: list[EntityRelationV1] = Field(default_factory=list)
@@ -337,8 +402,11 @@ _MIGRATION_KEY_ALIASES = {
     "locationIds": "location_ids",
     "npcIds": "npc_ids",
     "clueIds": "clue_ids",
+    "handoutIds": "handout_ids",
     "suggestedCheckIds": "suggested_check_ids",
     "handoutText": "handout_text",
+    "isCore": "is_core",
+    "hitPoints": "hit_points",
     "sceneId": "scene_id",
     "sourceId": "source_id",
     "targetId": "target_id",

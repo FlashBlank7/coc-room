@@ -75,6 +75,47 @@ def _unique_refs(values: list[SourceRefV1 | dict[str, Any]]) -> list[SourceRefV1
     return result
 
 
+def _merge_nested_dicts(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Merge complementary structured fields while keeping first-seen conflicts stable."""
+
+    merged = dict(existing)
+    for key, value in incoming.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_nested_dicts(current, value)
+        elif current in (None, "", [], {}) and value not in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
+def _add_visible_aliases(
+    aliases: dict[str, str],
+    entities: list[Any],
+    *,
+    field_name: str,
+    issues: list[ParseIssueV1],
+) -> None:
+    ambiguous: set[str] = set()
+    for entity in entities:
+        for value in getattr(entity, field_name):
+            for key in {value, _lookup_key(value)}:
+                existing = aliases.get(key)
+                if existing is not None and existing != entity.id:
+                    ambiguous.add(key)
+                elif key not in ambiguous:
+                    aliases[key] = entity.id
+    for key in ambiguous:
+        aliases.pop(key, None)
+        issues.append(
+            ParseIssueV1(
+                severity=IssueSeverity.WARNING,
+                code="AMBIGUOUS_ENTITY_ALIAS",
+                stage="resolve_references",
+                message=f"Ignored ambiguous alias {key!r} shared by multiple entities.",
+            )
+        )
+
+
 def _merge_entities(
     items: list[Any],
     *,
@@ -110,6 +151,10 @@ def _merge_entities(
                     current_data[field_name] = _unique_refs((existing or []) + value)
                 else:
                     current_data[field_name] = _unique_strings((existing or []) + value)
+            elif isinstance(value, dict) and isinstance(existing, dict):
+                current_data[field_name] = _merge_nested_dicts(existing, value)
+            elif isinstance(value, bool) and isinstance(existing, bool):
+                current_data[field_name] = existing or value
             elif isinstance(value, str) and isinstance(existing, str):
                 if len(value) > len(existing):
                     current_data[field_name] = value
@@ -558,6 +603,19 @@ class ModuleParser:
             semantic_key=lambda item: f"{item.title}|{item.content}",
             issues=issues,
         )
+        handouts, handout_aliases = _merge_entities(
+            [item for fragment in fragments for item in fragment.handouts],
+            kind="handout",
+            label_field="title",
+            semantic_key=None,
+            issues=issues,
+        )
+        _add_visible_aliases(
+            location_aliases,
+            locations,
+            field_name="aliases",
+            issues=issues,
+        )
 
         for scene in scenes:
             scene.location_ids = _resolve_many(
@@ -573,6 +631,12 @@ class ModuleParser:
                 scene.clue_ids,
                 clue_aliases,
                 context=f"scene {scene.id} clues",
+                issues=issues,
+            )
+            scene.handout_ids = _resolve_many(
+                scene.handout_ids,
+                handout_aliases,
+                context=f"scene {scene.id} handouts",
                 issues=issues,
             )
             scene.suggested_check_ids = _resolve_many(
@@ -603,10 +667,30 @@ class ModuleParser:
             note.scene_ids = _resolve_many(
                 note.scene_ids, scene_aliases, context=f"note {note.id} scenes", issues=issues
             )
+        for handout in handouts:
+            handout.scene_ids = _resolve_many(
+                handout.scene_ids,
+                scene_aliases,
+                context=f"handout {handout.id} scenes",
+                issues=issues,
+            )
+
+        scene_by_id = {scene.id: scene for scene in scenes}
+        handout_by_id = {handout.id: handout for handout in handouts}
+        for handout in handouts:
+            for scene_id in handout.scene_ids:
+                scene = scene_by_id[scene_id]
+                if handout.id not in scene.handout_ids:
+                    scene.handout_ids.append(handout.id)
+        for scene in scenes:
+            for handout_id in scene.handout_ids:
+                handout = handout_by_id[handout_id]
+                if scene.id not in handout.scene_ids:
+                    handout.scene_ids.append(scene.id)
 
         chunk_map = {chunk.id: chunk for chunk in state["chunks"]}
         source_length = len(state["normalized_text"])
-        for item in scenes + locations + npcs + clues + checks + notes:
+        for item in scenes + locations + npcs + clues + handouts + checks + notes:
             item.source_refs = _clean_refs(
                 item.source_refs,
                 chunks=chunk_map,
@@ -622,6 +706,7 @@ class ModuleParser:
             location_aliases,
             npc_aliases,
             clue_aliases,
+            handout_aliases,
             check_aliases,
             note_aliases,
         ):
@@ -724,11 +809,14 @@ class ModuleParser:
                 char_count=source_length,
             ),
             overview=overview,
+            # Chapters are an editor-owned grouping. They are deliberately absent
+            # from ModuleFragmentV1 and are never inferred from model output.
             chapters=[],
             scenes=scenes,
             locations=locations,
             npcs=npcs,
             clues=clues,
+            handouts=handouts,
             suggested_checks=checks,
             keeper_notes=notes,
             relations=relations,

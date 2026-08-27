@@ -8,9 +8,13 @@ from pydantic import ValidationError
 
 from coc_module_parser.canonical import CanonicalModulePackageV1, to_canonical_package
 from coc_module_parser.models import (
+    CharacterV1,
     ClueV1,
+    HandoutV1,
+    LocationV1,
     ModuleMetadataV1,
     ModulePackageV1,
+    NPCV1,
     SceneV1,
     SourceDocumentV1,
     SourceRefV1,
@@ -48,7 +52,32 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
             SceneV1(
                 id="scene:test",
                 title="Scene",
+                location_ids=["location:test"],
+                npc_ids=["npc:test"],
                 clue_ids=["clue:test"],
+                handout_ids=["handout:test"],
+                source_refs=[source_ref],
+            )
+        ],
+        locations=[
+            LocationV1(
+                id="location:test",
+                name="Archive",
+                aliases=["Old Library", "West Annex"],
+                source_refs=[source_ref],
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:test",
+                name="Keeper",
+                traits=["stern", "ink-stained hands"],
+                character=CharacterV1(
+                    characteristics={"STR": 55, "INT": 80},
+                    skills={"Library Use": 70},
+                    hit_points=11,
+                    sanity=62,
+                ),
                 source_refs=[source_ref],
             )
         ],
@@ -58,6 +87,17 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
                 title="Letter",
                 content="A letter",
                 handout_text="Read me",
+                is_core=True,
+                scene_ids=["scene:test"],
+                source_refs=[source_ref],
+            )
+        ],
+        handouts=[
+            HandoutV1(
+                id="handout:test",
+                title="Invitation",
+                description="A sealed invitation",
+                content="Come at midnight.",
                 scene_ids=["scene:test"],
                 source_refs=[source_ref],
             )
@@ -95,8 +135,23 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
         "suggestedCheckIds",
         "keeperNotes",
     }
-    assert payload["scenes"][0]["handoutIds"] == [payload["handouts"][0]["id"]]
+    assert payload["chapters"] == []
+    assert payload["locations"][0]["aliases"] == ["Old Library", "West Annex"]
+    assert payload["npcs"][0]["traits"] == ["stern", "ink-stained hands"]
+    assert payload["npcs"][0]["character"] == {
+        "characteristics": {"STR": 55, "INT": 80},
+        "skills": {"Library Use": 70},
+        "hitPoints": 11,
+        "sanity": 62,
+    }
+    assert payload["scenes"][0]["handoutIds"] == [
+        "handout:test",
+        next(item["id"] for item in payload["handouts"] if item["id"] != "handout:test"),
+    ]
+    assert payload["handouts"][0]["content"] == "Come at midnight."
+    assert payload["handouts"][0]["sourceRefs"] == payload["scenes"][0]["sourceRefs"]
     assert payload["clues"][0]["revealText"] == "Read me"
+    assert payload["clues"][0]["isCore"] is True
     assert payload["scenes"][0]["sourceRefs"][0]["sourceId"] == payload["sourceDocuments"][0]["id"]
     assert CanonicalModulePackageV1.model_validate(payload) == canonical
 

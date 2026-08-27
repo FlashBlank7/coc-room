@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from coc_module_parser.client import (
@@ -8,8 +9,13 @@ from coc_module_parser.client import (
     InvalidStructureError,
     SequenceExtractor,
 )
+from coc_module_parser.cache import CACHE_VERSION, CacheIdentity
 from coc_module_parser.models import (
+    CharacterV1,
+    ClueV1,
     FragmentMetadataV1,
+    HandoutV1,
+    LocationV1,
     ModuleFragmentV1,
     NPCV1,
     ParseConfig,
@@ -32,6 +38,17 @@ def test_deterministic_workflow_runs_without_network() -> None:
     assert result.module.chapters == []
 
 
+def test_deterministic_mock_extracts_independent_handout_without_chapters() -> None:
+    source = "# Test\n\n## Arrival\nHandout: Sealed invitation"
+    result = ModuleParser().parse(ParseConfig(source_text=source, mock=True))
+
+    assert result.module.chapters == []
+    assert [item.title for item in result.module.handouts] == ["Sealed invitation"]
+    assert result.module.scenes[0].handout_ids == [result.module.handouts[0].id]
+    assert result.module.handouts[0].scene_ids == [result.module.scenes[0].id]
+    assert result.module.handouts[0].source_refs[0].excerpt == "Handout: Sealed invitation"
+
+
 def test_invalid_fragment_retries_only_failed_chunk() -> None:
     extractor = SequenceExtractor(
         [InvalidStructureError("bad"), EmptyResponseError("empty"), ModuleFragmentV1()]
@@ -43,6 +60,73 @@ def test_invalid_fragment_retries_only_failed_chunk() -> None:
     assert result.extraction_attempts == 3
     assert any(issue.code == "EXTRACTION_RETRIED" for issue in result.issues)
     assert result.status == "ready_for_review"
+
+
+def test_chunk_retry_preserves_lossless_entity_fields() -> None:
+    source = "retry evidence"
+    source_ref = SourceRefV1(
+        chunk_id="chunk-0001", start=0, end=len(source), excerpt=source
+    )
+    fragment = ModuleFragmentV1(
+        scenes=[
+            SceneV1(
+                id="scene:raw",
+                title="Arrival",
+                handout_ids=["handout:raw"],
+                source_refs=[source_ref],
+            )
+        ],
+        locations=[
+            LocationV1(
+                id="location:raw",
+                name="Archive",
+                aliases=["Old Library"],
+                source_refs=[source_ref],
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:raw",
+                name="Keeper",
+                traits=["stern"],
+                character=CharacterV1(
+                    characteristics={"INT": 80}, skills={"Library Use": 70}
+                ),
+                source_refs=[source_ref],
+            )
+        ],
+        clues=[
+            ClueV1(
+                id="clue:raw",
+                title="Key",
+                content="Essential clue",
+                is_core=True,
+                source_refs=[source_ref],
+            )
+        ],
+        handouts=[
+            HandoutV1(
+                id="handout:raw",
+                title="Letter",
+                content="Player text",
+                scene_ids=["scene:raw"],
+                source_refs=[source_ref],
+            )
+        ],
+    )
+    extractor = SequenceExtractor([InvalidStructureError("retry me"), fragment])
+
+    result = ModuleParser(extractor).parse(
+        ParseConfig(source_text=source, mock=True, max_retries=1)
+    )
+
+    assert result.module.locations[0].aliases == ["Old Library"]
+    assert result.module.npcs[0].traits == ["stern"]
+    assert result.module.npcs[0].character == fragment.npcs[0].character
+    assert result.module.clues[0].is_core is True
+    assert result.module.handouts[0].content == "Player text"
+    assert result.module.handouts[0].source_refs == [source_ref]
+    assert any(issue.code == "EXTRACTION_RETRIED" for issue in result.issues)
 
 
 def test_exhausted_retry_returns_valid_partial_draft() -> None:
@@ -183,6 +267,177 @@ def test_cache_identity_includes_extraction_prompt_version(tmp_path: Path) -> No
         "privacy-prompt-v1",
         "privacy-prompt-v2",
     }
+    assert CACHE_VERSION == "module-fragment-cache-v3-lossless-entities"
+
+
+def test_lossless_schema_cache_version_cannot_reuse_v2_entries() -> None:
+    current = CacheIdentity(
+        source_sha256="a" * 64,
+        chunk_id="chunk-0001",
+        chunk_sha256="b" * 64,
+        chunk_start=0,
+        chunk_end=10,
+        max_chunk_chars=1_000,
+        overlap_chars=0,
+        extractor="deepseek-responses",
+        model="test-model",
+        base_url="https://example.invalid",
+        max_output_tokens=1_000,
+        extraction_prompt_version="v4",
+        schema_sha256="c" * 64,
+    )
+    old = replace(current, cache_version="module-fragment-cache-v2")
+
+    assert current.cache_version == CACHE_VERSION
+    assert current.key() != old.key()
+
+
+def test_cross_chunk_merge_preserves_structured_fields_and_validated_refs() -> None:
+    first_evidence = "alpha evidence"
+    second_evidence = "beta evidence"
+    source = first_evidence + ("x" * (1_000 - len(first_evidence))) + second_evidence
+    first_ref = SourceRefV1(
+        chunk_id="chunk-0001",
+        start=0,
+        end=len(first_evidence),
+        excerpt=first_evidence,
+    )
+    # A real model sometimes returns chunk-local offsets despite the prompt.
+    second_ref = SourceRefV1(
+        chunk_id="chunk-0002",
+        start=0,
+        end=len(second_evidence),
+        excerpt=second_evidence,
+    )
+    first = ModuleFragmentV1(
+        scenes=[
+            SceneV1(
+                id="scene:first",
+                title="Arrival",
+                location_ids=["Old Library"],
+                handout_ids=["handout:first"],
+                source_refs=[first_ref],
+            )
+        ],
+        locations=[
+            LocationV1(
+                id="location:first",
+                name="Archive",
+                aliases=["Old Library"],
+                source_refs=[first_ref],
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:first",
+                name="Keeper",
+                traits=["stern"],
+                character=CharacterV1(characteristics={"STR": 60}),
+                source_refs=[first_ref],
+            )
+        ],
+        clues=[
+            ClueV1(
+                id="clue:first",
+                title="Key",
+                content="Essential clue",
+                is_core=False,
+                source_refs=[first_ref],
+            )
+        ],
+        handouts=[
+            HandoutV1(
+                id="handout:first",
+                title="Letter",
+                content="Player text",
+                scene_ids=["scene:first"],
+                source_refs=[first_ref],
+            )
+        ],
+    )
+    second = ModuleFragmentV1(
+        scenes=[
+            SceneV1(
+                id="scene:second",
+                title="Arrival",
+                location_ids=["West Annex"],
+                handout_ids=["Letter"],
+                source_refs=[second_ref],
+            )
+        ],
+        locations=[
+            LocationV1(
+                id="location:second",
+                name="Archive",
+                aliases=["West Annex"],
+                source_refs=[second_ref],
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:second",
+                name="Keeper",
+                traits=["quiet"],
+                character=CharacterV1(
+                    skills={"Spot Hidden": 55}, hit_points=12, sanity=70
+                ),
+                source_refs=[second_ref],
+            )
+        ],
+        clues=[
+            ClueV1(
+                id="clue:second",
+                title="Key",
+                content="Essential clue",
+                is_core=True,
+                source_refs=[second_ref],
+            )
+        ],
+        handouts=[
+            HandoutV1(
+                id="handout:second",
+                title="Letter",
+                description="A complete player-facing letter",
+                content="Player text",
+                source_refs=[second_ref],
+            )
+        ],
+    )
+
+    result = ModuleParser(SequenceExtractor([first, second])).parse(
+        ParseConfig(
+            source_text=source,
+            mock=True,
+            max_chunk_chars=1_000,
+            chunk_overlap_chars=0,
+        )
+    )
+
+    assert result.module.chapters == []
+    assert result.module.locations[0].aliases == ["Old Library", "West Annex"]
+    assert result.module.scenes[0].location_ids == [result.module.locations[0].id]
+    assert result.module.npcs[0].traits == ["stern", "quiet"]
+    assert result.module.npcs[0].character == CharacterV1(
+        characteristics={"STR": 60},
+        skills={"Spot Hidden": 55},
+        hit_points=12,
+        sanity=70,
+    )
+    assert result.module.clues[0].is_core is True
+    assert result.module.handouts[0].description == "A complete player-facing letter"
+    assert result.module.scenes[0].handout_ids == [result.module.handouts[0].id]
+    assert result.module.handouts[0].scene_ids == [result.module.scenes[0].id]
+    for entity in (
+        result.module.scenes
+        + result.module.locations
+        + result.module.npcs
+        + result.module.clues
+        + result.module.handouts
+    ):
+        assert [(ref.start, ref.end) for ref in entity.source_refs] == [
+            (0, len(first_evidence)),
+            (1_000, 1_000 + len(second_evidence)),
+        ]
 
 
 def test_overlapping_chunks_merge_nested_source_references() -> None:
