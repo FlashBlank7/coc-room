@@ -82,6 +82,35 @@ describe("MemoryRepository", () => {
     expect(await repository.listModules()).toEqual([
       expect.objectContaining({ package: expect.objectContaining({ revision: 2 }), sourceText: "source v2" }),
     ]);
+    expect((await repository.listModules({ moduleId: revisionOne.moduleId, latestOnly: false }))
+      .map((item) => [item.package.revision, item.sourceText])).toEqual([
+      [2, "source v2"],
+      [1, "source v1"],
+    ]);
+    expect(await repository.getModule(revisionOne.moduleId, 1)).toEqual({
+      package: revisionOne,
+      sourceText: "source v1",
+    });
+    expect((await repository.getModule(revisionOne.moduleId))?.package.revision).toBe(2);
+  });
+
+  it("deletes one module revision without deleting its remaining history", async () => {
+    const repository = new MemoryRepository();
+    const revisionOne = modulePackage("module-delete-revision", 1, "2026-01-01T00:00:00.000Z");
+    const revisionTwo = {
+      ...revisionOne,
+      revision: 2,
+      metadata: { ...revisionOne.metadata, updatedAt: "2026-01-02T00:00:00.000Z" },
+    };
+    await repository.saveModule({ package: revisionOne, sourceText: "one" });
+    await repository.saveModule({ package: revisionTwo, sourceText: "two" });
+
+    await repository.deleteModuleRevision(revisionOne.moduleId, 2);
+    expect((await repository.getModule(revisionOne.moduleId))?.package.revision).toBe(1);
+    expect(await repository.getModule(revisionOne.moduleId, 2)).toBeUndefined();
+
+    await repository.deleteModule(revisionOne.moduleId);
+    expect(await repository.listModules({ moduleId: revisionOne.moduleId, latestOnly: false })).toEqual([]);
   });
 
   it("orders memory-backed modules like SQLite and returns defensive copies", async () => {

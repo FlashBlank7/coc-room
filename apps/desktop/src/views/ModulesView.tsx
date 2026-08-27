@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { BookOpen, Code2, Download, Eye, FileInput, FlaskConical, LayoutList, Play, Save, Trash2, Upload } from "lucide-react";
+import { BookOpen, Code2, Download, Eye, FileInput, FlaskConical, History, LayoutList, Play, Save, Trash2, Upload } from "lucide-react";
 import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import { getRepository } from "../data/repository";
+import { getRepository, type StoredModule } from "../data/repository";
 import { parseModule, selectModuleSource, type ParserError, type ParserProgress, type ParserResult } from "../lib/module-parser";
 import type { RoomSession } from "../network/RoomSession";
 import { useAppStore } from "../store/app-store";
@@ -24,6 +24,8 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const [draftSourceText, setDraftSourceText] = useState("");
   const [draftDirty, setDraftDirty] = useState(false);
   const [selectedModuleId, setSelectedModuleId] = useState<string>();
+  const [selectedRevision, setSelectedRevision] = useState<number>();
+  const [moduleHistories, setModuleHistories] = useState<Record<string, StoredModule[]>>({});
   const [workspaceMode, setWorkspaceMode] = useState<"browse" | "json">("browse");
   const [progress, setProgress] = useState<ParserProgress[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -35,21 +37,61 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
   }, [draft]);
 
+  const rememberHistory = useCallback((moduleId: string, history: StoredModule[]) => {
+    setModuleHistories((current) => ({ ...current, [moduleId]: history }));
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    const repository = await getRepository();
+    const latest = await repository.listModules();
+    setModules(latest.map((item) => item.package));
+    const all = await repository.listModules({ latestOnly: false });
+    const grouped = all.reduce<Record<string, StoredModule[]>>((history, item) => {
+      (history[item.package.moduleId] ??= []).push(item);
+      return history;
+    }, {});
+    setModuleHistories(grouped);
+    return latest;
+  }, [setModules]);
+
+  const showStoredModule = useCallback((stored: StoredModule) => {
+    setSelectedModuleId(stored.package.moduleId);
+    setSelectedRevision(stored.package.revision);
+    setDraft(JSON.stringify(stored.package, null, 2));
+    setDraftSourceText(stored.sourceText);
+    setDraftDirty(false);
+    setWorkspaceMode("browse");
+    setError(undefined);
+  }, []);
+
   const openModule = useCallback(async (modulePackage: ModulePackageV1) => {
     try {
       const repository = await getRepository();
-      const stored = (await repository.listModules()).find((item) => item.package.moduleId === modulePackage.moduleId);
-      const openedPackage = stored?.package ?? modulePackage;
-      setSelectedModuleId(openedPackage.moduleId);
-      setDraft(JSON.stringify(openedPackage, null, 2));
-      setDraftSourceText(stored?.sourceText ?? "");
-      setDraftDirty(false);
-      setWorkspaceMode("browse");
-      setError(undefined);
+      const stored = await repository.getModule(modulePackage.moduleId, modulePackage.revision)
+        ?? { package: modulePackage, sourceText: "" };
+      showStoredModule(stored);
+      rememberHistory(
+        modulePackage.moduleId,
+        await repository.listModules({ moduleId: modulePackage.moduleId, latestOnly: false }),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [rememberHistory, showStoredModule]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getRepository().then(async (repository) => {
+      const entries = await Promise.all(modules.map(async (modulePackage) => [
+        modulePackage.moduleId,
+        await repository.listModules({ moduleId: modulePackage.moduleId, latestOnly: false }),
+      ] as const));
+      if (!cancelled) setModuleHistories(Object.fromEntries(entries));
+    }).catch((cause) => {
+      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { cancelled = true; };
+  }, [modules]);
 
   useEffect(() => {
     if (selectedModuleId || draft.trim() || modules.length === 0) return;
@@ -95,6 +137,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       setDraftSourceText(result.normalizedText ?? sourceText);
       setDraftDirty(true);
       setSelectedModuleId(result.module.moduleId);
+      setSelectedRevision(result.module.revision);
       setWorkspaceMode("browse");
       if (result.normalizedText && !sourceText) setSourceText(result.normalizedText);
     } catch (cause) {
@@ -109,31 +152,59 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       const storedModules = await repository.listModules();
       const modulePackage = nextModuleRevision(candidate, storedModules.map((item) => item.package));
       await repository.saveModule({ package: modulePackage, sourceText: draftSourceText });
-      setModules((await repository.listModules()).map((item) => item.package));
+      await refreshLibrary();
       setDraft(JSON.stringify(modulePackage, null, 2));
       setDraftDirty(false);
       setSelectedModuleId(modulePackage.moduleId);
+      setSelectedRevision(modulePackage.revision);
       setWorkspaceMode("browse");
       setError(undefined);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
 
-  const remove = async (moduleId: string) => {
+  const removeModule = async (moduleId: string) => {
     const modulePackage = modules.find((item) => item.moduleId === moduleId);
-    if (!window.confirm(`确认删除本机模组“${modulePackage?.metadata.title ?? moduleId}”？此操作不会影响已同步的房间事件。`)) return;
+    const revisionCount = moduleHistories[moduleId]?.length ?? 1;
+    if (!window.confirm(`确认删除本机模组“${modulePackage?.metadata.title ?? moduleId}”的全部 ${revisionCount} 个修订？房间事件仍会保留，但本机将无法再打开其中引用的模组版本。`)) return;
     try {
       const repository = await getRepository();
       await repository.deleteModule(moduleId);
-      const storedRemaining = await repository.listModules();
-      const remaining = storedRemaining.map((item) => item.package);
-      setModules(remaining);
+      const storedRemaining = await refreshLibrary();
       if (selectedModuleId === moduleId) {
         const next = storedRemaining[0];
-        setSelectedModuleId(next?.package.moduleId);
-        setDraft(next ? JSON.stringify(next.package, null, 2) : "");
-        setDraftSourceText(next?.sourceText ?? "");
-        setDraftDirty(false);
-        setWorkspaceMode("browse");
+        if (next) showStoredModule(next);
+        else {
+          setSelectedModuleId(undefined);
+          setSelectedRevision(undefined);
+          setDraft("");
+          setDraftSourceText("");
+          setDraftDirty(false);
+          setWorkspaceMode("browse");
+        }
+      }
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const removeRevision = async (modulePackage: ModulePackageV1) => {
+    if (!window.confirm(`确认只删除“${modulePackage.metadata.title}”的 v${modulePackage.revision}？其他修订和房间事件会保留，但本机将无法再打开这个版本。`)) return;
+    try {
+      const repository = await getRepository();
+      await repository.deleteModuleRevision(modulePackage.moduleId, modulePackage.revision);
+      const storedRemaining = await refreshLibrary();
+      if (selectedModuleId === modulePackage.moduleId && selectedRevision === modulePackage.revision) {
+        const next = await repository.getModule(modulePackage.moduleId) ?? storedRemaining[0];
+        if (next) showStoredModule(next);
+        else {
+          setSelectedModuleId(undefined);
+          setSelectedRevision(undefined);
+          setDraft("");
+          setDraftSourceText("");
+          setDraftDirty(false);
+          setWorkspaceMode("browse");
+        }
       }
       setError(undefined);
     } catch (cause) {
@@ -146,14 +217,15 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       const candidate = modulePackageSchema.parse(JSON.parse(content));
       const repository = await getRepository();
       const storedModules = await repository.listModules();
-      const existing = storedModules.find((item) => item.package.moduleId === candidate.moduleId);
+      const existing = await repository.getModule(candidate.moduleId);
       const modulePackage = nextModuleRevision(candidate, storedModules.map((item) => item.package));
       await repository.saveModule({ package: modulePackage, sourceText: existing?.sourceText ?? "" });
-      setModules((await repository.listModules()).map((item) => item.package));
+      await refreshLibrary();
       setDraft(JSON.stringify(modulePackage, null, 2));
       setDraftSourceText(existing?.sourceText ?? "");
       setDraftDirty(false);
       setSelectedModuleId(modulePackage.moduleId);
+      setSelectedRevision(modulePackage.revision);
       setWorkspaceMode("browse");
       setError(undefined);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -189,10 +261,11 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const exportPackage = async (modulePackage: ModulePackageV1) => {
     try {
       const content = JSON.stringify(modulePackage, null, 2);
+      const fileName = `${safeName(modulePackage.metadata.title)}-v${modulePackage.revision}.cocmod.json`;
       if (window.__TAURI_INTERNALS__) {
-        const path = await save({ defaultPath: `${safeName(modulePackage.metadata.title)}.cocmod.json`, filters: [{ name: "CoC module", extensions: ["json"] }] });
+        const path = await save({ defaultPath: fileName, filters: [{ name: "CoC module", extensions: ["json"] }] });
         if (path) await writeTextFile(path, content);
-      } else download(`${safeName(modulePackage.metadata.title)}.cocmod.json`, content);
+      } else download(fileName, content);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -266,64 +339,97 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                 </Button>
               </div>
               {modules.length === 0 && <p className="text-sm text-zinc-500">资料库为空。</p>}
-              {modules.map((modulePackage) => (
-                <div
-                  key={modulePackage.moduleId}
-                  aria-label={`已保存模组：${modulePackage.metadata.title}`}
-                  aria-current={selectedModuleId === modulePackage.moduleId ? "true" : undefined}
-                  className={`rounded-lg border bg-zinc-900 p-3 ${selectedModuleId === modulePackage.moduleId ? "border-brass/60" : "border-zinc-800"}`}
-                >
-                  <div className="font-medium text-ink">{modulePackage.metadata.title}</div>
-                  <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
-                  <div className="mt-3 flex gap-1">
-                    <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
-                      <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
-                    </Button>
-                    <Button variant="ghost" className="h-8 px-2" onClick={() => void exportPackage(modulePackage)}><Download className="h-4 w-4" /></Button>
-                    {canManageRoomModule && <Button aria-label={`切换房间模组：${modulePackage.metadata.title}`} variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
-                    <Button variant="ghost" className="ml-auto h-8 px-2 text-red-400" onClick={() => void remove(modulePackage.moduleId)}><Trash2 className="h-4 w-4" /></Button>
-                  </div>
-                  {canManageRoomModule && (modulePackage.clues.length > 0 || modulePackage.handouts.length > 0) && (
-                    <details className="mt-3 border-t border-zinc-800 pt-2">
-                      <summary className="cursor-pointer text-xs text-zinc-400">选择公开内容</summary>
-                      <div className="mt-2 grid max-h-52 gap-1 overflow-y-auto">
-                        {modulePackage.clues.map((clue) => (
-                          <button
-                            key={clue.id}
-                            type="button"
-                            aria-label={`公开线索：${clue.name}`}
-                            disabled={!clue.revealText.trim()}
-                            className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
-                            title={clue.revealText ? "只公开玩家可见文本" : "公开标题；此线索尚无玩家可见正文"}
-                            onClick={() => void revealContent(modulePackage, { id: clue.id, title: clue.name, body: clue.revealText, type: "clue" })}
-                          >
-                            <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />线索：{clue.name}
-                          </button>
-                        ))}
-                        {modulePackage.handouts.map((handout) => (
-                          <button
-                            key={handout.id}
-                            type="button"
-                            aria-label={`公开手记：${handout.title}`}
-                            disabled={!handout.content.trim()}
-                            className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
-                            onClick={() => void revealContent(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
-                          >
-                            <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />手记：{handout.title}
-                          </button>
-                        ))}
+              {modules.map((modulePackage) => {
+                const history = moduleHistories[modulePackage.moduleId]
+                  ?? [{ package: modulePackage, sourceText: "" }];
+                return (
+                  <div
+                    key={modulePackage.moduleId}
+                    aria-label={`已保存模组：${modulePackage.metadata.title}`}
+                    aria-current={selectedModuleId === modulePackage.moduleId ? "true" : undefined}
+                    className={`rounded-lg border bg-zinc-900 p-3 ${selectedModuleId === modulePackage.moduleId ? "border-brass/60" : "border-zinc-800"}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-medium text-ink">{modulePackage.metadata.title}</div>
+                      <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-brass">最新 v{modulePackage.revision}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
+                    <div className="mt-3 flex gap-1">
+                      <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
+                        <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
+                      </Button>
+                      <Button aria-label={`导出${modulePackage.metadata.title} v${modulePackage.revision}`} variant="ghost" className="h-8 px-2" onClick={() => void exportPackage(modulePackage)}><Download className="h-4 w-4" /></Button>
+                      {canManageRoomModule && <Button aria-label={`切换房间模组：${modulePackage.metadata.title}`} variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
+                      <Button aria-label={`删除整个模组：${modulePackage.metadata.title}`} variant="ghost" className="ml-auto h-8 px-2 text-red-400" onClick={() => void removeModule(modulePackage.moduleId)}><Trash2 className="h-4 w-4" /></Button>
+                    </div>
+                    <details aria-label={`${modulePackage.metadata.title}修订历史`} className="mt-3 border-t border-zinc-800 pt-2">
+                      <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400">
+                        <History className="h-3.5 w-3.5" />修订历史 · {history.length} 个版本
+                      </summary>
+                      <div className="mt-2 grid gap-1.5">
+                        {history.map((stored) => {
+                          const revision = stored.package.revision;
+                          const selected = selectedModuleId === modulePackage.moduleId && selectedRevision === revision;
+                          return (
+                            <div key={revision} className={`flex items-center gap-1 rounded border px-2 py-1.5 ${selected ? "border-brass/40 bg-brass/5" : "border-zinc-800 bg-zinc-950"}`}>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs text-zinc-300">v{revision}{revision === modulePackage.revision ? " · 最新" : ""}</div>
+                                <div className="truncate text-[10px] text-zinc-600">{stored.package.metadata.updatedAt}</div>
+                              </div>
+                              <Button aria-label={`打开${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5" onClick={() => void openModule(stored.package)}><BookOpen className="h-3.5 w-3.5" /></Button>
+                              <Button aria-label={`导出${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5" onClick={() => void exportPackage(stored.package)}><Download className="h-3.5 w-3.5" /></Button>
+                              <Button aria-label={`删除${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5 text-red-400" onClick={() => void removeRevision(stored.package)}><Trash2 className="h-3.5 w-3.5" /></Button>
+                            </div>
+                          );
+                        })}
                       </div>
                     </details>
-                  )}
-                </div>
-              ))}
+                    {canManageRoomModule && (modulePackage.clues.length > 0 || modulePackage.handouts.length > 0) && (
+                      <details className="mt-3 border-t border-zinc-800 pt-2">
+                        <summary className="cursor-pointer text-xs text-zinc-400">选择公开内容</summary>
+                        <div className="mt-2 grid max-h-52 gap-1 overflow-y-auto">
+                          {modulePackage.clues.map((clue) => (
+                            <button
+                              key={clue.id}
+                              type="button"
+                              aria-label={`公开线索：${clue.name}`}
+                              disabled={!clue.revealText.trim()}
+                              className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
+                              title={clue.revealText ? "只公开玩家可见文本" : "公开标题；此线索尚无玩家可见正文"}
+                              onClick={() => void revealContent(modulePackage, { id: clue.id, title: clue.name, body: clue.revealText, type: "clue" })}
+                            >
+                              <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />线索：{clue.name}
+                            </button>
+                          ))}
+                          {modulePackage.handouts.map((handout) => (
+                            <button
+                              key={handout.id}
+                              type="button"
+                              aria-label={`公开手记：${handout.title}`}
+                              disabled={!handout.content.trim()}
+                              className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
+                              onClick={() => void revealContent(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
+                            >
+                              <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />手记：{handout.title}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                );
+              })}
             </Panel>
           </div>
           <Panel className="flex min-h-[700px] flex-col gap-4 xl:h-[calc(100vh-10rem)]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-3">
               <div>
                 <h2 className="font-semibold">模组工作台</h2>
-                <p className="text-xs text-zinc-500">先浏览 AI 抽取结果；需要修正时再切换 JSON 编辑。</p>
+                <p className="text-xs text-zinc-500">
+                  {selectedModuleId && selectedRevision
+                    ? `当前打开 v${selectedRevision}；修改后会另存为新的修订。`
+                    : "先浏览 AI 抽取结果；需要修正时再切换 JSON 编辑。"}
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex rounded-md border border-zinc-800 bg-zinc-950 p-1" role="tablist" aria-label="模组工作台模式">

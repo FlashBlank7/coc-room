@@ -25,14 +25,22 @@ export interface StoredModule {
   sourceText: string;
 }
 
+export interface ModuleListOptions {
+  /** The library normally shows one card per module. Set false to inspect revision history. */
+  latestOnly?: boolean;
+  moduleId?: string;
+}
+
 export interface LocalRepository {
   saveRoom(room: RoomRecord): Promise<void>;
   listRooms(): Promise<RoomRecord[]>;
   saveEvent(event: RoomEventV1): Promise<boolean>;
   listEvents(roomId: string, afterSequence?: number): Promise<RoomEventV1[]>;
   saveModule(value: StoredModule): Promise<void>;
-  listModules(): Promise<StoredModule[]>;
+  getModule(moduleId: string, revision?: number): Promise<StoredModule | undefined>;
+  listModules(options?: ModuleListOptions): Promise<StoredModule[]>;
   deleteModule(moduleId: string): Promise<void>;
+  deleteModuleRevision(moduleId: string, revision: number): Promise<void>;
   getSetting(key: string): Promise<string | undefined>;
   setSetting(key: string, value: string): Promise<void>;
 }
@@ -141,7 +149,7 @@ class SqliteRepository implements LocalRepository {
   async saveModule(value: StoredModule): Promise<void> {
     const modulePackage = modulePackageSchema.parse(value.package);
     const existingRows = await this.db.select<Array<{ module_json: string }>>(
-      "SELECT module_json FROM modules WHERE id=?",
+      "SELECT module_json FROM modules WHERE id=? ORDER BY revision DESC LIMIT 1",
       [modulePackage.moduleId],
     );
     const existing = existingRows[0]
@@ -149,23 +157,56 @@ class SqliteRepository implements LocalRepository {
       : undefined;
     assertNewerModuleRevision(existing, modulePackage);
     await this.db.execute(
-      `INSERT INTO modules (id, title, schema_version, source_text, module_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET title=excluded.title, schema_version=excluded.schema_version,
-       source_text=excluded.source_text, module_json=excluded.module_json, updated_at=excluded.updated_at`,
-      [modulePackage.moduleId, modulePackage.metadata.title, modulePackage.schemaVersion, value.sourceText, JSON.stringify(modulePackage), modulePackage.metadata.createdAt, modulePackage.metadata.updatedAt],
+      `INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [modulePackage.moduleId, modulePackage.revision, modulePackage.metadata.title, modulePackage.schemaVersion, value.sourceText, JSON.stringify(modulePackage), modulePackage.metadata.createdAt, modulePackage.metadata.updatedAt],
     );
   }
 
-  async listModules(): Promise<StoredModule[]> {
+  async getModule(moduleId: string, revision?: number): Promise<StoredModule | undefined> {
+    const rows = revision === undefined
+      ? await this.db.select<Array<{ module_json: string; source_text: string }>>(
+          "SELECT module_json, source_text FROM modules WHERE id=? ORDER BY revision DESC LIMIT 1",
+          [moduleId],
+        )
+      : await this.db.select<Array<{ module_json: string; source_text: string }>>(
+          "SELECT module_json, source_text FROM modules WHERE id=? AND revision=? LIMIT 1",
+          [moduleId, revision],
+        );
+    const row = rows[0];
+    return row
+      ? { package: modulePackageSchema.parse(JSON.parse(row.module_json)), sourceText: row.source_text }
+      : undefined;
+  }
+
+  async listModules(options: ModuleListOptions = {}): Promise<StoredModule[]> {
+    const { latestOnly = true, moduleId } = options;
+    const params = moduleId ? [moduleId] : [];
+    const filter = moduleId ? "WHERE id=?" : "";
+    const query = latestOnly
+      ? `SELECT module_json, source_text
+         FROM (
+           SELECT id, updated_at, module_json, source_text,
+                  ROW_NUMBER() OVER (PARTITION BY id ORDER BY revision DESC) AS revision_rank
+           FROM modules ${filter}
+         )
+         WHERE revision_rank=1
+         ORDER BY updated_at DESC, id ASC`
+      : `SELECT module_json, source_text FROM modules ${filter}
+         ORDER BY ${moduleId ? "revision DESC" : "updated_at DESC, id ASC, revision DESC"}`;
     const rows = await this.db.select<Array<{ module_json: string; source_text: string }>>(
-      "SELECT module_json, source_text FROM modules ORDER BY updated_at DESC",
+      query,
+      params,
     );
     return rows.map((row) => ({ package: modulePackageSchema.parse(JSON.parse(row.module_json)), sourceText: row.source_text }));
   }
 
   async deleteModule(moduleId: string): Promise<void> {
     await this.db.execute("DELETE FROM modules WHERE id=?", [moduleId]);
+  }
+
+  async deleteModuleRevision(moduleId: string, revision: number): Promise<void> {
+    await this.db.execute("DELETE FROM modules WHERE id=? AND revision=?", [moduleId, revision]);
   }
 
   async getSetting(key: string): Promise<string | undefined> {
@@ -184,7 +225,7 @@ class SqliteRepository implements LocalRepository {
 export class MemoryRepository implements LocalRepository {
   private readonly rooms = new Map<string, RoomRecord>();
   private readonly events = new Map<string, Map<string, RoomEventV1>>();
-  private readonly modules = new Map<string, StoredModule>();
+  private readonly modules = new Map<string, Map<number, StoredModule>>();
   private readonly settings = new Map<string, string>();
 
   async saveRoom(room: RoomRecord): Promise<void> {
@@ -230,17 +271,45 @@ export class MemoryRepository implements LocalRepository {
   }
   async saveModule(value: StoredModule): Promise<void> {
     const modulePackage = modulePackageSchema.parse(value.package);
-    const existing = this.modules.get(modulePackage.moduleId);
-    assertNewerModuleRevision(existing?.package, modulePackage);
-    this.modules.set(modulePackage.moduleId, structuredClone({ package: modulePackage, sourceText: value.sourceText }));
+    const revisions = this.modules.get(modulePackage.moduleId) ?? new Map<number, StoredModule>();
+    const latest = [...revisions.values()].sort((a, b) => b.package.revision - a.package.revision)[0];
+    assertNewerModuleRevision(latest?.package, modulePackage);
+    revisions.set(modulePackage.revision, structuredClone({ package: modulePackage, sourceText: value.sourceText }));
+    this.modules.set(modulePackage.moduleId, revisions);
   }
-  async listModules(): Promise<StoredModule[]> {
-    return [...this.modules.values()]
+  async getModule(moduleId: string, revision?: number): Promise<StoredModule | undefined> {
+    const revisions = this.modules.get(moduleId);
+    if (!revisions) return undefined;
+    const value = revision === undefined
+      ? [...revisions.values()].sort((a, b) => b.package.revision - a.package.revision)[0]
+      : revisions.get(revision);
+    return value ? structuredClone(value) : undefined;
+  }
+  async listModules(options: ModuleListOptions = {}): Promise<StoredModule[]> {
+    const { latestOnly = true, moduleId } = options;
+    const revisionGroups = moduleId
+      ? [this.modules.get(moduleId) ?? new Map<number, StoredModule>()]
+      : [...this.modules.values()];
+    const values = revisionGroups.flatMap((revisions) => {
+      const ordered = [...revisions.values()].sort((a, b) => b.package.revision - a.package.revision);
+      return latestOnly ? ordered.slice(0, 1) : ordered;
+    });
+    return values
       .map((value) => structuredClone(value))
-      .sort((a, b) => b.package.metadata.updatedAt.localeCompare(a.package.metadata.updatedAt));
+      .sort((a, b) => moduleId
+        ? b.package.revision - a.package.revision
+        : b.package.metadata.updatedAt.localeCompare(a.package.metadata.updatedAt)
+          || a.package.moduleId.localeCompare(b.package.moduleId)
+          || b.package.revision - a.package.revision);
   }
   async deleteModule(moduleId: string): Promise<void> {
     this.modules.delete(moduleId);
+  }
+  async deleteModuleRevision(moduleId: string, revision: number): Promise<void> {
+    const revisions = this.modules.get(moduleId);
+    if (!revisions) return;
+    revisions.delete(revision);
+    if (revisions.size === 0) this.modules.delete(moduleId);
   }
   async getSetting(key: string): Promise<string | undefined> {
     return this.settings.get(key);

@@ -90,6 +90,87 @@ describe("ModulesView browser import", () => {
     await screen.findByLabelText("上游高版本内容模组内容浏览");
     expect(useAppStore.getState().modules.find((item) => item.moduleId === moduleId)?.revision).toBe(12);
   });
+
+  it("opens, exports, edits, and deletes exact historical revisions without overwriting them", async () => {
+    const repository = await getRepository();
+    const moduleId = "module_ui_revision_history_01";
+    const revisionOne = {
+      ...createModulePackageWithEntities(),
+      moduleId,
+      metadata: {
+        ...createModulePackageWithEntities().metadata,
+        title: "历史修订",
+        updatedAt: "2026-08-25T00:00:00.000Z",
+      },
+    };
+    const revisionTwo = {
+      ...revisionOne,
+      revision: 2,
+      overview: "第二版概览",
+      metadata: {
+        ...revisionOne.metadata,
+        title: "当前修订",
+        updatedAt: "2026-08-26T00:00:00.000Z",
+      },
+    };
+    await repository.saveModule({ package: revisionOne, sourceText: "source v1" });
+    await repository.saveModule({ package: revisionTwo, sourceText: "source v2" });
+    useAppStore.setState({ modules: [revisionTwo] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<ModulesView />);
+    fireEvent.click(await screen.findByText("修订历史 · 2 个版本"));
+    fireEvent.click(screen.getByLabelText("打开历史修订 v1"));
+    await screen.findByLabelText("历史修订模组内容浏览");
+    expect(screen.getByText("当前打开 v1；修改后会另存为新的修订。")).not.toBeNull();
+
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:module-history-test");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectUrl });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    try {
+      fireEvent.click(screen.getByLabelText("导出历史修订 v1"));
+      await waitFor(() => expect(createObjectUrl).toHaveBeenCalledTimes(1));
+      const exported = createObjectUrl.mock.calls[0]![0];
+      const exportedText = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(exported);
+      });
+      expect(JSON.parse(exportedText).revision).toBe(1);
+    } finally {
+      anchorClick.mockRestore();
+      Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectUrl });
+      Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectUrl });
+    }
+
+    fireEvent.click(screen.getByRole("tab", { name: "JSON 编辑" }));
+    const edited = { ...revisionOne, overview: "从历史版本产生的新修订" };
+    fireEvent.change(screen.getByPlaceholderText("解析结果会出现在这里，也可以粘贴 ModulePackageV1 JSON。"), {
+      target: { value: JSON.stringify(edited) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存更改" }));
+
+    await waitFor(async () => {
+      expect((await repository.getModule(moduleId))?.package.revision).toBe(3);
+    });
+    expect((await repository.listModules({ moduleId, latestOnly: false })).map((item) => item.package.revision))
+      .toEqual([3, 2, 1]);
+    expect((await repository.getModule(moduleId, 1))?.package.overview).toBe("");
+
+    const updatedCard = await screen.findByLabelText("已保存模组：历史修订");
+    await within(updatedCard).findByText("修订历史 · 3 个版本");
+    fireEvent.click(within(updatedCard).getByLabelText("删除历史修订 v1"));
+    await waitFor(async () => expect(await repository.getModule(moduleId, 1)).toBeUndefined());
+    expect((await repository.listModules({ moduleId, latestOnly: false })).map((item) => item.package.revision))
+      .toEqual([3, 2]);
+
+    fireEvent.click(screen.getByLabelText("删除整个模组：历史修订"));
+    await waitFor(async () => expect(await repository.getModule(moduleId)).toBeUndefined());
+  });
 });
 
 describe("ModulesView room publishing controls", () => {

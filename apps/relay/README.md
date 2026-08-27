@@ -86,11 +86,13 @@ pnpm --filter @coc-room/relay build
 pnpm --filter @coc-room/relay smoke
 ```
 
-`smoke` 默认连接本机 `http://127.0.0.1:8787`，会创建一个临时房间，以真实 WebSocket 分别加入房主和玩家，并验证双向中继。验收部署后的节点时传入 HTTPS 根地址：
+`smoke` 会先构建共享协议包，默认连接本机 `http://127.0.0.1:8787`，再创建一个临时房间，以真实 WebSocket 分别加入房主和玩家。它会验证双向小消息中继，并使用生产 `createRelayFragments` / `RelayFragmentReassembler` 将一个超过 64 KiB、包含中文和 emoji 的真实 `RoomWireMessage` 分块后实际发送；接收端分别按正常序和逆序重组，重复发送全部分块仍只交付一次，正文必须逐字一致，且每个实际收发帧都不得超过 64 KiB。验收部署后的节点时传入 HTTPS 根地址：
 
 ```powershell
 pnpm --filter @coc-room/relay smoke -- https://your-worker.your-subdomain.workers.dev
 ```
+
+这是强制走 Worker WebSocket 的真实中继链路 smoke，只证明建房、认证、应用层分块及中继转发；它不经过 WebRTC DataChannel、Tauri UI 或 SQLite，因此不是完整的桌面双客户端 E2E。
 
 Tests use Cloudflare's Vitest plugin and the local `workerd` runtime. WebSocket tests run with one worker and shared storage because isolated per-file storage does not support Durable Object WebSockets.
 

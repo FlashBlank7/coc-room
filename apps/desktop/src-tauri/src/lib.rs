@@ -457,12 +457,20 @@ fn path_to_string(path: &Path) -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let migrations = vec![Migration {
-        version: 1,
-        description: "initial local-first schema",
-        sql: include_str!("../migrations/0001_initial.sql"),
-        kind: MigrationKind::Up,
-    }];
+    let migrations = vec![
+        Migration {
+            version: 1,
+            description: "initial local-first schema",
+            sql: include_str!("../migrations/0001_initial.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "preserve every module revision",
+            sql: include_str!("../migrations/0002_module_revision_history.sql"),
+            kind: MigrationKind::Up,
+        },
+    ];
 
     tauri::Builder::default()
         .manage(AuthorizedModuleSources::default())
@@ -500,6 +508,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::{Connection, Row, SqliteConnection};
 
     #[test]
     fn parser_execution_gate_allows_only_one_permit() {
@@ -566,5 +575,109 @@ mod tests {
 
         assert!(validate_sidecar_request_id(&message, "active").is_err());
         assert!(validate_sidecar_request_id(&message, "other").is_ok());
+    }
+
+    #[test]
+    fn module_revision_migration_preserves_legacy_data_and_accepts_history() {
+        tauri::async_runtime::block_on(async {
+            let mut connection = SqliteConnection::connect("sqlite::memory:")
+                .await
+                .expect("in-memory SQLite should open");
+            sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("legacy schema should apply");
+
+            let legacy_json = serde_json::json!({
+                "schemaVersion": 1,
+                "moduleId": "legacy-module",
+                "revision": 4,
+                "metadata": {
+                    "title": "Legacy",
+                    "authors": [],
+                    "language": "zh-CN",
+                    "summary": "",
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-04T00:00:00.000Z"
+                },
+                "overview": "",
+                "sourceDocuments": [],
+                "chapters": [],
+                "scenes": [],
+                "locations": [],
+                "npcs": [],
+                "clues": [],
+                "handouts": [],
+                "suggestedChecks": [],
+                "keeperNotes": [],
+                "relations": [],
+                "extensions": {}
+            })
+            .to_string();
+            sqlx::query(
+                "INSERT INTO modules (id, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-module")
+            .bind("Legacy")
+            .bind(1_i64)
+            .bind("legacy source")
+            .bind(&legacy_json)
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-04T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("legacy module should insert");
+
+            sqlx::raw_sql(include_str!("../migrations/0002_module_revision_history.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("revision migration should apply");
+
+            let row = sqlx::query("SELECT revision, source_text, module_json FROM modules WHERE id=?")
+                .bind("legacy-module")
+                .fetch_one(&mut connection)
+                .await
+                .expect("legacy module should survive migration");
+            assert_eq!(row.get::<i64, _>("revision"), 4);
+            assert_eq!(row.get::<String, _>("source_text"), "legacy source");
+            assert_eq!(row.get::<String, _>("module_json"), legacy_json);
+
+            sqlx::query(
+                "INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-module")
+            .bind(5_i64)
+            .bind("Legacy v5")
+            .bind(1_i64)
+            .bind("new source")
+            .bind("{}")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-05T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("same module id should accept a newer revision");
+
+            let revision_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM modules WHERE id=?")
+                .bind("legacy-module")
+                .fetch_one(&mut connection)
+                .await
+                .expect("history should be queryable");
+            assert_eq!(revision_count, 2);
+
+            let duplicate = sqlx::query(
+                "INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("legacy-module")
+            .bind(5_i64)
+            .bind("Duplicate")
+            .bind(1_i64)
+            .bind("")
+            .bind("{}")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-05T00:00:00.000Z")
+            .execute(&mut connection)
+            .await;
+            assert!(duplicate.is_err(), "composite key must reject an exact duplicate revision");
+        });
     }
 }
