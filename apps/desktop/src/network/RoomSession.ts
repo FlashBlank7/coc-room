@@ -24,6 +24,7 @@ export interface RoomSessionTransport {
   onWireMessage?: (fromPeerId: string, message: RoomWireMessage) => void | Promise<void>;
   onPresence?: (participants: ParticipantV1[]) => void;
   onPathChange?: (peerId: string, path: ConnectionPath) => void;
+  onRelayStateChange?: (connected: boolean) => void;
   onError?: (message: string) => void;
   start(): Promise<void>;
   stop(): void;
@@ -57,6 +58,7 @@ export class RoomSession {
   onEvents?: (events: RoomEventV1[]) => void;
   onPresence?: (participants: ParticipantV1[]) => void;
   onPathChange?: (peerId: string, path: ConnectionPath) => void;
+  onRelayStateChange?: (connected: boolean) => void;
   onError?: (message: string) => void;
 
   constructor(private readonly options: RoomSessionOptions) {
@@ -110,6 +112,7 @@ export class RoomSession {
       if (peerId === options.room.hostPeerId) this.hostPath = path;
       this.onPathChange?.(peerId, path);
     };
+    this.transport.onRelayStateChange = (connected) => this.onRelayStateChange?.(connected);
     this.transport.onError = (message) => this.onError?.(message);
   }
 

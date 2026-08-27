@@ -27,6 +27,7 @@ export function App() {
   const currentRoom = useAppStore((state) => state.currentRoom);
   const participants = useAppStore((state) => state.participants);
   const paths = useAppStore((state) => state.paths);
+  const relayConnected = useAppStore((state) => state.relayConnected);
   const enterRoom = useAppStore((state) => state.enterRoom);
   const leaveRoomState = useAppStore((state) => state.leaveRoom);
   const [session, setSession] = useState<RoomSession>();
@@ -61,10 +62,17 @@ export function App() {
     let active = false;
     let latestEvents: RoomEventV1[] = [];
     let latestParticipants: ParticipantV1[] = [];
+    let latestRelayConnected = false;
     const latestPaths: Record<string, ConnectionPath> = {};
     next.onEvents = (events) => {
       latestEvents = events;
-      if (active && sessionRef.current === next) useAppStore.getState().setEvents(events);
+      if (active && sessionRef.current === next) {
+        const state = useAppStore.getState();
+        state.setEvents(events);
+        const lastSeq = events.at(-1)?.sequence ?? 0;
+        state.setRooms(state.rooms.map((savedRoom) =>
+          savedRoom.id === room.id ? { ...savedRoom, lastSeq } : savedRoom));
+      }
     };
     next.onPresence = (participants) => {
       latestParticipants = participants;
@@ -73,6 +81,14 @@ export function App() {
     next.onPathChange = (peerId, path) => {
       latestPaths[peerId] = path;
       if (active && sessionRef.current === next) useAppStore.getState().setPath(peerId, path);
+    };
+    next.onRelayStateChange = (connected) => {
+      latestRelayConnected = connected;
+      if (active && sessionRef.current === next) {
+        const state = useAppStore.getState();
+        state.setRelayConnected(connected);
+        if (connected) state.setConnectionError(undefined);
+      }
     };
     next.onError = (message) => {
       if (active && sessionRef.current === next) useAppStore.getState().setConnectionError(message);
@@ -85,6 +101,7 @@ export function App() {
       active = true;
       useAppStore.getState().setEvents(latestEvents);
       useAppStore.getState().setParticipants(latestParticipants);
+      useAppStore.getState().setRelayConnected(latestRelayConnected);
       for (const [peerId, path] of Object.entries(latestPaths)) useAppStore.getState().setPath(peerId, path);
       setIsViewingLocalRecord(false);
       setSession(next);
@@ -115,6 +132,19 @@ export function App() {
     setIsViewingLocalRecord(false);
     leaveRoomState();
   };
+
+  const relayDegraded = Boolean(currentRoom && !isViewingLocalRecord && !relayConnected);
+  const connectionLabel = isViewingLocalRecord
+    ? "本地记录（只读）"
+    : roomPaused
+      ? "房主离线 · 房间暂停"
+      : relayDegraded
+        ? paths[currentRoom?.hostPeerId ?? ""] === "direct"
+          ? "直连可用 · 中继重连中"
+          : "中继重连中 · 事件保存在本机"
+        : currentRoom
+          ? "房间已连接"
+          : "未连接";
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#101317] text-ink">
@@ -147,8 +177,8 @@ export function App() {
           })}
         </nav>
         <div className="mt-auto flex items-center gap-2 px-3 text-[10px] text-zinc-600">
-          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && !roomPaused && "text-emerald-500", roomPaused && "text-amber-400")} />
-          <span>{isViewingLocalRecord ? "本地记录（只读）" : roomPaused ? "房主离线 · 房间暂停" : currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
+          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && !roomPaused && !relayDegraded && "text-emerald-500", (roomPaused || relayDegraded) && "text-amber-400")} />
+          <span>{connectionLabel} · v0.1</span>
         </div>
       </aside>
       <main className="min-w-0 flex-1">

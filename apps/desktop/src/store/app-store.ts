@@ -15,6 +15,7 @@ interface AppState {
   events: RoomEventV1[];
   participants: ParticipantV1[];
   paths: Record<string, ConnectionPath>;
+  relayConnected: boolean;
   connectionError?: string;
   setActiveView(view: AppView): void;
   setRelayUrl(value: string): void;
@@ -26,6 +27,7 @@ interface AppState {
   setEvents(value: RoomEventV1[]): void;
   setParticipants(value: ParticipantV1[]): void;
   setPath(peerId: string, path: ConnectionPath): void;
+  setRelayConnected(value: boolean): void;
   setConnectionError(value?: string): void;
 }
 
@@ -38,15 +40,17 @@ export const useAppStore = create<AppState>((set) => ({
   events: [],
   participants: [],
   paths: {},
+  relayConnected: false,
   setActiveView: (activeView) => set({ activeView }),
   setRelayUrl: (relayUrl) => set({ relayUrl }),
   setModel: (model) => set({ model }),
   setRooms: (rooms) => set({ rooms }),
   setModules: (modules) => set({ modules }),
-  enterRoom: (currentRoom) => set({ currentRoom, activeView: "room", events: [], participants: [], paths: {}, connectionError: undefined }),
-  leaveRoom: () => set({ currentRoom: undefined, activeView: "lobby", events: [], participants: [], paths: {}, connectionError: undefined }),
+  enterRoom: (currentRoom) => set({ currentRoom, activeView: "room", events: [], participants: [], paths: {}, relayConnected: false, connectionError: undefined }),
+  leaveRoom: () => set({ currentRoom: undefined, activeView: "lobby", events: [], participants: [], paths: {}, relayConnected: false, connectionError: undefined }),
   setEvents: (events) => set({ events }),
   setParticipants: (participants) => set({ participants }),
   setPath: (peerId, path) => set((state) => ({ paths: { ...state.paths, [peerId]: path } })),
+  setRelayConnected: (relayConnected) => set({ relayConnected }),
   setConnectionError: (connectionError) => set({ connectionError }),
 }));

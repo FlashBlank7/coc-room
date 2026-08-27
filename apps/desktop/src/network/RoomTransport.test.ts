@@ -265,6 +265,47 @@ describe("RoomTransport delivery paths", () => {
     transport.stop();
   });
 
+  it("marks relay-only peers offline as soon as the relay socket closes", async () => {
+    const transport = createTransport();
+    const relayStates: boolean[] = [];
+    const paths: string[] = [];
+    const presence: string[][] = [];
+    transport.onRelayStateChange = (connected) => relayStates.push(connected);
+    transport.onPathChange = (peerId, path) => paths.push(`${peerId}:${path}`);
+    transport.onPresence = (participants) => presence.push(participants.map(({ peerId }) => peerId));
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+
+    expect(relayStates).toEqual([true]);
+    socket.close();
+
+    expect(relayStates).toEqual([true, false]);
+    expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:offline`);
+    expect(presence.at(-1)).toEqual(["host-peer-1234"]);
+    expect(transport.sendToPeer(remotePlayer.peerId, wireMessage)).toBe(false);
+    transport.stop();
+  });
+
+  it("keeps an open direct channel usable while the relay reconnects", async () => {
+    const transport = createTransport();
+    const relayStates: boolean[] = [];
+    const presence: string[][] = [];
+    transport.onRelayStateChange = (connected) => relayStates.push(connected);
+    transport.onPresence = (participants) => presence.push(participants.map(({ peerId }) => peerId));
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+    const channel = FakeRTCPeerConnection.instances[0]!.channels[0]!;
+    channel.open();
+
+    socket.close();
+
+    expect(relayStates).toEqual([true, false]);
+    expect(presence.at(-1)).toContain(remotePlayer.peerId);
+    expect(transport.sendToPeer(remotePlayer.peerId, wireMessage)).toBe(true);
+    expect(channel.sent.at(-1)).toBe(JSON.stringify(wireMessage));
+    transport.stop();
+  });
+
   it("fragments a large Unicode relay message into Worker-safe frames and reassembles it once", async () => {
     const transport = createTransport();
     const socket = await authenticateTransport(transport, [remotePlayer]);

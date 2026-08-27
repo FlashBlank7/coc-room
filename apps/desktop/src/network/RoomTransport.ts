@@ -45,10 +45,12 @@ export class RoomTransport {
   private reconnectTimer?: ReturnType<typeof globalThis.setTimeout>;
   private reconnectAttempts = 0;
   private connecting?: Promise<void>;
+  private relayConnected = false;
 
   onWireMessage?: (fromPeerId: string, message: RoomWireMessage) => void;
   onPresence?: (participants: ParticipantV1[]) => void;
   onPathChange?: (peerId: string, path: ConnectionPath) => void;
+  onRelayStateChange?: (connected: boolean) => void;
   onError?: (message: string) => void;
 
   constructor(private readonly options: RoomTransportOptions) {
@@ -77,6 +79,7 @@ export class RoomTransport {
     }
     this.links.clear();
     this.relayReassembler.clear();
+    this.setRelayConnected(false);
   }
 
   sendToHost(message: RoomWireMessage): boolean {
@@ -280,7 +283,7 @@ export class RoomTransport {
 
     let fragments;
     try {
-      fragments = createRelayFragments(message, crypto.randomUUID());
+      fragments = createRelayFragments(message, globalThis.crypto.randomUUID());
     } catch (error) {
       this.onError?.(
         `Unable to split relayed message: ${error instanceof Error ? error.message : String(error)}`,
@@ -323,7 +326,7 @@ export class RoomTransport {
       peerId: this.options.participant.peerId,
       displayName: this.options.participant.displayName,
       role: this.options.participant.role,
-      requestId: crypto.randomUUID(),
+      requestId: globalThis.crypto.randomUUID(),
     }) as Extract<RelayClientEnvelopeV1, { kind: "join" }>;
 
     const attempt = this.openSocket(request);
@@ -373,6 +376,7 @@ export class RoomTransport {
           }
           authenticated = true;
           this.reconnectAttempts = 0;
+          this.setRelayConnected(true);
           this.handleServerMessage(message);
           finish();
           return;
@@ -398,9 +402,13 @@ export class RoomTransport {
         }
       });
       socket.addEventListener("close", () => {
-        if (this.socket === socket) this.socket = undefined;
+        const wasCurrentSocket = this.socket === socket;
+        if (wasCurrentSocket) {
+          this.socket = undefined;
+          this.markRelayUnavailable();
+        }
         if (!authenticated) finish(new Error("中继节点在入房验证前关闭了连接"));
-        if (!this.stopped) {
+        if (!this.stopped && wasCurrentSocket) {
           this.onError?.("中继节点连接已断开；现有直连可继续，正在尝试重连");
           this.scheduleReconnect();
         }
@@ -426,6 +434,31 @@ export class RoomTransport {
     if (link && link.path === path) return;
     if (link) link.path = path;
     this.onPathChange?.(peerId, path);
+  }
+
+  private setRelayConnected(connected: boolean): void {
+    if (this.relayConnected === connected) return;
+    this.relayConnected = connected;
+    this.onRelayStateChange?.(connected);
+  }
+
+  private markRelayUnavailable(): void {
+    this.setRelayConnected(false);
+    const reachablePeerIds = new Set([this.options.participant.peerId]);
+    for (const [peerId, link] of [...this.links]) {
+      if (link.channel?.readyState === "open") {
+        reachablePeerIds.add(peerId);
+        this.setPath(peerId, "direct");
+        continue;
+      }
+      this.setPath(peerId, "offline");
+      link.connection.close();
+      this.links.delete(peerId);
+    }
+    for (const peerId of [...this.participants.keys()]) {
+      if (!reachablePeerIds.has(peerId)) this.participants.delete(peerId);
+    }
+    this.onPresence?.([...this.participants.values()]);
   }
 }
 
