@@ -96,15 +96,38 @@ export function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#101317] text-ink">
-      <aside className="flex w-20 shrink-0 flex-col items-center border-r border-zinc-800 bg-zinc-950 py-4">
-        <div className="mb-7 grid h-11 w-11 place-items-center rounded-xl border border-brass/40 bg-brass/10 font-serif text-xl text-brass">秘</div>
-        <nav className="grid w-full gap-1 px-2">
+      <aside className="flex w-48 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 px-3 py-4">
+        <div className="mb-7 flex items-center gap-3 px-1">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-brass/40 bg-brass/10 font-serif text-xl text-brass">秘</div>
+          <div className="min-w-0">
+            <div className="truncate font-serif text-sm text-ink">密斯卡托尼克</div>
+            <div className="text-[10px] uppercase tracking-[.18em] text-zinc-600">CoC Room</div>
+          </div>
+        </div>
+        <nav aria-label="主导航" className="grid w-full gap-1">
           {navigation.map(({ id, label, icon: Icon }) => {
             const disabled = (id === "room" || id === "characters") && !currentRoom;
-            return <button key={id} title={label} disabled={disabled} onClick={() => setActiveView(id)} className={cn("grid h-12 place-items-center rounded-lg text-zinc-500 transition hover:bg-zinc-800 hover:text-ink disabled:opacity-20", activeView === id && "bg-zinc-800 text-brass")}><Icon className="h-5 w-5" /></button>;
+            return (
+              <button
+                key={id}
+                title={label}
+                disabled={disabled}
+                onClick={() => setActiveView(id)}
+                className={cn(
+                  "flex h-11 items-center gap-3 rounded-lg px-3 text-left text-sm text-zinc-500 transition hover:bg-zinc-800 hover:text-ink disabled:opacity-20",
+                  activeView === id && "bg-zinc-800 text-brass",
+                )}
+              >
+                <Icon className="h-5 w-5 shrink-0" />
+                <span>{label}</span>
+              </button>
+            );
           })}
         </nav>
-        <div className="mt-auto flex flex-col items-center gap-2 text-[10px] text-zinc-600"><Wifi className={cn("h-4 w-4", currentRoom && "text-emerald-500")} /><span>v0.1</span></div>
+        <div className="mt-auto flex items-center gap-2 px-3 text-[10px] text-zinc-600">
+          <Wifi className={cn("h-4 w-4", currentRoom && "text-emerald-500")} />
+          <span>{currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
+        </div>
       </aside>
       <main className="min-w-0 flex-1">
         {activeView === "lobby" && <LobbyView onConnect={connect} />}
