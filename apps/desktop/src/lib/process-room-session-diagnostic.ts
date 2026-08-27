@@ -58,6 +58,7 @@ export async function runProcessRoomSessionDiagnostic(
   let counterpartPresent = false;
   let sawCounterpart = false;
   let path: ConnectionPath = "connecting";
+  let pathAtConvergence: ConnectionPath = "connecting";
   const duplicateEventIds: string[] = [];
   let reconnectPresent = false;
   let offlineEventCommitted = false;
@@ -75,7 +76,10 @@ export async function runProcessRoomSessionDiagnostic(
     session = nextSession;
     path = "connecting";
     nextSession.onError = (message) => errors.push(message);
-    nextSession.onEvents = (nextEvents) => { events = nextEvents; };
+    nextSession.onEvents = (nextEvents) => {
+      events = nextEvents;
+      if (nextEvents.length >= 4) pathAtConvergence = path;
+    };
     nextSession.onPathChange = (peerId, nextPath) => {
       if (peerId === counterpartPeerId) path = nextPath;
     };
@@ -144,8 +148,12 @@ export async function runProcessRoomSessionDiagnostic(
       if (!hasExpectedEvents(events, chatMessage, offlineMessage, acknowledgementMessage)) {
         throw new Error("reconnected SQLite event log did not contain the expected acknowledgment");
       }
-      await waitUntil(() => path === expectedPath, errors, `final RoomSession path was not ${expectedPath}`);
-      const finalPath = verifiedPath(path, expectedPath);
+      await waitUntil(
+        () => pathAtConvergence === expectedPath,
+        errors,
+        `RoomSession path at convergence was not ${expectedPath}`,
+      );
+      const finalPath = verifiedPath(pathAtConvergence, expectedPath);
       return result(options, finalPath, events, startedAt, duplicateEventIds.includes(events[0]!.eventId));
     }
 
@@ -176,8 +184,12 @@ export async function runProcessRoomSessionDiagnostic(
     if (!offlineEventCommitted || !hasExpectedEvents(events, chatMessage, offlineMessage, acknowledgementMessage)) {
       throw new Error("host event log was incomplete after reconnect");
     }
-    await waitUntil(() => path === expectedPath, errors, `final RoomSession path was not ${expectedPath}`);
-    const finalPath = verifiedPath(path, expectedPath);
+    await waitUntil(
+      () => pathAtConvergence === expectedPath,
+      errors,
+      `RoomSession path at convergence was not ${expectedPath}`,
+    );
+    const finalPath = verifiedPath(pathAtConvergence, expectedPath);
     return result(options, finalPath, events, startedAt, true);
   } finally {
     options.repository.saveEvent = originalSaveEvent;
