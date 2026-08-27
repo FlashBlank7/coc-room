@@ -75,7 +75,7 @@ export function exportEventsToHtml(
     .body { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
     dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .9rem; margin: .5rem 0 0; }
     dt { font-weight: 650; }
-    dd { margin: 0; overflow-wrap: anywhere; }
+    dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
     .revealed { border-left: .3rem solid #98733f; padding-left: .8rem; }
     .empty { font-style: italic; }
     @media print { body { max-width: none; padding: 0; } .event { border-color: #aaa; } }
@@ -208,12 +208,50 @@ function characterToMarkdown(character: Coc7Character): string[] {
   const attributes = Object.entries(character.characteristics)
     .map(([name, value]) => `${name.toUpperCase()} ${value}`)
     .join("，");
+  const derived = [
+    `HP ${character.derived.hitPoints}/${character.derived.maxHitPoints}`,
+    `MP ${character.derived.magicPoints}/${character.derived.maxMagicPoints}`,
+    `SAN ${character.derived.sanity}/${character.derived.maxSanity}`,
+    `MOV ${character.derived.movementRate}`,
+    `体格 ${character.derived.build}`,
+    `伤害加值 ${character.derived.damageBonus}`,
+  ].join("；");
+  const statuses = activeCharacterStatuses(character);
+  const skillLines = character.skills.length === 0
+    ? ["  - 未填写"]
+    : character.skills.flatMap((skill) => {
+        const name = skill.specialization ? `${skill.name}（${skill.specialization}）` : skill.name;
+        return [`  - ${escapeMarkdown(name)}：${skill.value}（基础 ${skill.baseValue}${skill.checked ? "；已标记成长" : ""}）`];
+      });
+  const inventoryLines = character.inventory.length === 0
+    ? ["  - 无"]
+    : character.inventory.flatMap((item) => [
+        `  - **${escapeMarkdown(item.name)}** × ${item.quantity}（${item.equipped ? "已装备" : "未装备"}）`,
+        ...markdownContinuation(item.description || "无说明"),
+      ]);
+  const backgroundLines = CHARACTER_BACKGROUND_FIELDS.flatMap(([key, label]) => [
+    `  - ${label}：`,
+    ...markdownContinuation(character.background[key] || "未填写"),
+  ]);
   return [
     `- 角色：**${escapeMarkdown(character.name)}**（玩家：${escapeMarkdown(character.playerName)}）`,
     `- 职业：${escapeMarkdown(character.occupation || "未填写")}；年龄：${character.age}`,
+    `- 居住地：${escapeMarkdown(character.residence || "未填写")}；出生地：${escapeMarkdown(character.birthplace || "未填写")}`,
     `- 属性：${escapeMarkdown(attributes)}`,
-    `- 状态：HP ${character.derived.hitPoints}/${character.derived.maxHitPoints}；MP ${character.derived.magicPoints}/${character.derived.maxMagicPoints}；SAN ${character.derived.sanity}/${character.derived.maxSanity}`,
-    `- 技能数：${character.skills.length}；物品数：${character.inventory.length}`,
+    `- 衍生数值：${escapeMarkdown(derived)}`,
+    `- 异常状态：${statuses.map(escapeMarkdown).join("、") || "无"}`,
+    `- 角色 ID：\`${escapeMarkdown(character.id)}\`；所有者 Peer ID：\`${escapeMarkdown(character.ownerPeerId)}\``,
+    "- 技能：",
+    ...skillLines,
+    "- 物品：",
+    ...inventoryLines,
+    "- 背景：",
+    ...backgroundLines,
+    "- 备注：",
+    ...markdownContinuation(character.notes || "未填写"),
+    `- 更新时间：${escapeMarkdown(character.updatedAt)}`,
+    "- 扩展字段：",
+    ...markdownContinuation(JSON.stringify(character.extensions, null, 2)),
   ];
 }
 
@@ -267,14 +305,65 @@ function characterToHtml(character: Coc7Character): string {
   const attributes = Object.entries(character.characteristics)
     .map(([name, value]) => `${name.toUpperCase()} ${value}`)
     .join("，");
+  const skills = character.skills.map((skill) => {
+    const name = skill.specialization ? `${skill.name}（${skill.specialization}）` : skill.name;
+    return `${name}：${skill.value}（基础 ${skill.baseValue}${skill.checked ? "；已标记成长" : ""}）`;
+  }).join("\n") || "未填写";
+  const inventory = character.inventory.map((item) =>
+    `${item.name} × ${item.quantity}（${item.equipped ? "已装备" : "未装备"}）${item.description ? `：${item.description}` : ""}`,
+  ).join("\n") || "无";
+  const background = CHARACTER_BACKGROUND_FIELDS.map(
+    ([key, label]) => `${label}：${character.background[key] || "未填写"}`,
+  ).join("\n");
   return definitionList([
     ["角色", `${character.name}（玩家：${character.playerName}）`],
     ["职业", character.occupation || "未填写"],
     ["年龄", String(character.age)],
+    ["居住地", character.residence || "未填写"],
+    ["出生地", character.birthplace || "未填写"],
     ["属性", attributes],
-    ["状态", `HP ${character.derived.hitPoints}/${character.derived.maxHitPoints}；MP ${character.derived.magicPoints}/${character.derived.maxMagicPoints}；SAN ${character.derived.sanity}/${character.derived.maxSanity}`],
-    ["条目", `技能 ${character.skills.length}；物品 ${character.inventory.length}`],
+    ["衍生数值", `HP ${character.derived.hitPoints}/${character.derived.maxHitPoints}；MP ${character.derived.magicPoints}/${character.derived.maxMagicPoints}；SAN ${character.derived.sanity}/${character.derived.maxSanity}；MOV ${character.derived.movementRate}；体格 ${character.derived.build}；伤害加值 ${character.derived.damageBonus}`],
+    ["异常状态", activeCharacterStatuses(character).join("、") || "无"],
+    ["角色 ID", character.id],
+    ["所有者 Peer ID", character.ownerPeerId],
+    ["技能", skills],
+    ["物品", inventory],
+    ["背景", background],
+    ["备注", character.notes || "未填写"],
+    ["更新时间", character.updatedAt],
+    ["扩展字段", JSON.stringify(character.extensions, null, 2)],
   ]);
+}
+
+const CHARACTER_STATUS_FIELDS: ReadonlyArray<readonly [keyof Coc7Character["status"], string]> = [
+  ["temporaryInsanity", "临时性疯狂"],
+  ["indefiniteInsanity", "不定性疯狂"],
+  ["majorWound", "重伤"],
+  ["dying", "濒死"],
+  ["unconscious", "昏迷"],
+];
+
+const CHARACTER_BACKGROUND_FIELDS: ReadonlyArray<readonly [keyof Coc7Character["background"], string]> = [
+  ["personalDescription", "个人描述"],
+  ["ideologyAndBeliefs", "思想与信念"],
+  ["significantPeople", "重要之人"],
+  ["meaningfulLocations", "意义非凡之地"],
+  ["treasuredPossessions", "宝贵之物"],
+  ["traits", "特质"],
+  ["injuriesAndScars", "伤口与疤痕"],
+  ["phobiasAndManias", "恐惧症与狂躁症"],
+  ["arcaneTomesSpellsAndArtifacts", "神话典籍、咒文与神器"],
+  ["encountersWithStrangeEntities", "奇异实体遇见史"],
+];
+
+function activeCharacterStatuses(character: Coc7Character): string[] {
+  return CHARACTER_STATUS_FIELDS
+    .filter(([key]) => character.status[key])
+    .map(([, label]) => label);
+}
+
+function markdownContinuation(value: string): string[] {
+  return escapeMarkdownBlock(value).map((line) => `    ${line || "  "}`);
 }
 
 function definitionList(pairs: ReadonlyArray<readonly [string, string]>): string {
