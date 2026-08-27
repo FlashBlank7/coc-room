@@ -48,16 +48,22 @@ jobs:
         run: |
           uv run python - <<'PY'
           import json
+          import hashlib
           import os
           import subprocess
           import sys
 
+          source_text = "# 雾中车站\n## 月台\n地点：旧月台\nNPC：林医生\n线索：一张日期异常的车票\n检定：侦查"
+          model = os.environ["DEEPSEEK_MODEL"].strip()
+          if not model:
+              raise SystemExit("DEEPSEEK_MODEL must not be empty")
           request = {
               "id": "github-live-smoke",
               "action": "parse_module",
-              "source_text": "# 雾中车站\n## 月台\n地点：旧月台\nNPC：林医生\n线索：一张日期异常的车票\n检定：侦查",
+              "source_text": source_text,
               "source_name": "github-live-smoke.md",
-              "model": os.environ["DEEPSEEK_MODEL"],
+              "model": model,
+              "mock": False,
               "api_key": os.environ["DEEPSEEK_API_KEY"],
               "max_retries": 0,
               "max_output_tokens": 4000,
@@ -79,6 +85,37 @@ jobs:
           results = [event for event in events if event.get("type") == "result"]
           if len(results) != 1 or results[0].get("parseStatus") != "ready_for_review":
               raise SystemExit("live extraction did not produce one ready_for_review result")
-          calls = results[0].get("usage", {}).get("calls")
-          print(f"DeepSeek live extraction succeeded with {calls} API call(s).")
+          result = results[0]
+          normalized = result.get("normalizedText")
+          if normalized != source_text:
+              raise SystemExit("live extraction did not preserve the UTF-8 source text")
+
+          usage = result.get("usage")
+          calls = usage.get("calls") if isinstance(usage, dict) else None
+          if not isinstance(calls, int) or calls < 1:
+              raise SystemExit("live extraction did not record a real DeepSeek API call")
+
+          module = result.get("module")
+          if not isinstance(module, dict):
+              raise SystemExit("live extraction did not return a module package")
+          metadata = module.get("metadata")
+          title = metadata.get("title") if isinstance(metadata, dict) else None
+          overview = module.get("overview")
+          entity_fields = ("scenes", "locations", "npcs", "clues", "handouts", "suggestedChecks", "keeperNotes")
+          has_entities = any(isinstance(module.get(field), list) and module[field] for field in entity_fields)
+          has_meaningful_content = isinstance(overview, str) and len(overview.strip()) >= 20
+          if not isinstance(title, str) or not title.strip() or not (has_entities or has_meaningful_content):
+              raise SystemExit("live extraction returned no useful title, entities, or overview")
+
+          source_documents = module.get("sourceDocuments")
+          if not isinstance(source_documents, list) or len(source_documents) != 1:
+              raise SystemExit("live extraction did not return one source document")
+          source_document = source_documents[0]
+          expected_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+          if not isinstance(source_document, dict) or source_document.get("name") != request["source_name"]:
+              raise SystemExit("live extraction source provenance name does not match the request")
+          if source_document.get("contentHash") != expected_sha256:
+              raise SystemExit("live extraction source provenance hash does not match the request")
+
+          print(f"DeepSeek live extraction succeeded with model {model!r}, {calls} API call(s), and preserved source provenance.")
           PY

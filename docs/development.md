@@ -124,7 +124,7 @@ Pop-Location
 
 普通 `pnpm test` 中的 `RoomSession.live.test.ts` 默认跳过，因为它需要一个已启动的 Worker。CI 会启动本地 `workerd` 并设置 `COC_ROOM_LIVE_RELAY_URL`，让两个真实 `RoomSession` 通过 WebSocket 强制中继，验证聊天、骰子、模组切换、大型 UTF-8 揭示、离线事件和重连补发；这两个会话仍使用内存仓库，不是 SQLite 桌面 E2E。
 
-Windows job 还会启动发布构建的真实 WebView2：直连模式使用浏览器 `RTCPeerConnection` / DataChannel，中继模式使用本地 Worker，二者都逐字校验大型中文与 emoji 载荷。存储模式则验证 SQLite 幂等写入和重读、Markdown/无脚本自包含 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。网络诊断在一个桌面进程的同一 WebView 中创建双端，并不等同于两个独立安装客户端之间的完整 E2E；NSIS 阶段另行验证静默安装、主进程启动和卸载。
+Windows job 还会为每种模式分别启动两个独立的发布构建桌面进程（各自使用真实 WebView2），通过临时 rendezvous 文件交换房间凭据：直连模式使用浏览器 `RTCPeerConnection` / DataChannel，强制中继模式使用本地 Worker，二者都逐字校验大型中文与 emoji 载荷。存储模式则验证 SQLite 幂等写入和重读、Markdown/无脚本自包含 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。这验证的是两个独立 WebView2 进程之间的 E2E，不等同于两个独立安装客户端；NSIS 阶段另行验证静默安装、主进程启动和卸载。
 
 ## 6. Windows x64 NSIS 构建
 
