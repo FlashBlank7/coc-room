@@ -147,7 +147,7 @@ describe("ModulesView browser import", () => {
       Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectUrl });
     }
 
-    fireEvent.click(screen.getByRole("tab", { name: "JSON 编辑" }));
+    fireEvent.click(screen.getByRole("tab", { name: "高级 JSON" }));
     const edited = { ...revisionOne, overview: "从历史版本产生的新修订" };
     fireEvent.change(screen.getByPlaceholderText("解析结果会出现在这里，也可以粘贴 ModulePackageV1 JSON。"), {
       target: { value: JSON.stringify(edited) },

@@ -312,7 +312,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   ) => {
     if (!session?.isHost) return;
     if (!content.body.trim()) {
-      setError("该条目没有经过确认的玩家可见正文；请先在 JSON 编辑器填写 revealText/content");
+      setError("该条目没有经过确认的玩家可见正文；请先在结构化编辑中填写玩家可见文本或手记正文");
       return;
     }
     if (!window.confirm(`确认向全房间永久公开“${content.title}”？公开事件无法撤回。`)) return;
@@ -427,7 +427,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                 <p className="text-xs text-zinc-500">
                   {selectedModuleId && selectedRevision
                     ? `当前打开 v${selectedRevision}；修改后会另存为新的修订。`
-                    : "先浏览 AI 抽取结果；需要修正时再切换 JSON 编辑。"}
+                    : "先浏览 AI 抽取结果；需要修正时切换到结构化编辑，高级字段可使用 JSON。"}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -450,7 +450,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                     onClick={() => setWorkspaceMode("structured")}
                     className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition disabled:opacity-30 ${workspaceMode === "structured" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
                   >
-                    <LayoutList className="h-3.5 w-3.5" />缁撴瀯缂栬緫
+                    <LayoutList className="h-3.5 w-3.5" />结构化编辑
                   </button>
                   <button
                     type="button"
@@ -460,7 +460,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                     onClick={() => setWorkspaceMode("json")}
                     className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition ${workspaceMode === "json" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
                   >
-                    <Code2 className="h-3.5 w-3.5" />JSON 编辑
+                    <Code2 className="h-3.5 w-3.5" />高级 JSON
                   </button>
                 </div>
                 <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || !draftDirty}>
