@@ -406,6 +406,43 @@ describe("relay Worker", () => {
     });
   });
 
+  it("announces an unexpected socket loss and lets the same player identity rejoin", async () => {
+    const room = await createRoom();
+    const host = await join(room.websocketUrl, room.hostToken, room.hostPeerId, "host");
+    const player = await join(
+      room.websocketUrl,
+      room.joinToken,
+      "transient-player",
+      "player",
+    );
+
+    const left = nextMessage(host, (message) =>
+      message.kind === "presence" && message.action === "left",
+    );
+    player.close(1012, "transient network loss");
+    await expect(left).resolves.toMatchObject({
+      kind: "presence",
+      action: "left",
+      peer: { peerId: "transient-player" },
+    });
+
+    const rejoined = nextMessage(host, (message) =>
+      message.kind === "presence" && message.action === "joined",
+    );
+    const replacement = await join(
+      room.websocketUrl,
+      room.joinToken,
+      "transient-player",
+      "player",
+    );
+    await expect(rejoined).resolves.toMatchObject({
+      kind: "presence",
+      action: "joined",
+      peer: { peerId: "transient-player" },
+    });
+    expect(replacement.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("forwards transport fragments with room for the server relay envelope", async () => {
     const room = await createRoom();
     const host = await join(room.websocketUrl, room.hostToken, room.hostPeerId, "host");

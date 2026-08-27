@@ -41,6 +41,8 @@ export class RoomTransport {
   private socket?: WebSocket;
   private readonly links = new Map<string, PeerLink>();
   private readonly relayReassembler = new RelayFragmentReassembler();
+  /** Peers currently advertised by the Worker, independently of direct reachability. */
+  private readonly relayPeerIds = new Set<string>();
   private readonly iceTimeoutMs: number;
   private stopped = false;
   private readonly participants = new Map<string, ParticipantV1>();
@@ -81,6 +83,7 @@ export class RoomTransport {
     }
     this.links.clear();
     this.relayReassembler.clear();
+    this.relayPeerIds.clear();
     this.setRelayConnected(false);
   }
 
@@ -126,14 +129,35 @@ export class RoomTransport {
   private handleServerMessage(message: ServerMessage): void {
     switch (message.kind) {
       case "ready":
+        // A Worker snapshot describes relay membership, not end-to-end
+        // reachability. Keep peers whose DataChannel stayed open while either
+        // side reconnected its relay WebSocket.
+        const directlyReachable = [...this.participants.entries()].filter(
+          ([peerId]) => this.hasOpenDirectLink(peerId),
+        );
+        this.relayPeerIds.clear();
         this.participants.clear();
         this.participants.set(this.options.participant.peerId, this.options.participant);
-        for (const peer of message.peers ?? []) this.participants.set(peer.peerId, peer);
+        this.relayPeerIds.add(this.options.participant.peerId);
+        for (const peer of message.peers ?? []) {
+          this.participants.set(peer.peerId, peer);
+          this.relayPeerIds.add(peer.peerId);
+        }
+        for (const [peerId, participant] of directlyReachable) {
+          if (!this.participants.has(peerId)) this.participants.set(peerId, participant);
+        }
         this.updatePresence([...this.participants.values()]);
         break;
       case "presence":
-        if (message.action === "left") this.participants.delete(message.peer.peerId);
-        else this.participants.set(message.peer.peerId, message.peer as ParticipantV1);
+        if (message.action === "left") {
+          this.relayPeerIds.delete(message.peer.peerId);
+          if (!this.hasOpenDirectLink(message.peer.peerId)) {
+            this.participants.delete(message.peer.peerId);
+          }
+        } else {
+          this.relayPeerIds.add(message.peer.peerId);
+          this.participants.set(message.peer.peerId, message.peer as ParticipantV1);
+        }
         this.updatePresence([...this.participants.values()]);
         break;
       case "signal":
@@ -239,7 +263,20 @@ export class RoomTransport {
   private attachChannel(peerId: string, link: PeerLink, channel: RTCDataChannel): void {
     link.channel = channel;
     channel.onopen = () => this.setPath(peerId, "direct");
-    channel.onclose = () => this.setPath(peerId, "relay");
+    channel.onclose = () => {
+      if (link.channel !== channel) return;
+      if (this.relayConnected && this.relayPeerIds.has(peerId)) {
+        this.setPath(peerId, "relay");
+        return;
+      }
+
+      // A relay `left` only means that the peer lost Worker membership. Once
+      // its direct channel also closes, it is genuinely unreachable and can
+      // be removed. An explicit RoomTransport.stop() closes both paths, so it
+      // follows this same cleanup path without a protocol-specific leave flag.
+      this.participants.delete(peerId);
+      this.updatePresence([...this.participants.values()]);
+    };
     channel.onerror = () => this.setPath(peerId, "relay");
     channel.onmessage = ({ data }) => {
       if (typeof data !== "string") return;
@@ -458,6 +495,7 @@ export class RoomTransport {
 
   private markRelayUnavailable(): void {
     this.setRelayConnected(false);
+    this.relayPeerIds.clear();
     const reachablePeerIds = new Set([this.options.participant.peerId]);
     for (const [peerId, link] of [...this.links]) {
       if (link.channel?.readyState === "open") {
@@ -473,6 +511,10 @@ export class RoomTransport {
       if (!reachablePeerIds.has(peerId)) this.participants.delete(peerId);
     }
     this.onPresence?.([...this.participants.values()]);
+  }
+
+  private hasOpenDirectLink(peerId: string): boolean {
+    return this.links.get(peerId)?.channel?.readyState === "open";
   }
 }
 

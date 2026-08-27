@@ -321,6 +321,68 @@ describe("RoomTransport delivery paths", () => {
     transport.stop();
   });
 
+  it("keeps a healthy direct peer when the Worker reports its transient relay disconnect", async () => {
+    const transport = createTransport();
+    const paths: string[] = [];
+    const presence: string[][] = [];
+    transport.onPathChange = (peerId, path) => paths.push(`${peerId}:${path}`);
+    transport.onPresence = (participants) => presence.push(participants.map(({ peerId }) => peerId));
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+    const connection = FakeRTCPeerConnection.instances[0]!;
+    const channel = connection.channels[0]!;
+    channel.open();
+
+    socket.receive({
+      kind: "presence",
+      protocolVersion: 1,
+      action: "left",
+      peer: { peerId: remotePlayer.peerId },
+    });
+
+    expect(connection.connectionState).not.toBe("closed");
+    expect(presence.at(-1)).toContain(remotePlayer.peerId);
+    expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:direct`);
+    expect(transport.sendToPeer(remotePlayer.peerId, wireMessage)).toBe(true);
+    expect(channel.sent.at(-1)).toBe(JSON.stringify(wireMessage));
+
+    socket.receive({
+      kind: "presence",
+      protocolVersion: 1,
+      action: "joined",
+      peer: remotePlayer,
+    });
+    expect(FakeRTCPeerConnection.instances).toHaveLength(1);
+    expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:direct`);
+    transport.stop();
+  });
+
+  it("removes a peer after both its relay membership and direct channel are gone", async () => {
+    const transport = createTransport();
+    const paths: string[] = [];
+    const presence: string[][] = [];
+    transport.onPathChange = (peerId, path) => paths.push(`${peerId}:${path}`);
+    transport.onPresence = (participants) => presence.push(participants.map(({ peerId }) => peerId));
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+    const connection = FakeRTCPeerConnection.instances[0]!;
+    const channel = connection.channels[0]!;
+    channel.open();
+
+    socket.receive({
+      kind: "presence",
+      protocolVersion: 1,
+      action: "left",
+      peer: { peerId: remotePlayer.peerId },
+    });
+    channel.close();
+
+    expect(connection.connectionState).toBe("closed");
+    expect(presence.at(-1)).toEqual(["host-peer-1234"]);
+    expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:offline`);
+    transport.stop();
+  });
+
   it("fragments a large Unicode relay message into Worker-safe frames and reassembles it once", async () => {
     const transport = createTransport();
     const socket = await authenticateTransport(transport, [remotePlayer]);
