@@ -496,8 +496,7 @@ fn finish_network_smoke(app: tauri::AppHandle, report: NetworkSmokeReport) -> Re
     if !matches!(
         report.mode.as_str(),
         "direct" | "relay" | "storage" | "session-direct" | "session-relay"
-    )
-        || report.message.len() > 4_000
+    ) || report.message.len() > 4_000
     {
         return Err("network smoke report is invalid".to_string());
     }
