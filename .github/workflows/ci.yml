@@ -36,6 +36,28 @@ jobs:
       - run: pnpm --filter @coc-room/protocol build
       - run: pnpm check
       - run: pnpm test
+      - name: Live two-session forced-relay smoke
+        shell: bash
+        run: |
+          pnpm --filter @coc-room/relay exec wrangler dev --port 8787 >"$RUNNER_TEMP/relay.log" 2>&1 &
+          relay_pid=$!
+          trap 'kill "$relay_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$relay_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/relay.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8787/health >/dev/null || {
+            cat "$RUNNER_TEMP/relay.log"
+            exit 1
+          }
+          COC_ROOM_LIVE_RELAY_URL=http://127.0.0.1:8787 \
+            pnpm --filter @coc-room/desktop smoke:relay-session
       - run: pnpm build
 
   python:

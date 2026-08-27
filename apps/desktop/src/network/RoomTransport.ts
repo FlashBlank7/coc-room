@@ -20,7 +20,7 @@ type SignalData = WebRtcSignalV1;
 type ServerMessage = RelayServerEnvelopeV1;
 
 interface PeerLink {
-  connection: RTCPeerConnection;
+  connection?: RTCPeerConnection;
   channel?: RTCDataChannel;
   pendingCandidates: RTCIceCandidateInit[];
   path: ConnectionPath;
@@ -33,6 +33,8 @@ export interface RoomTransportOptions {
   participant: ParticipantV1;
   hostPeerId: string;
   iceTimeoutMs?: number;
+  /** Diagnostic switch used to verify the complete relay fallback path. */
+  forceRelay?: boolean;
 }
 
 export class RoomTransport {
@@ -75,7 +77,7 @@ export class RoomTransport {
     this.socket = undefined;
     for (const link of this.links.values()) {
       link.channel?.close();
-      link.connection.close();
+      link.connection?.close();
     }
     this.links.clear();
     this.relayReassembler.clear();
@@ -166,7 +168,7 @@ export class RoomTransport {
       if (participant.peerId === this.options.participant.peerId) continue;
       if (this.isHost && participant.role === "player") {
         const existing = this.links.get(participant.peerId);
-        if (existing && ["failed", "closed"].includes(existing.connection.connectionState)) {
+        if (existing?.connection && ["failed", "closed"].includes(existing.connection.connectionState)) {
           existing.connection.close();
           this.links.delete(participant.peerId);
         }
@@ -175,7 +177,7 @@ export class RoomTransport {
     }
     for (const [peerId, link] of this.links) {
       if (!currentIds.has(peerId)) {
-        link.connection.close();
+        link.connection?.close();
         this.links.delete(peerId);
         this.onPathChange?.(peerId, "offline");
       }
@@ -185,6 +187,13 @@ export class RoomTransport {
   private async createPeer(peerId: string, initiator: boolean): Promise<PeerLink> {
     const existing = this.links.get(peerId);
     if (existing) return existing;
+
+    if (this.options.forceRelay) {
+      const relayLink: PeerLink = { pendingCandidates: [], path: "relay" };
+      this.links.set(peerId, relayLink);
+      this.setPath(peerId, "relay");
+      return relayLink;
+    }
 
     const connection = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
@@ -243,21 +252,24 @@ export class RoomTransport {
   }
 
   private async handleSignal(fromPeerId: string, signal: SignalData): Promise<void> {
+    if (this.options.forceRelay) return;
     try {
       const link = await this.createPeer(fromPeerId, false);
+      const connection = link.connection;
+      if (connection === undefined) throw new Error("WebRTC connection was not initialized");
       if (signal.type === "offer") {
-        await link.connection.setRemoteDescription(signal.description);
+        await connection.setRemoteDescription(signal.description);
         await this.flushPendingCandidates(link);
-        const answer = await link.connection.createAnswer();
-        await link.connection.setLocalDescription(answer);
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
         if (!this.sendSocket({ kind: "signal", targetPeerId: fromPeerId, data: { type: "answer", description: answer } })) {
           this.setPath(fromPeerId, "relay");
         }
       } else if (signal.type === "answer") {
-        await link.connection.setRemoteDescription(signal.description);
+        await connection.setRemoteDescription(signal.description);
         await this.flushPendingCandidates(link);
       } else {
-        if (link.connection.remoteDescription) await link.connection.addIceCandidate(signal.candidate);
+        if (connection.remoteDescription) await connection.addIceCandidate(signal.candidate);
         else link.pendingCandidates.push(signal.candidate);
       }
     } catch (error) {
@@ -267,8 +279,10 @@ export class RoomTransport {
   }
 
   private async flushPendingCandidates(link: PeerLink): Promise<void> {
+    const connection = link.connection;
+    if (connection === undefined) throw new Error("WebRTC connection was not initialized");
     const pending = link.pendingCandidates.splice(0);
-    for (const candidate of pending) await link.connection.addIceCandidate(candidate);
+    for (const candidate of pending) await connection.addIceCandidate(candidate);
   }
 
   private sendRelay(peerId: string, message: RoomWireMessage): boolean {
@@ -452,7 +466,7 @@ export class RoomTransport {
         continue;
       }
       this.setPath(peerId, "offline");
-      link.connection.close();
+      link.connection?.close();
       this.links.delete(peerId);
     }
     for (const peerId of [...this.participants.keys()]) {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Save, Trash2 } from "lucide-react";
+import { KeyRound, RadioTower, Save, Trash2 } from "lucide-react";
 import { deleteDeepseekKey, hasDeepseekKey, saveDeepseekKey } from "../lib/module-parser";
 import { getRepository } from "../data/repository";
 import { useAppStore } from "../store/app-store";
@@ -7,6 +7,7 @@ import { Button } from "../components/ui/Button";
 import { Field, Input } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
 import { validateRelayOrigin } from "../lib/relay-url";
+import { runNetworkDiagnostic, type NetworkDiagnosticMode } from "../lib/network-diagnostic";
 
 export function SettingsView() {
   const relayUrl = useAppStore((state) => state.relayUrl);
@@ -17,6 +18,7 @@ export function SettingsView() {
   const [hasKey, setHasKey] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
+  const [diagnosticMode, setDiagnosticMode] = useState<NetworkDiagnosticMode>();
   useEffect(() => {
     void hasDeepseekKey().then(setHasKey).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, []);
@@ -57,5 +59,66 @@ export function SettingsView() {
     }
   };
 
-  return <div className="h-full overflow-y-auto p-8"><div className="mx-auto max-w-2xl"><header className="mb-6"><p className="text-xs uppercase tracking-[.3em] text-brass">Local settings</p><h1 className="mt-2 font-serif text-3xl">设置</h1></header><Panel className="grid gap-5"><Field label="公网信令/中继节点" hint="填写 Worker 的 HTTPS 根地址（本机开发可用 HTTP）；创建房间后会自动使用其 WSS 地址。"><Input value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} /></Field><Field label="DeepSeek 模型"><Input value={model} onChange={(event) => setModel(event.target.value)} /></Field><Field label="DeepSeek API Key" hint={hasKey ? "已安全保存到 Windows Credential Manager；留空不会覆盖。" : "不会写入 SQLite、日志或命令行。"}><Input type="password" autoComplete="off" value={key} onChange={(event) => setKey(event.target.value)} placeholder={hasKey ? "••••••••••••" : "sk-…"} /></Field><div className="flex gap-2"><Button onClick={() => void saveAll()}><Save className="mr-2 h-4 w-4" />保存设置</Button>{hasKey && <Button variant="danger" onClick={() => void removeKey()}><Trash2 className="mr-2 h-4 w-4" />删除 Key</Button>}</div>{notice && <p className="text-sm text-emerald-400">{notice}</p>}{error && <p className="text-sm text-red-400">{error}</p>}<div className="rounded-lg bg-zinc-950 p-4 text-xs leading-5 text-zinc-500"><KeyRound className="mb-2 h-4 w-4 text-brass" />WebRTC DataChannel 自带 DTLS 加密；当直连失败走公共 WebSocket 中继时，首版没有应用层端到端加密，中继运营者理论上可以读取正文。</div></Panel></div></div>;
+  const runDiagnostic = async (mode: NetworkDiagnosticMode) => {
+    setDiagnosticMode(mode);
+    setNotice(undefined);
+    setError(undefined);
+    try {
+      const result = await runNetworkDiagnostic(validateRelayOrigin(relayUrl), mode);
+      setNotice(
+        `${mode === "direct" ? "WebRTC 直连" : "WebSocket 中继"}自检通过：`
+        + `${result.payloadBytes.toLocaleString()} 字节，${result.durationMs} ms`,
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDiagnosticMode(undefined);
+    }
+  };
+
+  return (
+    <div className="h-full overflow-y-auto p-8">
+      <div className="mx-auto max-w-2xl">
+        <header className="mb-6">
+          <p className="text-xs uppercase tracking-[.3em] text-brass">Local settings</p>
+          <h1 className="mt-2 font-serif text-3xl">设置</h1>
+        </header>
+        <Panel className="grid gap-5">
+          <Field label="公网信令/中继节点" hint="填写 Worker 的 HTTPS 根地址（本机开发可用 HTTP）；创建房间后会自动使用其 WSS 地址。">
+            <Input value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} />
+          </Field>
+          <Field label="DeepSeek 模型">
+            <Input value={model} onChange={(event) => setModel(event.target.value)} />
+          </Field>
+          <Field label="DeepSeek API Key" hint={hasKey ? "已安全保存到 Windows Credential Manager；留空不会覆盖。" : "不会写入 SQLite、日志或命令行。"}>
+            <Input type="password" autoComplete="off" value={key} onChange={(event) => setKey(event.target.value)} placeholder={hasKey ? "••••••••••••" : "sk-…"} />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void saveAll()}><Save className="mr-2 h-4 w-4" />保存设置</Button>
+            {hasKey && <Button variant="danger" onClick={() => void removeKey()}><Trash2 className="mr-2 h-4 w-4" />删除 Key</Button>}
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-zinc-300">
+              <RadioTower className="h-4 w-4 text-brass" />本机网络链路自检
+            </div>
+            <p className="mb-3 text-xs leading-5 text-zinc-500">创建一次性双端测试房间，发送约 100 KiB 中文与 emoji 内容；不会写入跑团记录。</p>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" disabled={diagnosticMode !== undefined} onClick={() => void runDiagnostic("direct")}>
+                {diagnosticMode === "direct" ? "直连检测中…" : "检测 WebRTC 直连"}
+              </Button>
+              <Button variant="secondary" disabled={diagnosticMode !== undefined} onClick={() => void runDiagnostic("relay")}>
+                {diagnosticMode === "relay" ? "中继检测中…" : "强制检测中继"}
+              </Button>
+            </div>
+          </div>
+          {notice && <p className="text-sm text-emerald-400">{notice}</p>}
+          {error && <p className="text-sm text-red-400">{error}</p>}
+          <div className="rounded-lg bg-zinc-950 p-4 text-xs leading-5 text-zinc-500">
+            <KeyRound className="mb-2 h-4 w-4 text-brass" />
+            WebRTC DataChannel 自带 DTLS 加密；当直连失败走公共 WebSocket 中继时，首版没有应用层端到端加密，中继运营者理论上可以读取正文。
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
 }

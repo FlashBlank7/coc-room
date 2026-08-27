@@ -40,6 +40,8 @@ export interface RoomSessionOptions {
   displayName: string;
   relayUrl: string;
   repository: LocalRepository;
+  /** Diagnostic switch used by the live forced-relay integration smoke. */
+  forceRelay?: boolean;
   /** Override used by deterministic tests; production uses RoomTransport. */
   transportFactory?: RoomSessionTransportFactory;
 }
@@ -84,6 +86,7 @@ export class RoomSession {
       relayUrl: options.relayUrl,
       participant: this.participant,
       hostPeerId: options.room.hostPeerId,
+      forceRelay: options.forceRelay,
     });
     this.transport.onWireMessage = async (peerId, message) => {
       try {

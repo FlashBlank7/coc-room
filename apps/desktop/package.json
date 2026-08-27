@@ -8,7 +8,8 @@
     "tauri": "tauri",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke:relay-session": "vitest run src/network/RoomSession.live.test.ts --reporter=verbose"
   },
   "dependencies": {
     "@coc-room/protocol": "workspace:*",

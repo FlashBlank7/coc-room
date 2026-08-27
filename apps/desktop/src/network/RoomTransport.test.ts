@@ -245,6 +245,18 @@ describe("RoomTransport delivery paths", () => {
     transport.stop();
   });
 
+  it("can force the complete relay path without constructing WebRTC", async () => {
+    const transport = createTransport({ forceRelay: true });
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+
+    expect(FakeRTCPeerConnection.instances).toHaveLength(0);
+    transport.broadcast(wireMessage);
+    expect(sentEnvelopes(socket).filter(({ kind }) => kind === "relay")).toEqual([
+      { kind: "relay", targetPeerId: remotePlayer.peerId, payload: wireMessage },
+    ]);
+    transport.stop();
+  });
+
   it("falls back to WSS relay when an open DataChannel throws during send", async () => {
     const transport = createTransport();
     const paths: string[] = [];
