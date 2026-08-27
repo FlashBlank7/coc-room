@@ -11,6 +11,7 @@ import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
 import { ModuleEntityBrowser } from "../components/module/ModuleEntityBrowser";
+import { StructuredModuleEditor } from "../components/module/StructuredModuleEditor";
 
 export function ModulesView({ session }: { session?: RoomSession }) {
   const modules = useAppStore((state) => state.modules);
@@ -27,12 +28,13 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const [selectedModuleId, setSelectedModuleId] = useState<string>();
   const [selectedRevision, setSelectedRevision] = useState<number>();
   const [moduleHistories, setModuleHistories] = useState<Record<string, StoredModule[]>>({});
-  const [workspaceMode, setWorkspaceMode] = useState<"browse" | "json">("browse");
+  const [workspaceMode, setWorkspaceMode] = useState<"browse" | "structured" | "json">("browse");
   const [progress, setProgress] = useState<ParserProgress[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const browserImportRef = useRef<HTMLInputElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const canManageRoomModule = currentRoom?.localRole === "host" && session?.isHost === true;
   const parsedDraft = useMemo(() => {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
@@ -109,6 +111,17 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     if (selectedModuleId || draft.trim() || modules.length === 0) return;
     void openModule(modules[0]!);
   }, [draft, modules, openModule, selectedModuleId]);
+
+  useEffect(() => {
+    if (!draft || !selectedModuleId) return;
+    // The library and import panels can be taller than a compact window. Put
+    // the newly opened workbench in view so a successful import is apparent.
+    const frame = window.requestAnimationFrame(() => {
+      const workspace = workspaceRef.current;
+      if (workspace && typeof workspace.scrollIntoView === "function") workspace.scrollIntoView({ block: "start" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [draft, selectedModuleId, selectedRevision]);
 
   const chooseSource = async () => {
     if (!window.__TAURI_INTERNALS__) return setError("文件选择需要桌面应用；浏览器预览可直接粘贴文字");
@@ -407,7 +420,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               })}
             </Panel>
           </div>
-          <Panel className="flex min-h-[700px] flex-col gap-4 xl:h-[calc(100vh-10rem)]">
+          <Panel ref={workspaceRef} tabIndex={-1} className="flex min-h-[700px] flex-col gap-4 xl:h-[calc(100vh-10rem)]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-3">
               <div>
                 <h2 className="font-semibold">模组工作台</h2>
@@ -432,7 +445,18 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                   <button
                     type="button"
                     role="tab"
+                    aria-selected={workspaceMode === "structured"}
+                    disabled={!parsedDraft?.success}
+                    onClick={() => setWorkspaceMode("structured")}
+                    className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition disabled:opacity-30 ${workspaceMode === "structured" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
+                  >
+                    <LayoutList className="h-3.5 w-3.5" />缁撴瀯缂栬緫
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     aria-selected={workspaceMode === "json"}
+                    title="高级 JSON"
                     onClick={() => setWorkspaceMode("json")}
                     className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition ${workspaceMode === "json" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
                   >
@@ -463,6 +487,18 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                     </div>
                   )
                 )}
+              </div>
+            )}
+
+            {draft && workspaceMode === "structured" && parsedDraft?.success && (
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                <StructuredModuleEditor
+                  modulePackage={parsedDraft.data}
+                  onChange={(next) => {
+                    setDraft(JSON.stringify(next, null, 2));
+                    setDraftDirty(true);
+                  }}
+                />
               </div>
             )}
 
