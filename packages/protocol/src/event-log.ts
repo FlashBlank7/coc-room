@@ -48,6 +48,8 @@ export class HostEventSequencer {
   private readonly eventsBySequence = new Map<number, RoomEventV1>();
   private readonly eventsById = new Map<string, RoomEventV1>();
   private readonly eventsByCommandId = new Map<string, RoomEventV1>();
+  private readonly characterOwners = new Map<string, string>();
+  private activeModule?: Readonly<{ moduleId: string; revision: number }>;
   private nextSequence = 1;
 
   constructor(roomId: string, options: HostEventSequencerOptions = {}) {
@@ -114,6 +116,29 @@ export class HostEventSequencer {
     return { event, duplicate: false };
   }
 
+  /**
+   * Validates an untrusted command against both its authenticated sender and
+   * the room's authoritative history before sequencing it. Production hosts
+   * should use this entry point instead of resolving a command separately.
+   */
+  commitCommand(
+    candidate: RoomCommandV1,
+    options: CommandToEventOptions = {},
+  ): CommitEventResult {
+    const command = roomCommandSchema.parse(candidate);
+    const draft = commandToEventDraft(command, options);
+
+    // A retried command must return the exact event that was confirmed the
+    // first time, even if the active module has since changed.
+    const existing = this.eventsByCommandId.get(command.commandId);
+    if (existing !== undefined) {
+      return { event: existing, duplicate: true };
+    }
+
+    this.validateCommandAgainstHistory(command);
+    return this.commit(draft);
+  }
+
   eventsAfter(lastSequence: number, limit = Number.POSITIVE_INFINITY): RoomEventV1[] {
     if (!Number.isInteger(lastSequence) || lastSequence < 0) {
       throw new RangeError("lastSequence must be a non-negative integer");
@@ -133,10 +158,51 @@ export class HostEventSequencer {
   }
 
   private remember(event: RoomEventV1): void {
+    if (event.type === "character.updated") {
+      const character = event.payload.character;
+      const existingOwner = this.characterOwners.get(character.id);
+      if (existingOwner !== undefined && existingOwner !== character.ownerPeerId) {
+        throw new Error(`Character ${character.id} changed owner in authoritative history`);
+      }
+    }
+
     this.eventsBySequence.set(event.sequence, event);
     this.eventsById.set(event.eventId, event);
     if (event.causedByCommandId !== undefined) {
       this.eventsByCommandId.set(event.causedByCommandId, event);
+    }
+    if (event.type === "character.updated") {
+      const character = event.payload.character;
+      this.characterOwners.set(character.id, character.ownerPeerId);
+    }
+    if (event.type === "module.switched") {
+      this.activeModule = {
+        moduleId: event.payload.moduleId,
+        revision: event.payload.revision,
+      };
+    }
+  }
+
+  private validateCommandAgainstHistory(command: RoomCommandV1): void {
+    if (command.type === "character.update") {
+      const character = command.payload.character;
+      const existingOwner = this.characterOwners.get(character.id);
+      if (existingOwner !== undefined && existingOwner !== character.ownerPeerId) {
+        throw new Error("A character's owner cannot be changed");
+      }
+      if (existingOwner !== undefined && command.sender.role !== "host" && existingOwner !== command.sender.peerId) {
+        throw new Error("Players may only update their own character");
+      }
+    }
+
+    if (command.type === "content.reveal") {
+      if (
+        this.activeModule === undefined ||
+        this.activeModule.moduleId !== command.payload.moduleId ||
+        this.activeModule.revision !== command.payload.revision
+      ) {
+        throw new Error("Content may only be revealed from the room's active module revision");
+      }
     }
   }
 }

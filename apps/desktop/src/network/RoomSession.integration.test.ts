@@ -290,6 +290,12 @@ describe("RoomSession two-client integration", () => {
       package: modulePackage,
       sourceText: "KEEPER SOURCE: the patron is secretly the moth queen.",
     });
+    await host.submit("module.switch", {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      title: modulePackage.metadata.title,
+    });
+    await network.settle();
     const revealTrafficStart = network.deliveries.length;
     await host.submit("content.reveal", {
       moduleId: modulePackage.moduleId,

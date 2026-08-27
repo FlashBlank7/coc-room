@@ -2,7 +2,6 @@ import {
   EventReplica,
   HostEventSequencer,
   SyncChunkCollector,
-  commandToEventDraft,
   createSyncChunks,
   participantSchema,
   roomCommandSchema,
@@ -100,7 +99,7 @@ export class RoomSession {
       if (!this.isHost && canonicalParticipants.some((peer) => peer.peerId === options.room.hostPeerId)) {
         const syncSent = this.transport.sendToHost({
           kind: "sync.request",
-          requestId: crypto.randomUUID(),
+          requestId: globalThis.crypto.randomUUID(),
           lastSequence: this.replica.lastContiguousSequence,
         });
         if (!syncSent) this.onError?.("中继尚未恢复，暂时无法请求历史补发");
@@ -143,7 +142,7 @@ export class RoomSession {
     const command = roomCommandSchema.parse({
       protocolVersion: 1,
       roomId: this.options.room.id,
-      commandId: crypto.randomUUID(),
+      commandId: globalThis.crypto.randomUUID(),
       sender: this.participant,
       sentAt: new Date().toISOString(),
       type,
@@ -225,7 +224,7 @@ export class RoomSession {
     replyPeerId?: string,
   ): Promise<void> {
     if (!this.sequencer) throw new Error("房主事件序列尚未初始化");
-    const { event, duplicate } = this.sequencer.commit(commandToEventDraft(command, { expectedSender }));
+    const { event, duplicate } = this.sequencer.commitCommand(command, { expectedSender });
     if (duplicate) {
       if (replyPeerId && !this.transport.sendToPeer(replyPeerId, { kind: "event", event })) {
         this.onError?.(`无法重发命令 ${command.commandId} 的既有回执`);

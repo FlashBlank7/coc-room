@@ -6,7 +6,7 @@ import {
   commandToEventDraft,
   type RoomCommandV1,
 } from "../src";
-import { HOST, PLAYER, chatEvent } from "./fixtures";
+import { CHARACTER, HOST, PLAYER, chatEvent } from "./fixtures";
 
 const COMMAND_ID = "10000000-0000-4000-8000-000000000001";
 
@@ -48,6 +48,94 @@ describe("HostEventSequencer", () => {
     expect(second.event.sequence).toBe(2);
     expect(sequencer.lastSequence).toBe(2);
     expect(sequencer.eventsAfter(1)).toEqual([second.event]);
+  });
+
+  it("keeps character ownership immutable at the host authority boundary", () => {
+    let id = 0;
+    const sequencer = new HostEventSequencer("room-1", {
+      createEventId: () => `20000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
+      clock: () => new Date("2026-08-27T12:00:00.000Z"),
+    });
+    const createCommand: RoomCommandV1 = {
+      protocolVersion: 1,
+      roomId: "room-1",
+      commandId: "10000000-0000-4000-8000-000000000010",
+      sender: PLAYER,
+      sentAt: "2026-08-27T12:00:00.000Z",
+      type: "character.update",
+      payload: { character: CHARACTER },
+    };
+    sequencer.commitCommand(createCommand, { expectedSender: PLAYER });
+
+    const attacker = { peerId: "player-2", displayName: "Attacker", role: "player" as const };
+    const stolen: RoomCommandV1 = {
+      ...createCommand,
+      commandId: "10000000-0000-4000-8000-000000000011",
+      sender: attacker,
+      payload: {
+        character: {
+          ...CHARACTER,
+          ownerPeerId: attacker.peerId,
+          playerName: attacker.displayName,
+        },
+      },
+    };
+    expect(() => sequencer.commitCommand(stolen, { expectedSender: attacker })).toThrow(/owner/i);
+
+    const keeperCorrection: RoomCommandV1 = {
+      ...createCommand,
+      commandId: "10000000-0000-4000-8000-000000000012",
+      sender: HOST,
+      payload: { character: { ...CHARACTER, notes: "Keeper correction" } },
+    };
+    expect(sequencer.commitCommand(keeperCorrection, { expectedSender: HOST }).event.sequence).toBe(2);
+  });
+
+  it("only reveals content from the active module revision", () => {
+    let id = 0;
+    const sequencer = new HostEventSequencer("room-1", {
+      createEventId: () => `20000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
+    });
+    const reveal: RoomCommandV1 = {
+      protocolVersion: 1,
+      roomId: "room-1",
+      commandId: "10000000-0000-4000-8000-000000000020",
+      sender: HOST,
+      sentAt: "2026-08-27T12:00:00.000Z",
+      type: "content.reveal",
+      payload: {
+        moduleId: "module-1",
+        revision: 2,
+        contentId: "clue-1",
+        contentType: "clue",
+        title: "A clue",
+        body: "Visible text",
+      },
+    };
+    expect(() => sequencer.commitCommand(reveal, { expectedSender: HOST })).toThrow(/active module/i);
+
+    const switchModule: RoomCommandV1 = {
+      protocolVersion: 1,
+      roomId: "room-1",
+      commandId: "10000000-0000-4000-8000-000000000021",
+      sender: HOST,
+      sentAt: "2026-08-27T12:00:00.000Z",
+      type: "module.switch",
+      payload: { moduleId: "module-1", revision: 2, title: "Module One" },
+    };
+    sequencer.commitCommand(switchModule, { expectedSender: HOST });
+
+    expect(() =>
+      sequencer.commitCommand(
+        {
+          ...reveal,
+          commandId: "10000000-0000-4000-8000-000000000022",
+          payload: { ...reveal.payload, revision: 1 },
+        },
+        { expectedSender: HOST },
+      ),
+    ).toThrow(/active module/i);
+    expect(sequencer.commitCommand(reveal, { expectedSender: HOST }).event.type).toBe("content.revealed");
   });
 });
 
