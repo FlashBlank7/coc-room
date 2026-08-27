@@ -6,7 +6,7 @@ import {
   type RoomCommandV1,
   type RoomEventV1,
 } from "@coc-room/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { MemoryRepository, type RoomRecord } from "../data/repository";
 import {
@@ -353,6 +353,29 @@ describe("RoomSession", () => {
     await session.submit("chat.send", { message: "host remains authoritative", format: "plain" });
     expect((await repository.listEvents(ROOM_ID))).toHaveLength(1);
   });
+
+  it("bounds interrupted sync transfers and evicts stale collectors", async () => {
+    const repository = new MemoryRepository();
+    const transport = new FakeTransport();
+    const session = createSession("player", repository, transport);
+    const errors: string[] = [];
+    session.onError = (message) => errors.push(message);
+    await session.start();
+
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      await transport.deliver(HOST_PEER_ID, { kind: "sync.chunk", chunk: incompleteSyncChunk(1) });
+      await transport.deliver(HOST_PEER_ID, { kind: "sync.chunk", chunk: incompleteSyncChunk(2) });
+      await transport.deliver(HOST_PEER_ID, { kind: "sync.chunk", chunk: incompleteSyncChunk(3) });
+      expect(errors).toEqual([expect.stringMatching(/too many concurrent/i)]);
+
+      now.mockReturnValue(1_000 + 2 * 60 * 1_000);
+      await transport.deliver(HOST_PEER_ID, { kind: "sync.chunk", chunk: incompleteSyncChunk(3) });
+      expect(errors).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
 
 function createSession(
@@ -410,4 +433,26 @@ function eventMessage(message: RoomWireMessage): string {
 function chatText(event: RoomEventV1): string {
   if (event.type !== "chat.message") throw new Error("expected a chat event");
   return event.payload.message;
+}
+
+function incompleteSyncChunk(index: number) {
+  const event = roomEventSchema.parse({
+    protocolVersion: 1,
+    roomId: ROOM_ID,
+    eventId: "acee8cfb-c6d5-4c3f-b001-97e7df6faef6",
+    sequence: 1,
+    sender: HOST,
+    occurredAt: "2026-08-27T00:00:01.000Z",
+    type: "chat.message",
+    payload: { message: "x".repeat(1_000), format: "plain" },
+  });
+  const chunks = createSyncChunks([event], {
+    roomId: ROOM_ID,
+    requestId: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    transferId: `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    maxChunkBytes: 256,
+  });
+  const first = chunks[0];
+  if (first === undefined || chunks.length < 2) throw new Error("expected an incomplete transfer chunk");
+  return first;
 }

@@ -6,6 +6,7 @@ import { roomEventSchema } from "./schemas/room.js";
 
 export const DEFAULT_SYNC_CHUNK_BYTES = 32 * 1024;
 export const MAX_SYNC_CHUNKS = 10_000;
+export const DEFAULT_MAX_SYNC_TRANSFER_ENCODED_BYTES = 64 * 1024 * 1024;
 
 export const syncRequestSchema = z
   .object({
@@ -164,6 +165,15 @@ export class SyncChunkCollector {
   private chunks = new Map<number, SyncChunkV1>();
   private metadata?: Pick<SyncChunkV1, "roomId" | "requestId" | "transferId" | "chunkCount" | "checksum">;
   private completed = false;
+  private encodedBytes = 0;
+  private readonly maxEncodedBytes: number;
+
+  constructor(maxEncodedBytes = DEFAULT_MAX_SYNC_TRANSFER_ENCODED_BYTES) {
+    if (!Number.isSafeInteger(maxEncodedBytes) || maxEncodedBytes <= 0) {
+      throw new RangeError("maxEncodedBytes must be a positive safe integer");
+    }
+    this.maxEncodedBytes = maxEncodedBytes;
+  }
 
   get receivedCount(): number {
     return this.chunks.size;
@@ -171,6 +181,10 @@ export class SyncChunkCollector {
 
   get isComplete(): boolean {
     return this.completed;
+  }
+
+  get receivedEncodedBytes(): number {
+    return this.encodedBytes;
   }
 
   add(candidate: SyncChunkV1): RoomEventV1[] | undefined {
@@ -198,6 +212,13 @@ export class SyncChunkCollector {
     const existing = this.chunks.get(chunk.chunkIndex);
     if (existing !== undefined && existing.data !== chunk.data) {
       throw new Error(`Conflicting duplicate synchronization chunk ${chunk.chunkIndex}`);
+    }
+    if (existing === undefined) {
+      const nextEncodedBytes = this.encodedBytes + chunk.data.length;
+      if (nextEncodedBytes > this.maxEncodedBytes) {
+        throw new Error(`Synchronization transfer exceeds ${this.maxEncodedBytes} encoded bytes`);
+      }
+      this.encodedBytes = nextEncodedBytes;
     }
     this.chunks.set(chunk.chunkIndex, chunk);
 

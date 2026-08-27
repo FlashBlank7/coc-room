@@ -44,12 +44,20 @@ export interface RoomSessionOptions {
   transportFactory?: RoomSessionTransportFactory;
 }
 
+const MAX_ACTIVE_SYNC_TRANSFERS = 2;
+const SYNC_TRANSFER_TTL_MS = 2 * 60 * 1_000;
+
+interface ActiveSyncTransfer {
+  readonly collector: SyncChunkCollector;
+  lastUpdatedAt: number;
+}
+
 export class RoomSession {
   readonly participant: ParticipantV1;
   private readonly transport: RoomSessionTransport;
   private replica: EventReplica;
   private sequencer?: HostEventSequencer;
-  private readonly syncCollectors = new Map<string, SyncChunkCollector>();
+  private readonly syncCollectors = new Map<string, ActiveSyncTransfer>();
   private readonly participants = new Map<string, ParticipantV1>();
   private readonly pendingCommands = new Map<string, RoomCommandV1>();
   private hostPath?: ConnectionPath;
@@ -136,6 +144,7 @@ export class RoomSession {
 
   stop(): void {
     this.transport.stop();
+    this.syncCollectors.clear();
   }
 
   async submit(type: RoomCommandV1["type"], payload: RoomCommandV1["payload"]): Promise<void> {
@@ -199,9 +208,24 @@ export class RoomSession {
         if (this.isHost || fromPeerId !== this.options.room.hostPeerId) return;
         const chunk = syncChunkSchema.parse(wire.chunk);
         if (chunk.roomId !== this.options.room.id) throw new Error("同步分块属于其他房间");
-        const collector = this.syncCollectors.get(chunk.transferId) ?? new SyncChunkCollector();
-        this.syncCollectors.set(chunk.transferId, collector);
-        const events = collector.add(chunk);
+        const now = Date.now();
+        this.pruneExpiredSyncTransfers(now);
+        let transfer = this.syncCollectors.get(chunk.transferId);
+        if (transfer === undefined) {
+          if (this.syncCollectors.size >= MAX_ACTIVE_SYNC_TRANSFERS) {
+            throw new Error("Too many concurrent synchronization transfers");
+          }
+          transfer = { collector: new SyncChunkCollector(), lastUpdatedAt: now };
+          this.syncCollectors.set(chunk.transferId, transfer);
+        }
+        transfer.lastUpdatedAt = now;
+        let events: RoomEventV1[] | undefined;
+        try {
+          events = transfer.collector.add(chunk);
+        } catch (error) {
+          this.syncCollectors.delete(chunk.transferId);
+          throw error;
+        }
         if (events) {
           for (const event of events) await this.acceptEvent(event);
           this.syncCollectors.delete(chunk.transferId);
@@ -275,6 +299,14 @@ export class RoomSession {
       if (!this.transport.sendToHost({ kind: "command", command })) {
         this.onError?.("中继尚未可用，未确认命令会继续保留到下次重连");
         return;
+      }
+    }
+  }
+
+  private pruneExpiredSyncTransfers(now: number): void {
+    for (const [transferId, transfer] of this.syncCollectors) {
+      if (now - transfer.lastUpdatedAt >= SYNC_TRANSFER_TTL_MS) {
+        this.syncCollectors.delete(transferId);
       }
     }
   }

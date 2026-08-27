@@ -46,4 +46,20 @@ describe("synchronization chunks", () => {
     const corrupted = [{ ...first, data: first.data.replace(/^./, first.data[0] === "A" ? "B" : "A") }, ...chunks.slice(1)];
     expect(() => assembleSyncChunks(corrupted)).toThrow(/checksum|JSON|UTF-8/i);
   });
+
+  it("bounds the memory retained by an interrupted transfer", () => {
+    const chunks = createSyncChunks([chatEvent(1, "x".repeat(1_000))], {
+      roomId: "room-1",
+      requestId: REQUEST_ID,
+      transferId: TRANSFER_ID,
+      maxChunkBytes: 256,
+    });
+    const first = chunks[0];
+    if (first === undefined) throw new Error("expected a chunk");
+    const collector = new SyncChunkCollector(first.data.length - 1);
+
+    expect(() => collector.add(first)).toThrow(/exceeds/i);
+    expect(collector.receivedCount).toBe(0);
+    expect(collector.receivedEncodedBytes).toBe(0);
+  });
 });
