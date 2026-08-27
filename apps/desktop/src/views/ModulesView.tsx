@@ -113,7 +113,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   }, [draft, modules, openModule, selectedModuleId]);
 
   useEffect(() => {
-    if (!draft || !selectedModuleId) return;
+    if (!selectedModuleId) return;
     // The library and import panels can be taller than a compact window. Put
     // the newly opened workbench in view so a successful import is apparent.
     const frame = window.requestAnimationFrame(() => {
@@ -121,7 +121,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       if (workspace && typeof workspace.scrollIntoView === "function") workspace.scrollIntoView({ block: "start" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [draft, selectedModuleId, selectedRevision]);
+  }, [selectedModuleId, selectedRevision]);
 
   const chooseSource = async () => {
     if (!window.__TAURI_INTERNALS__) return setError("文件选择需要桌面应用；浏览器预览可直接粘贴文字");

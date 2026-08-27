@@ -38,6 +38,33 @@ describe("ModulesView browser import", () => {
     expect(within(browser).getByText("花小路")).not.toBeNull();
   });
 
+  it("scrolls to a newly opened workbench without jumping on every edit", async () => {
+    const previousScroll = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { callback(0); return 1; });
+    try {
+      const modulePackage = createModulePackageWithEntities();
+      const { container } = render(<ModulesView />);
+      const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+      if (!input) throw new Error("browser module input was not rendered");
+      const content = JSON.stringify(modulePackage);
+      const file = new File([content], "scroll-test.cocmod.json", { type: "application/json" });
+      Object.defineProperty(file, "text", { value: async () => content });
+      fireEvent.change(input, { target: { files: [file] } });
+
+      await screen.findByLabelText(`${modulePackage.metadata.title}模组内容浏览`);
+      expect(scrollIntoView).toHaveBeenCalled();
+      const callsAfterOpen = scrollIntoView.mock.calls.length;
+      fireEvent.click(screen.getByRole("tab", { name: "结构化编辑" }));
+      fireEvent.change(screen.getByLabelText("模组简介"), { target: { value: "编辑时不应跳动" } });
+      expect(scrollIntoView).toHaveBeenCalledTimes(callsAfterOpen);
+    } finally {
+      if (previousScroll) Object.defineProperty(Element.prototype, "scrollIntoView", previousScroll);
+      else Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
   it("upgrades an older import from repository state and preserves its local source", async () => {
     const repository = await getRepository();
     const moduleId = "module_revision_upgrade_01";

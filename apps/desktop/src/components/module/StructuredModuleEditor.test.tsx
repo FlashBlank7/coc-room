@@ -40,6 +40,25 @@ describe("StructuredModuleEditor", () => {
     expect(current.chapters[0]?.sceneIds).toEqual(["scene-1"]);
     expect(modulePackageSchema.safeParse(current).success).toBe(true);
   });
+
+  it("keeps transient language and chapter-order input schema-valid", () => {
+    let current = createPackage();
+    render(<Harness initial={current} onChange={(next) => { current = next; }} />);
+
+    const language = screen.getByLabelText("模组语言");
+    fireEvent.change(language, { target: { value: "z" } });
+    expect(language.getAttribute("aria-invalid")).toBe("true");
+    expect(current.metadata.language).toBe("zh-CN");
+    expect(modulePackageSchema.safeParse(current).success).toBe(true);
+    fireEvent.blur(language);
+    expect((language as HTMLInputElement).value).toBe("zh-CN");
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑章节（0）" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加章节 / 手动分组" }));
+    fireEvent.change(screen.getByLabelText("章节 chapter-new 顺序"), { target: { value: "1.5" } });
+    expect(current.chapters[0]?.order).toBe(1);
+    expect(modulePackageSchema.safeParse(current).success).toBe(true);
+  });
 });
 
 function Harness({ initial, onChange }: { initial: ModulePackageV1; onChange: (next: ModulePackageV1) => void }) {
