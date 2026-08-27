@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ModulePackageV1 } from "@coc-room/protocol";
 
 export interface ParseModuleInput {
@@ -51,22 +52,38 @@ export async function selectModuleSource(): Promise<string | undefined> {
   return (await invoke<string | null>("select_module_source")) ?? undefined;
 }
 
-export async function parseModule(input: ParseModuleInput): Promise<ParserMessage[]> {
+export async function parseModule(
+  input: ParseModuleInput,
+  onProgress?: (progress: ParserProgress) => void,
+): Promise<ParserMessage[]> {
   if (!window.__TAURI_INTERNALS__) {
     if (!input.mock) throw new Error("请在 Tauri 桌面应用中运行真实解析；浏览器预览仅支持模拟结果");
     return [{ type: "result", module: createMockModule(input.sourceName, input.sourceText ?? ""), warnings: ["浏览器预览生成的模拟模组"] }];
   }
-  return invoke<ParserMessage[]>("run_module_parser", {
-    request: {
-      id: crypto.randomUUID(),
-      action: "parse_module",
-      source_text: input.sourceText,
-      source_path: input.sourcePath,
-      source_name: input.sourceName,
-      model: input.model,
-      mock: input.mock ?? false,
-    },
-  });
+  const requestId = crypto.randomUUID();
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    unlisten = await listen<ParserProgress & { request_id?: string }>("module-parser-progress", (event) => {
+      if (event.payload.request_id === requestId && event.payload.type === "progress") {
+        onProgress(event.payload);
+      }
+    });
+  }
+  try {
+    return await invoke<ParserMessage[]>("run_module_parser", {
+      request: {
+        id: requestId,
+        action: "parse_module",
+        source_text: input.sourceText,
+        source_path: input.sourcePath,
+        source_name: input.sourceName,
+        model: input.model,
+        mock: input.mock ?? false,
+      },
+    });
+  } finally {
+    unlisten?.();
+  }
 }
 
 function createMockModule(title: string, sourceText: string): ModulePackageV1 {

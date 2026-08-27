@@ -10,7 +10,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -264,6 +264,8 @@ async fn run_module_parser(
     drop(api_key);
 
     let mut stdout = Vec::new();
+    let mut stdout_cursor = 0;
+    let mut messages = Vec::new();
     let mut stderr_bytes = 0;
     loop {
         let event = match timeout_at(deadline, receiver.recv()).await {
@@ -275,6 +277,14 @@ async fn run_module_parser(
             CommandEvent::Stdout(bytes) => {
                 if !append_bytes_bounded(&mut stdout, &bytes, MAX_SIDECAR_STDOUT_BYTES) {
                     return Err("模组解析器输出超过安全上限，已终止解析器".to_string());
+                }
+                for message in parse_jsonl_messages(&stdout, &mut stdout_cursor, false)? {
+                    validate_sidecar_request_id(&message, &request.id)?;
+                    if message.get("type").and_then(Value::as_str) == Some("progress") {
+                        app.emit("module-parser-progress", message.clone())
+                            .map_err(|_| "无法向模组编辑器发送解析进度".to_string())?;
+                    }
+                    messages.push(message);
                 }
             }
             CommandEvent::Stderr(bytes) => {
@@ -296,21 +306,61 @@ async fn run_module_parser(
         }
     }
 
-    let stdout =
-        String::from_utf8(stdout).map_err(|_| "模组解析器返回了非 UTF-8 输出".to_string())?;
-    let messages = stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .map_err(|error| format!("解析器返回了非法 JSONL: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    for message in parse_jsonl_messages(&stdout, &mut stdout_cursor, true)? {
+        validate_sidecar_request_id(&message, &request.id)?;
+        if message.get("type").and_then(Value::as_str) == Some("progress") {
+            app.emit("module-parser-progress", message.clone())
+                .map_err(|_| "无法向模组编辑器发送解析进度".to_string())?;
+        }
+        messages.push(message);
+    }
     if messages.is_empty() {
         Err("模组解析器没有返回结果".to_string())
     } else {
         Ok(messages)
     }
+}
+
+fn parse_jsonl_messages(
+    bytes: &[u8],
+    cursor: &mut usize,
+    include_unterminated: bool,
+) -> Result<Vec<Value>, String> {
+    let mut messages = Vec::new();
+    while *cursor < bytes.len() {
+        let remaining = &bytes[*cursor..];
+        let newline = remaining.iter().position(|byte| *byte == b'\n');
+        let Some(line_len) = newline.or_else(|| include_unterminated.then_some(remaining.len()))
+        else {
+            break;
+        };
+        let line_end = *cursor + line_len;
+        let next_cursor = if newline.is_some() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        let line = std::str::from_utf8(&bytes[*cursor..line_end])
+            .map_err(|_| "模组解析器返回了非 UTF-8 输出".to_string())?
+            .trim_end_matches('\r')
+            .trim();
+        *cursor = next_cursor;
+        if line.is_empty() {
+            continue;
+        }
+        messages.push(
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("解析器返回了非法 JSONL: {error}"))?,
+        );
+    }
+    Ok(messages)
+}
+
+fn validate_sidecar_request_id(message: &Value, request_id: &str) -> Result<(), String> {
+    if message.get("request_id").and_then(Value::as_str) != Some(request_id) {
+        return Err("模组解析器返回了不匹配的任务 ID".to_string());
+    }
+    Ok(())
 }
 
 fn append_bytes_bounded(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
@@ -486,5 +536,32 @@ mod tests {
 
         assert_eq!(summary, "模组解析器异常退出（stderr 已脱敏）");
         assert!(!summary.contains(secret));
+    }
+
+    #[test]
+    fn jsonl_messages_are_emitted_only_after_a_complete_line() {
+        let mut cursor = 0;
+        let partial = br#"{"request_id":"task-1","type":"progress"}"#;
+
+        assert!(parse_jsonl_messages(partial, &mut cursor, false)
+            .expect("partial JSONL should wait")
+            .is_empty());
+        assert_eq!(cursor, 0);
+
+        let mut complete = partial.to_vec();
+        complete.extend_from_slice(b"\n");
+        let messages = parse_jsonl_messages(&complete, &mut cursor, false)
+            .expect("complete JSONL should parse");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "progress");
+        assert_eq!(cursor, complete.len());
+    }
+
+    #[test]
+    fn sidecar_messages_must_match_the_active_request() {
+        let message = serde_json::json!({ "request_id": "other", "type": "progress" });
+
+        assert!(validate_sidecar_request_id(&message, "active").is_err());
+        assert!(validate_sidecar_request_id(&message, "other").is_ok());
     }
 }

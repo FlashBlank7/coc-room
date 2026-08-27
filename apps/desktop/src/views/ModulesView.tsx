@@ -74,7 +74,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     if (!sourceText.trim() && !sourcePath) return setError("请粘贴文字或选择模组文件");
     setBusy(true); setError(undefined); setProgress([]); setWarnings([]);
     try {
-      const messages = await parseModule({ sourceText: sourceText || undefined, sourcePath, sourceName, model, mock });
+      const messages = await parseModule(
+        { sourceText: sourceText || undefined, sourcePath, sourceName, model, mock },
+        (update) => setProgress((current) => [...current, update]),
+      );
       const updates = messages.filter((message): message is ParserProgress => message.type === "progress");
       const failure = messages.find((message): message is ParserError => message.type === "error");
       const result = messages.find((message): message is ParserResult => message.type === "result");
