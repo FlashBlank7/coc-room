@@ -7,11 +7,14 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AUTHENTICATION_GRACE_PERIOD_MS,
-  EMPTY_ROOM_TTL_MS,
   MAX_FRAME_BYTES,
   MAX_PENDING_SOCKETS,
-  UNCLAIMED_ROOM_TTL_MS,
 } from "../src/constants";
+import {
+  deriveJoinSecret,
+  deriveRoomId,
+  parseJoinToken,
+} from "../src/security";
 import type { CreateRoomResponse, ServerMessage } from "../src/types";
 
 const sockets: WebSocket[] = [];
@@ -27,44 +30,27 @@ afterEach(() => {
 });
 
 describe("relay Worker", () => {
-  it("creates a SQLite-backed room without storing plaintext tokens or messages", async () => {
+  it("creates self-authenticating credentials without application storage", async () => {
     const room = await createRoom();
-    expect(room.roomId).toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
+    expect(room.roomId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(room.hostPeerId).toBe("host-peer");
+    expect(room.hostToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(room.hostToken).not.toBe(room.joinToken);
     expect(room.websocketUrl).toContain(`/v1/rooms/${room.roomId}/ws`);
+
+    const parsedJoinToken = parseJoinToken(room.joinToken);
+    expect(parsedJoinToken).toMatchObject({ hostPeerId: room.hostPeerId });
+    expect(parsedJoinToken?.joinSecret).toBe(
+      await deriveJoinSecret(room.hostToken),
+    );
+    expect(await deriveRoomId(room.joinToken)).toBe(room.roomId);
 
     const id = env.ROOMS.idFromName(room.roomId);
     const stub = env.ROOMS.get(id);
     await runInDurableObject(stub, async (_instance, state) => {
-      const metadata = state.storage.sql
-        .exec<
-          Record<string, SqlStorageValue> & {
-            room_id: string;
-            host_peer_id: string;
-            host_token_hash: string;
-            join_token_hash: string;
-          }
-        >(
-          "SELECT room_id, host_peer_id, host_token_hash, join_token_hash FROM room_metadata",
-        )
-        .one();
-
-      expect(metadata.room_id).toBe(room.roomId);
-      expect(metadata.host_peer_id).toBe(room.hostPeerId);
-      expect(metadata.host_token_hash).not.toBe(room.hostToken);
-      expect(metadata.join_token_hash).not.toBe(room.joinToken);
-
-      const applicationTables = state.storage.sql
-        .exec<Record<string, SqlStorageValue> & { name: string }>(
-          `SELECT name FROM sqlite_schema
-           WHERE type = 'table'
-             AND name NOT LIKE 'sqlite_%'
-             AND name NOT LIKE '_cf_%'`,
-        )
-        .toArray()
-        .map(({ name }) => name);
-      expect(applicationTables).toEqual(["room_metadata"]);
+      expect(applicationTableNames(state.storage.sql)).toEqual([]);
+      await expect(state.storage.list()).resolves.toEqual(new Map());
+      await expect(state.storage.getAlarm()).resolves.toBeNull();
     });
   });
 
@@ -82,7 +68,48 @@ describe("relay Worker", () => {
     }
   });
 
-  it("reserves the host peer ID even while the host is offline", async () => {
+  it("removes a legacy room metadata table when an object is rehydrated", async () => {
+    const room = await createRoom("legacy-host");
+    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TABLE room_metadata (legacy_value TEXT) STRICT",
+      );
+      expect(applicationTableNames(state.storage.sql)).toEqual([
+        "room_metadata",
+      ]);
+    });
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(applicationTableNames(state.storage.sql)).toEqual([]);
+    });
+  });
+
+  it("binds otherwise valid credentials to their derived room ID", async () => {
+    const room = await createRoom("bound-host");
+    const differentFirstCharacter = room.roomId.startsWith("A") ? "B" : "A";
+    const otherRoomId = `${differentFirstCharacter}${room.roomId.slice(1)}`;
+    const otherRoomUrl = room.websocketUrl.replace(room.roomId, otherRoomId);
+    const socket = await connect(otherRoomUrl);
+    const error = nextMessage(socket);
+    socket.send(
+      JSON.stringify({
+        kind: "join",
+        protocolVersion: 1,
+        roomId: otherRoomId,
+        token: room.hostToken,
+        peerId: room.hostPeerId,
+        displayName: "Wrong room",
+        role: "host",
+      }),
+    );
+    expect(await error).toMatchObject({
+      kind: "error",
+      code: "INVALID_TOKEN",
+    });
+  });
+
+  it("binds credentials to roles and reserves the host peer ID while offline", async () => {
     const room = await createRoom("reserved-host");
 
     const squatter = await connect(room.websocketUrl);
@@ -103,6 +130,42 @@ describe("relay Worker", () => {
       code: "PEER_ID_RESERVED",
     });
 
+    const promotedPlayer = await connect(room.websocketUrl);
+    const promotedPlayerError = nextMessage(promotedPlayer);
+    promotedPlayer.send(
+      JSON.stringify({
+        kind: "join",
+        protocolVersion: 1,
+        roomId: room.roomId,
+        token: room.joinToken,
+        peerId: room.hostPeerId,
+        displayName: "Promoted player",
+        role: "host",
+      }),
+    );
+    expect(await promotedPlayerError).toMatchObject({
+      kind: "error",
+      code: "INVALID_TOKEN",
+    });
+
+    const demotedHost = await connect(room.websocketUrl);
+    const demotedHostError = nextMessage(demotedHost);
+    demotedHost.send(
+      JSON.stringify({
+        kind: "join",
+        protocolVersion: 1,
+        roomId: room.roomId,
+        token: room.hostToken,
+        peerId: "ordinary-player",
+        displayName: "Demoted host",
+        role: "player",
+      }),
+    );
+    expect(await demotedHostError).toMatchObject({
+      kind: "error",
+      code: "INVALID_TOKEN",
+    });
+
     const impostor = await connect(room.websocketUrl);
     const impostorError = nextMessage(impostor);
     impostor.send(
@@ -118,7 +181,7 @@ describe("relay Worker", () => {
     );
     expect(await impostorError).toMatchObject({
       kind: "error",
-      code: "HOST_PEER_ID_MISMATCH",
+      code: "INVALID_TOKEN",
     });
 
     const host = await join(
@@ -130,129 +193,73 @@ describe("relay Worker", () => {
     expect(host.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("expires a room whose host never joins, including after hibernation", async () => {
-    const room = await createRoom("unclaimed-host");
+  it("reconnects with the original credentials after every peer leaves and the object is evicted", async () => {
+    const room = await createRoom("persistent-host");
+    const host = await join(
+      room.websocketUrl,
+      room.hostToken,
+      room.hostPeerId,
+      "host",
+    );
+    const player = await join(
+      room.websocketUrl,
+      room.joinToken,
+      "persistent-player",
+      "player",
+    );
+
     const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
-
     await runInDurableObject(stub, async (_instance, state) => {
-      state.storage.sql.exec(
-        "UPDATE room_metadata SET created_at = ? WHERE singleton = 1",
-        new Date(Date.now() - UNCLAIMED_ROOM_TTL_MS - 1).toISOString(),
+      expect(applicationTableNames(state.storage.sql)).toEqual([]);
+      const attachments = state.getWebSockets().map((socket) =>
+        socket.deserializeAttachment() as {
+          authenticated: boolean;
+          roomId: string;
+          hostPeerId: string;
+        },
       );
-      await state.storage.setAlarm(Date.now());
-    });
-    await evictDurableObject(stub);
-
-    await expect(runDurableObjectAlarm(stub)).resolves.toBe(true);
-    await runInDurableObject(stub, async (_instance, state) => {
-      const { count } = state.storage.sql
-        .exec<Record<string, SqlStorageValue> & { count: number }>(
-          "SELECT COUNT(*) AS count FROM room_metadata",
-        )
-        .one();
-      expect(count).toBe(0);
+      expect(attachments).toHaveLength(2);
+      expect(attachments).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            authenticated: true,
+            roomId: room.roomId,
+            hostPeerId: room.hostPeerId,
+          }),
+        ]),
+      );
       await expect(state.storage.getAlarm()).resolves.toBeNull();
     });
 
-    const response = await exports.default.fetch(
-      websocketRequestUrl(room.websocketUrl),
-      { headers: { Upgrade: "websocket" } },
-    );
-    expect(response.status).toBe(404);
-  });
-
-  it("keeps a live room when a stale lifecycle alarm fires", async () => {
-    const room = await createRoom("active-host");
-    const host = await join(
-      room.websocketUrl,
-      room.hostToken,
-      room.hostPeerId,
-      "host",
-    );
-    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
-
-    await runInDurableObject(stub, async (instance, state) => {
-      state.storage.sql.exec(
-        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
-        Date.now() - 1,
-      );
-      await instance.alarm();
-    });
-
-    await runInDurableObject(stub, async (_instance, state) => {
-      const { count } = state.storage.sql
-        .exec<Record<string, SqlStorageValue> & { count: number }>(
-          "SELECT COUNT(*) AS count FROM room_metadata",
-        )
-        .one();
-      expect(count).toBe(1);
-      state.storage.sql.exec(
-        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
-        Date.now() - 1,
-      );
-      await state.storage.setAlarm(Date.now());
-    });
-    await evictDurableObject(stub);
-
-    // Rehydration sees the live hibernatable socket and cancels the stale alarm.
-    await expect(runDurableObjectAlarm(stub)).resolves.toBe(false);
-
-    const presence = nextMessage(
-      host,
-      (message) => message.kind === "presence" && message.action === "joined",
-    );
-    await join(room.websocketUrl, room.joinToken, "active-player", "player");
-    await expect(presence).resolves.toMatchObject({
-      peer: { peerId: "active-player" },
-    });
-  });
-
-  it("destroys a claimed room after every peer has been offline for its grace period", async () => {
-    const room = await createRoom("offline-host");
-    const host = await join(
-      room.websocketUrl,
-      room.hostToken,
-      room.hostPeerId,
-      "host",
-    );
-    const closed = nextClose(host);
+    const playerClosed = nextClose(player);
+    player.send(JSON.stringify({ kind: "leave" }));
+    await expect(playerClosed).resolves.toEqual({ code: 1000 });
+    const hostClosed = nextClose(host);
     host.send(JSON.stringify({ kind: "leave" }));
-    await expect(closed).resolves.toEqual({ code: 1000 });
+    await expect(hostClosed).resolves.toEqual({ code: 1000 });
 
-    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
     await runInDurableObject(stub, async (_instance, state) => {
-      const metadata = state.storage.sql
-        .exec<
-          Record<string, SqlStorageValue> & {
-            host_joined_at: string | null;
-            empty_expires_at: number | null;
-          }
-        >(
-          "SELECT host_joined_at, empty_expires_at FROM room_metadata WHERE singleton = 1",
-        )
-        .one();
-      expect(metadata.host_joined_at).not.toBeNull();
-      expect(metadata.empty_expires_at).not.toBeNull();
-      expect(metadata.empty_expires_at as number).toBeGreaterThan(
-        Date.now() + EMPTY_ROOM_TTL_MS - 5_000,
-      );
-
-      state.storage.sql.exec(
-        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
-        Date.now() - 1,
-      );
-      await state.storage.setAlarm(Date.now());
+      await expect(state.storage.getAlarm()).resolves.toBeNull();
     });
     await evictDurableObject(stub);
 
-    await expect(runDurableObjectAlarm(stub)).resolves.toBe(true);
+    const reconnectedHost = await join(
+      room.websocketUrl,
+      room.hostToken,
+      room.hostPeerId,
+      "host",
+    );
+    const reconnectedPlayer = await join(
+      room.websocketUrl,
+      room.joinToken,
+      "persistent-player",
+      "player",
+    );
+    expect(reconnectedHost.readyState).toBe(WebSocket.OPEN);
+    expect(reconnectedPlayer.readyState).toBe(WebSocket.OPEN);
     await runInDurableObject(stub, async (_instance, state) => {
-      const { count } = state.storage.sql
-        .exec<Record<string, SqlStorageValue> & { count: number }>(
-          "SELECT COUNT(*) AS count FROM room_metadata",
-        )
-        .one();
-      expect(count).toBe(0);
+      expect(applicationTableNames(state.storage.sql)).toEqual([]);
+      await expect(state.storage.list()).resolves.toEqual(new Map());
     });
   });
 
@@ -416,7 +423,7 @@ describe("relay Worker", () => {
     );
     expect(await hostError).toMatchObject({
       kind: "error",
-      code: "HOST_PEER_ID_MISMATCH",
+      code: "INVALID_TOKEN",
     });
 
     for (let index = 1; index <= 7; index += 1) {
@@ -572,6 +579,7 @@ describe("relay Worker", () => {
       serverSocket?.serializeAttachment({
         attachmentVersion: 1,
         authenticated: false,
+        roomId: room.roomId,
         authenticationDeadlineAt: Date.now() - 1,
       });
     });
@@ -705,4 +713,16 @@ function nextClose(socket: WebSocket): Promise<{ code: number }> {
     };
     socket.addEventListener("close", onClose);
   });
+}
+
+function applicationTableNames(sql: SqlStorage): string[] {
+  return sql
+    .exec<Record<string, SqlStorageValue> & { name: string }>(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'table'
+         AND name NOT LIKE 'sqlite_%'
+         AND name NOT LIKE '_cf_%'`,
+    )
+    .toArray()
+    .map(({ name }) => name);
 }

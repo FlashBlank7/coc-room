@@ -17,12 +17,15 @@ export interface PublicPeer {
 export interface PendingAttachment {
   attachmentVersion: 1;
   authenticated: false;
+  roomId: string;
   authenticationDeadlineAt: number;
 }
 
 export interface PeerAttachment extends PublicPeer {
   attachmentVersion: 1;
   authenticated: true;
+  roomId: string;
+  hostPeerId: string;
   joinedAt: number;
 }
 
@@ -134,16 +137,6 @@ export type ServerMessage =
   | PresenceEvent
   | SignalEvent
   | RelayEvent;
-
-export interface StoredRoomMetadata extends Record<string, SqlStorageValue> {
-  room_id: string;
-  host_peer_id: string;
-  host_token_hash: string;
-  join_token_hash: string;
-  created_at: string;
-  host_joined_at: string | null;
-  empty_expires_at: number | null;
-}
 
 export interface CreateRoomRequest {
   hostPeerId: string;

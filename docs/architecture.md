@@ -27,7 +27,7 @@
 
 DeepSeek Key 不进入 SQLite。Rust 命令将它写入 Windows Credential Manager，运行解析任务时读取到可清零的内存包装，注入单次 stdin JSON 请求，随后从请求对象中移除。sidecar 的 Pydantic 配置使用 `SecretStr`，缓存接口不接受凭据。
 
-Durable Object 的 SQLite 仅有最小 `room_metadata`：房间 ID、预留的房主 peer ID、创建时间、房主/加入令牌的 SHA-256 摘要。只有该 peer ID 能以房主身份加入，玩家即使在房主离线时也不能占用它。连接状态依靠 WebSocket attachments；没有事件、聊天、signal 或 relay payload 表，Wrangler observability 默认关闭。
+Durable Object 不创建应用数据表或 KV 记录。随机 256 位房主令牌经带域分隔的 SHA-256 派生玩家加入令牌，再由加入令牌派生房间 ID；每次加入都可据此无状态验证房间、角色与预留的房主 peer ID。玩家不能从加入令牌反推房主令牌或冒充房主。在线成员只存在 WebSocket attachments 中；alarm 只负责关闭 15 秒内未认证的 socket。所有人离线或对象回收后，原凭据仍可重连；没有事件、聊天、signal 或 relay payload 持久化，Wrangler observability 默认关闭。
 
 ## 模组结构化管线
 

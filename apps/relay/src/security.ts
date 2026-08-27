@@ -4,6 +4,43 @@ export function randomToken(byteLength: number): string {
   return base64Url(bytes);
 }
 
+const JOIN_SECRET_DOMAIN = "coc-room-relay:v1:join-secret\0";
+const ROOM_ID_DOMAIN = "coc-room-relay:v1:room-id\0";
+
+export const DERIVED_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+
+export async function deriveJoinSecret(hostToken: string): Promise<string> {
+  return sha256Base64Url(`${JOIN_SECRET_DOMAIN}${hostToken}`);
+}
+
+export function formatJoinToken(
+  hostPeerId: string,
+  joinSecret: string,
+): string {
+  return `${hostPeerId}.${joinSecret}`;
+}
+
+export function parseJoinToken(
+  joinToken: string,
+): { hostPeerId: string; joinSecret: string } | undefined {
+  const separator = joinToken.indexOf(".");
+  if (separator <= 0 || separator !== joinToken.lastIndexOf(".")) {
+    return undefined;
+  }
+
+  const hostPeerId = joinToken.slice(0, separator);
+  const joinSecret = joinToken.slice(separator + 1);
+  if (!DERIVED_SECRET_PATTERN.test(joinSecret)) {
+    return undefined;
+  }
+
+  return { hostPeerId, joinSecret };
+}
+
+export async function deriveRoomId(joinToken: string): Promise<string> {
+  return sha256Base64Url(`${ROOM_ID_DOMAIN}${joinToken}`);
+}
+
 export async function sha256Base64Url(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",

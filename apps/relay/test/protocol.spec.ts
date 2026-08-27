@@ -12,6 +12,8 @@ function peer(peerId: string, role: "host" | "player"): PeerAttachment {
   return {
     attachmentVersion: 1,
     authenticated: true,
+    roomId: "room-id-12345678",
+    hostPeerId: "host-peer",
     peerId,
     displayName: peerId,
     role,

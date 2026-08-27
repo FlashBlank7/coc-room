@@ -1,4 +1,8 @@
-const baseUrl = normalizeBaseUrl(process.argv[2] ?? process.env.COC_ROOM_RELAY_URL ?? "http://127.0.0.1:8787");
+const argumentsAfterSeparator = process.argv.slice(2).filter((argument) => argument !== "--");
+if (argumentsAfterSeparator.length > 1) {
+  throw new Error("relay smoke accepts at most one relay origin");
+}
+const baseUrl = normalizeBaseUrl(argumentsAfterSeparator[0] ?? process.env.COC_ROOM_RELAY_URL ?? "http://127.0.0.1:8787");
 const sockets = [];
 
 try {

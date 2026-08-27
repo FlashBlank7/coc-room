@@ -1,12 +1,14 @@
 # CoC Room Relay
 
-Cloudflare Worker + SQLite-backed Durable Object for CoC Room's WebRTC signaling and fallback WebSocket relay. The room host is the only authority and all network routes form a star: host-to-player or player-to-host.
+Cloudflare Worker + hibernatable Durable Object for CoC Room's WebRTC signaling and fallback WebSocket relay. The room host is the only authority and all network routes form a star: host-to-player or player-to-host.
 
 ## Privacy and persistence
 
-The Durable Object persists only one `room_metadata` row containing the room ID, the reserved host peer ID, lifecycle timestamps, and SHA-256 digests of the host and join tokens. It never creates a chat, event, signal, or relay-payload table. Online peer metadata lives in hibernatable WebSocket attachments and disappears when each socket closes. The source contains no payload logging, and Wrangler observability is disabled by default.
+The Durable Object has no application tables or key/value records. Room creation derives a player join token and room ID from a random 256-bit host token with domain-separated SHA-256. On every join, the same credentials independently prove the room, role, and reserved host peer ID, so no server-side room lookup is needed. A legacy `room_metadata` table from early development builds is dropped when such an object is next loaded.
 
-Room metadata is also ephemeral. A newly created room is removed if its host does not claim it within 15 minutes. After the host has joined at least once, the metadata is removed 24 hours after the last authenticated peer disconnects. A reconnect during that grace period cancels the empty-room deadline. Durable Object alarms persist both deadlines across hibernation and always re-check that no WebSocket is open before deleting the row, so a stale alarm cannot interrupt an active room.
+Online peer metadata lives only in hibernatable WebSocket attachments and disappears when each socket closes. The sole alarm use is the 15-second authentication deadline for an unauthenticated socket; authenticated rooms have no lifecycle row or expiry alarm. The original credentials therefore continue to work after every participant disconnects or the Durable Object is evicted. To invalidate a leaked invitation, create a new room and stop using the old credentials.
+
+The source contains no payload logging, and Wrangler observability is disabled by default.
 
 This is not end-to-end encryption. Cloudflare and the operator can technically inspect frames while they are being relayed. Do not put tokens in URLs or logs.
 
@@ -64,7 +66,7 @@ allowance.
 }
 ```
 
-Use the private `hostToken` only for the host and reconnect with the same reserved `hostPeerId`. A player cannot join with that peer ID, even while the host is offline. Share the `roomId` and `joinToken` with players. Tokens are sent in the first WebSocket frame, never in a query string. Subsequent client message types are:
+Use the private `hostToken` only for the host and reconnect with the same reserved `hostPeerId`. A player cannot join with that peer ID, even while the host is offline. The `joinToken` has the form `<hostPeerId>.<derived-secret>`; it lets players prove membership but cannot be used to recover the host token or claim the host role. Share the `roomId` and `joinToken` with players. Tokens are sent in the first WebSocket frame, never in a query string. A syntactically valid WebSocket path can upgrade before the Worker knows whether credentials are valid; the mandatory first `join` frame performs that authentication. Subsequent client message types are:
 
 - `presence`: `{ "kind": "presence", "status": "online" | "away" }`
 - `signal`: `{ "kind": "signal", "targetPeerId": "peer-id", "data": ... }`
@@ -99,6 +101,6 @@ To self-host:
 3. Run `pnpm --filter @coc-room/relay deploy`.
 4. Configure the desktop client's relay base URL to the deployed `https://<worker>.<subdomain>.workers.dev` origin.
 
-The `v1` Wrangler migration creates `RelayRoom` with the SQLite storage backend. Keep that migration entry when renaming the Worker. If the Durable Object class itself is renamed later, add a new Wrangler rename migration rather than editing the deployed `v1` tag.
+The `v1` Wrangler migration creates `RelayRoom` with the SQLite storage backend required by its Durable Object class, although the application creates no storage rows. Keep that migration entry when renaming the Worker. If the Durable Object class itself is renamed later, add a new Wrangler rename migration rather than editing the deployed `v1` tag.
 
 For a public deployment, add Cloudflare rate limiting to `POST /v1/rooms` and the WebSocket route. The application deliberately has no account system and no server-side transcript recovery.

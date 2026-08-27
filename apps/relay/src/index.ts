@@ -8,16 +8,18 @@ import {
   ROOM_ID_PATTERN,
 } from "./constants";
 import { RelayRoom } from "./room";
-import { randomToken } from "./security";
+import {
+  deriveJoinSecret,
+  deriveRoomId,
+  formatJoinToken,
+  randomToken,
+} from "./security";
 import type { CreateRoomRequest, CreateRoomResponse, Env } from "./types";
 
 export { RelayRoom };
 export type * from "./types";
 
 const ROOM_WEBSOCKET_PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]+)\/ws$/u;
-const INTERNAL_CREATE_URL = "https://relay.internal/__internal/create";
-const CREATE_ATTEMPTS = 3;
-
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -37,7 +39,7 @@ const worker = {
     }
 
     if (request.method === "POST" && url.pathname === "/v1/rooms") {
-      return createRoom(request, env);
+      return createRoom(request);
     }
 
     const match = ROOM_WEBSOCKET_PATH.exec(url.pathname);
@@ -63,7 +65,7 @@ const worker = {
 
 export default worker;
 
-async function createRoom(request: Request, env: Env): Promise<Response> {
+async function createRoom(request: Request): Promise<Response> {
   let body: unknown;
   try {
     body = await request.json();
@@ -81,56 +83,26 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
     });
   }
 
-  for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
-    const roomId = randomToken(16);
-    const hostToken = randomToken(32);
-    const joinToken = randomToken(32);
-    const id = env.ROOMS.idFromName(roomId);
-    const stub = env.ROOMS.get(id);
-    const internalResponse = await stub.fetch(
-      new Request(INTERNAL_CREATE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          roomId,
-          hostPeerId: body.hostPeerId,
-          hostToken,
-          joinToken,
-        }),
-      }),
-    );
+  const hostToken = randomToken(32);
+  const joinSecret = await deriveJoinSecret(hostToken);
+  const joinToken = formatJoinToken(body.hostPeerId, joinSecret);
+  const roomId = await deriveRoomId(joinToken);
 
-    if (internalResponse.status === 409) {
-      continue;
-    }
-    if (!internalResponse.ok) {
-      return jsonResponse(502, {
-        error: "ROOM_CREATE_FAILED",
-        message: "The room coordinator rejected the create request.",
-      });
-    }
+  const websocketUrl = new URL(
+    `/v1/rooms/${encodeURIComponent(roomId)}/ws`,
+    request.url,
+  );
+  websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
 
-    const websocketUrl = new URL(
-      `/v1/rooms/${encodeURIComponent(roomId)}/ws`,
-      request.url,
-    );
-    websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
-
-    const response: CreateRoomResponse = {
-      protocolVersion: PROTOCOL_VERSION,
-      roomId,
-      hostPeerId: body.hostPeerId,
-      hostToken,
-      joinToken,
-      websocketUrl: websocketUrl.toString(),
-    };
-    return jsonResponse(201, response);
-  }
-
-  return jsonResponse(503, {
-    error: "ROOM_ID_EXHAUSTED",
-    message: "Could not allocate a unique room identifier.",
-  });
+  const response: CreateRoomResponse = {
+    protocolVersion: PROTOCOL_VERSION,
+    roomId,
+    hostPeerId: body.hostPeerId,
+    hostToken,
+    joinToken,
+    websocketUrl: websocketUrl.toString(),
+  };
+  return jsonResponse(201, response);
 }
 
 function isCreateRoomRequest(value: unknown): value is CreateRoomRequest {

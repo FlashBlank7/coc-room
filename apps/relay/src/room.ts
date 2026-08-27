@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   AUTHENTICATION_GRACE_PERIOD_MS,
-  EMPTY_ROOM_TTL_MS,
+  HOST_TOKEN_PATTERN,
   JSON_HEADERS,
   MAX_FRAME_BYTES,
   MAX_PENDING_SOCKETS,
@@ -10,7 +10,6 @@ import {
   PEER_ID_PATTERN,
   PROTOCOL_VERSION,
   ROOM_ID_PATTERN,
-  UNCLAIMED_ROOM_TTL_MS,
 } from "./constants";
 import {
   canRoute,
@@ -20,57 +19,49 @@ import {
   publicPeer,
   serializeServerMessage,
 } from "./protocol";
-import { sha256Base64Url, timingSafeStringEqual } from "./security";
+import {
+  deriveJoinSecret,
+  deriveRoomId,
+  formatJoinToken,
+  parseJoinToken,
+  timingSafeStringEqual,
+} from "./security";
 import type {
   Env,
   ErrorCode,
+  JoinMessage,
   PeerAttachment,
   ServerMessage,
   SocketAttachment,
-  StoredRoomMetadata,
 } from "./types";
 
-const INTERNAL_CREATE_PATH = "/__internal/create";
+const ROOM_WEBSOCKET_PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]+)\/ws$/u;
 const OPEN = 1;
 
 export class RelayRoom extends DurableObject<Env> {
-  private readonly sql: SqlStorage;
-
   constructor(
     ctx: DurableObjectState,
     env: Env,
   ) {
     super(ctx, env);
-    this.sql = ctx.storage.sql;
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS room_metadata (
-        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        room_id TEXT NOT NULL,
-        host_peer_id TEXT NOT NULL,
-        host_token_hash TEXT NOT NULL,
-        join_token_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        host_joined_at TEXT,
-        empty_expires_at INTEGER
-      ) STRICT
-    `);
-    const lifecycleColumnsAdded = this.ensureLifecycleColumns();
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong"),
     );
     this.ctx.blockConcurrencyWhile(async () => {
-      if (lifecycleColumnsAdded) {
-        this.reconcileLegacyLifecycle(Date.now());
-      }
+      // v1 briefly used this application table. Credentials are now
+      // self-authenticating, so remove legacy metadata during rehydration.
+      this.ctx.storage.sql.exec("DROP TABLE IF EXISTS room_metadata");
       await this.scheduleNextAlarm();
     });
   }
 
   async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (request.method === "POST" && url.pathname === INTERNAL_CREATE_PATH) {
-      return this.createRoom(request);
+    const roomId = roomIdFromRequest(request);
+    if (roomId === undefined) {
+      return jsonResponse(404, {
+        error: "NOT_FOUND",
+        message: "The room WebSocket path is malformed.",
+      });
     }
 
     if (
@@ -83,16 +74,7 @@ export class RelayRoom extends DurableObject<Env> {
       });
     }
 
-    const now = Date.now();
-    this.closeExpiredPendingSockets(now);
-    await this.expireRoomIfEligible(now);
-    if (this.metadata() === undefined) {
-      return jsonResponse(404, {
-        error: "ROOM_NOT_FOUND",
-        message: "The room has not been created.",
-      });
-    }
-
+    this.closeExpiredPendingSockets(Date.now());
     const pendingCount = this.openSockets().filter(
       (socket) => !readAttachment(socket).authenticated,
     ).length;
@@ -108,8 +90,8 @@ export class RelayRoom extends DurableObject<Env> {
     const attachment: SocketAttachment = {
       attachmentVersion: 1,
       authenticated: false,
-      authenticationDeadlineAt:
-        Date.now() + AUTHENTICATION_GRACE_PERIOD_MS,
+      roomId,
+      authenticationDeadlineAt: Date.now() + AUTHENTICATION_GRACE_PERIOD_MS,
     };
 
     server.serializeAttachment(attachment);
@@ -180,7 +162,7 @@ export class RelayRoom extends DurableObject<Env> {
         return;
       }
 
-      await this.join(socket, message);
+      await this.join(socket, attachment, message);
       return;
     }
 
@@ -252,98 +234,16 @@ export class RelayRoom extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    const now = Date.now();
-    this.closeExpiredPendingSockets(now);
-    if (await this.expireRoomIfEligible(now)) {
-      return;
-    }
+    this.closeExpiredPendingSockets(Date.now());
     await this.scheduleNextAlarm();
-  }
-
-  private async createRoom(request: Request): Promise<Response> {
-    await this.expireRoomIfEligible(Date.now());
-    if (this.metadata() !== undefined) {
-      return jsonResponse(409, {
-        error: "ROOM_EXISTS",
-        message: "A room with this identifier already exists.",
-      });
-    }
-
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return jsonResponse(400, {
-        error: "INVALID_CREATE_REQUEST",
-        message: "The create request is invalid.",
-      });
-    }
-
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      !("roomId" in body) ||
-      !("hostPeerId" in body) ||
-      !("hostToken" in body) ||
-      !("joinToken" in body) ||
-      typeof body.roomId !== "string" ||
-      typeof body.hostPeerId !== "string" ||
-      typeof body.hostToken !== "string" ||
-      typeof body.joinToken !== "string" ||
-      !ROOM_ID_PATTERN.test(body.roomId) ||
-      !PEER_ID_PATTERN.test(body.hostPeerId) ||
-      body.hostToken.length < 20 ||
-      body.hostToken.length > 128 ||
-      body.joinToken.length < 20 ||
-      body.joinToken.length > 128 ||
-      body.hostToken === body.joinToken
-    ) {
-      return jsonResponse(400, {
-        error: "INVALID_CREATE_REQUEST",
-        message: "The create request is invalid.",
-      });
-    }
-
-    const [hostTokenHash, joinTokenHash] = await Promise.all([
-      sha256Base64Url(body.hostToken),
-      sha256Base64Url(body.joinToken),
-    ]);
-
-    this.sql.exec(
-      `INSERT INTO room_metadata
-        (singleton, room_id, host_peer_id, host_token_hash, join_token_hash, created_at)
-       VALUES (1, ?, ?, ?, ?, ?)`,
-      body.roomId,
-      body.hostPeerId,
-      hostTokenHash,
-      joinTokenHash,
-      new Date().toISOString(),
-    );
-    await this.scheduleNextAlarm();
-
-    return jsonResponse(201, { ok: true });
   }
 
   private async join(
     socket: WebSocket,
-    message: Extract<
-      NonNullable<ReturnType<typeof parseClientMessage>>,
-      { kind: "join" }
-    >,
+    pending: Extract<SocketAttachment, { authenticated: false }>,
+    message: JoinMessage,
   ): Promise<void> {
-    const metadata = this.metadata();
-    if (metadata === undefined) {
-      this.failAndClose(
-        socket,
-        "NOT_FOUND",
-        "The room no longer exists.",
-        4004,
-        message.requestId,
-      );
-      return;
-    }
-
-    if (message.roomId !== metadata.room_id) {
+    if (!timingSafeStringEqual(message.roomId, pending.roomId)) {
       this.failAndClose(
         socket,
         "NOT_FOUND",
@@ -354,13 +254,8 @@ export class RelayRoom extends DurableObject<Env> {
       return;
     }
 
-    const suppliedHash = await sha256Base64Url(message.token);
-    const expectedHash =
-      message.role === "host"
-        ? metadata.host_token_hash
-        : metadata.join_token_hash;
-
-    if (!timingSafeStringEqual(suppliedHash, expectedHash)) {
+    const hostPeerId = await authenticateJoin(pending.roomId, message);
+    if (hostPeerId === undefined) {
       this.failAndClose(
         socket,
         "INVALID_TOKEN",
@@ -371,18 +266,7 @@ export class RelayRoom extends DurableObject<Env> {
       return;
     }
 
-    if (message.role === "host" && message.peerId !== metadata.host_peer_id) {
-      this.failAndClose(
-        socket,
-        "HOST_PEER_ID_MISMATCH",
-        "The host must use the peer identifier reserved when the room was created.",
-        4003,
-        message.requestId,
-      );
-      return;
-    }
-
-    if (message.role === "player" && message.peerId === metadata.host_peer_id) {
+    if (message.role === "player" && message.peerId === hostPeerId) {
       this.failAndClose(
         socket,
         "PEER_ID_RESERVED",
@@ -394,12 +278,29 @@ export class RelayRoom extends DurableObject<Env> {
     }
 
     let peers = this.peerSockets(socket);
+    if (
+      peers.some(
+        ({ attachment }) =>
+          attachment.roomId !== pending.roomId ||
+          attachment.hostPeerId !== hostPeerId,
+      )
+    ) {
+      this.failAndClose(
+        socket,
+        "INVALID_TOKEN",
+        "The room credential does not match the active room.",
+        4003,
+        message.requestId,
+      );
+      return;
+    }
+
     const duplicate = peers.find(
       ({ attachment }) => attachment.peerId === message.peerId,
     );
     if (duplicate !== undefined) {
       if (message.role === "host" && duplicate.attachment.role === "host") {
-        this.markPending(duplicate.socket);
+        this.markPending(duplicate.socket, duplicate.attachment.roomId);
         safeClose(duplicate.socket, 4001, "Host reconnected");
         peers = peers.filter(
           ({ socket: peerSocket }) => peerSocket !== duplicate.socket,
@@ -450,6 +351,8 @@ export class RelayRoom extends DurableObject<Env> {
     const joined: PeerAttachment = {
       attachmentVersion: 1,
       authenticated: true,
+      roomId: pending.roomId,
+      hostPeerId,
       peerId: message.peerId,
       displayName: message.displayName.trim(),
       role: message.role,
@@ -457,17 +360,6 @@ export class RelayRoom extends DurableObject<Env> {
       joinedAt: Date.now(),
     };
     socket.serializeAttachment(joined);
-    this.sql.exec(
-      `UPDATE room_metadata
-       SET empty_expires_at = NULL,
-           host_joined_at = CASE
-             WHEN ? = 'host' THEN COALESCE(host_joined_at, ?)
-             ELSE host_joined_at
-           END
-       WHERE singleton = 1`,
-      message.role,
-      new Date(joined.joinedAt).toISOString(),
-    );
     await this.scheduleNextAlarm();
 
     const existingPeers = peers.map(({ attachment }) => publicPeer(attachment));
@@ -475,7 +367,7 @@ export class RelayRoom extends DurableObject<Env> {
       kind: "ready",
       protocolVersion: PROTOCOL_VERSION,
       ok: true,
-      roomId: metadata.room_id,
+      roomId: pending.roomId,
       self: publicPeer(joined),
       peers: existingPeers,
       ...(message.requestId === undefined
@@ -570,7 +462,7 @@ export class RelayRoom extends DurableObject<Env> {
     socket: WebSocket,
     peer: PeerAttachment,
   ): Promise<void> {
-    this.markPending(socket);
+    this.markPending(socket, peer.roomId);
     this.broadcast(
       {
         kind: "presence",
@@ -580,20 +472,13 @@ export class RelayRoom extends DurableObject<Env> {
       },
       socket,
     );
-    if (this.peerSockets().length === 0) {
-      this.sql.exec(
-        `UPDATE room_metadata
-         SET empty_expires_at = ?
-         WHERE singleton = 1 AND host_joined_at IS NOT NULL`,
-        Date.now() + EMPTY_ROOM_TTL_MS,
-      );
-    }
   }
 
-  private markPending(socket: WebSocket): void {
+  private markPending(socket: WebSocket, roomId: string): void {
     const attachment: SocketAttachment = {
       attachmentVersion: 1,
       authenticated: false,
+      roomId,
       authenticationDeadlineAt: Date.now(),
     };
     socket.serializeAttachment(attachment);
@@ -627,17 +512,6 @@ export class RelayRoom extends DurableObject<Env> {
       }
     }
 
-    const metadata = this.metadata();
-    if (metadata !== undefined && this.openSockets().length === 0) {
-      const roomDeadline = roomExpiryDeadline(metadata);
-      if (
-        roomDeadline !== undefined &&
-        (nextDeadline === undefined || roomDeadline < nextDeadline)
-      ) {
-        nextDeadline = roomDeadline;
-      }
-    }
-
     const scheduledAlarm = await this.ctx.storage.getAlarm();
     if (nextDeadline === undefined) {
       if (scheduledAlarm !== null) {
@@ -649,69 +523,6 @@ export class RelayRoom extends DurableObject<Env> {
     if (scheduledAlarm !== nextDeadline) {
       await this.ctx.storage.setAlarm(nextDeadline);
     }
-  }
-
-  private metadata(): StoredRoomMetadata | undefined {
-    return this.sql
-      .exec<StoredRoomMetadata>(
-        `SELECT room_id, host_peer_id, host_token_hash, join_token_hash,
-                created_at, host_joined_at, empty_expires_at
-         FROM room_metadata
-         WHERE singleton = 1`,
-      )
-      .toArray()[0];
-  }
-
-  private ensureLifecycleColumns(): boolean {
-    const columns = new Set(
-      this.sql
-        .exec<Record<string, SqlStorageValue> & { name: string }>(
-          "PRAGMA table_info(room_metadata)",
-        )
-        .toArray()
-        .map(({ name }) => name),
-    );
-    let changed = false;
-    if (!columns.has("host_joined_at")) {
-      this.sql.exec("ALTER TABLE room_metadata ADD COLUMN host_joined_at TEXT");
-      changed = true;
-    }
-    if (!columns.has("empty_expires_at")) {
-      this.sql.exec(
-        "ALTER TABLE room_metadata ADD COLUMN empty_expires_at INTEGER",
-      );
-      changed = true;
-    }
-    return changed;
-  }
-
-  private reconcileLegacyLifecycle(now: number): void {
-    if (this.metadata() === undefined) {
-      return;
-    }
-    const hasOpenSocket = this.openSockets().length > 0;
-    this.sql.exec(
-      `UPDATE room_metadata
-       SET host_joined_at = COALESCE(host_joined_at, created_at),
-           empty_expires_at = ?
-       WHERE singleton = 1`,
-      hasOpenSocket ? null : now + EMPTY_ROOM_TTL_MS,
-    );
-  }
-
-  private async expireRoomIfEligible(now: number): Promise<boolean> {
-    const metadata = this.metadata();
-    if (metadata === undefined || this.openSockets().length > 0) {
-      return false;
-    }
-    const deadline = roomExpiryDeadline(metadata);
-    if (deadline === undefined || deadline > now) {
-      return false;
-    }
-
-    this.sql.exec("DELETE FROM room_metadata WHERE singleton = 1");
-    await this.ctx.storage.deleteAlarm();
-    return true;
   }
 
   private openSockets(): WebSocket[] {
@@ -767,46 +578,88 @@ export class RelayRoom extends DurableObject<Env> {
   }
 }
 
-function readAttachment(socket: WebSocket): SocketAttachment {
-  const attachment = socket.deserializeAttachment() as unknown;
-  if (
-    typeof attachment === "object" &&
-    attachment !== null &&
-    "attachmentVersion" in attachment &&
-    attachment.attachmentVersion === 1 &&
-    "authenticated" in attachment
-  ) {
-    if (attachment.authenticated === true) {
-      return attachment as PeerAttachment;
+async function authenticateJoin(
+  roomId: string,
+  message: JoinMessage,
+): Promise<string | undefined> {
+  if (message.role === "host") {
+    if (!HOST_TOKEN_PATTERN.test(message.token)) {
+      return undefined;
     }
-    if (
-      attachment.authenticated === false &&
-      "authenticationDeadlineAt" in attachment &&
-      typeof attachment.authenticationDeadlineAt === "number" &&
-      Number.isFinite(attachment.authenticationDeadlineAt)
-    ) {
-      return attachment as SocketAttachment;
-    }
+    const joinSecret = await deriveJoinSecret(message.token);
+    const joinToken = formatJoinToken(message.peerId, joinSecret);
+    const expectedRoomId = await deriveRoomId(joinToken);
+    return timingSafeStringEqual(expectedRoomId, roomId)
+      ? message.peerId
+      : undefined;
   }
 
-  // Unknown or pre-deadline attachments fail closed on the next event/alarm.
+  const parsed = parseJoinToken(message.token);
+  if (parsed === undefined || !PEER_ID_PATTERN.test(parsed.hostPeerId)) {
+    return undefined;
+  }
+  const expectedRoomId = await deriveRoomId(message.token);
+  return timingSafeStringEqual(expectedRoomId, roomId)
+    ? parsed.hostPeerId
+    : undefined;
+}
+
+function roomIdFromRequest(request: Request): string | undefined {
+  const match = ROOM_WEBSOCKET_PATH.exec(new URL(request.url).pathname);
+  const roomId = match?.[1];
+  return roomId !== undefined && ROOM_ID_PATTERN.test(roomId)
+    ? roomId
+    : undefined;
+}
+
+function readAttachment(socket: WebSocket): SocketAttachment {
+  const attachment = socket.deserializeAttachment() as unknown;
+  if (!isRecord(attachment) || attachment.attachmentVersion !== 1) {
+    return invalidAttachment();
+  }
+
+  if (
+    attachment.authenticated === false &&
+    typeof attachment.roomId === "string" &&
+    ROOM_ID_PATTERN.test(attachment.roomId) &&
+    typeof attachment.authenticationDeadlineAt === "number" &&
+    Number.isFinite(attachment.authenticationDeadlineAt)
+  ) {
+    return attachment as unknown as SocketAttachment;
+  }
+
+  if (
+    attachment.authenticated === true &&
+    typeof attachment.roomId === "string" &&
+    ROOM_ID_PATTERN.test(attachment.roomId) &&
+    typeof attachment.hostPeerId === "string" &&
+    PEER_ID_PATTERN.test(attachment.hostPeerId) &&
+    typeof attachment.peerId === "string" &&
+    PEER_ID_PATTERN.test(attachment.peerId) &&
+    typeof attachment.displayName === "string" &&
+    (attachment.role === "host" || attachment.role === "player") &&
+    (attachment.status === "online" || attachment.status === "away") &&
+    typeof attachment.joinedAt === "number" &&
+    Number.isFinite(attachment.joinedAt)
+  ) {
+    return attachment as unknown as SocketAttachment;
+  }
+
+  return invalidAttachment();
+}
+
+function invalidAttachment(): SocketAttachment {
+  // Unknown or legacy attachments fail closed on the next event/alarm.
   return {
     attachmentVersion: 1,
     authenticated: false,
+    roomId: "",
     authenticationDeadlineAt: 0,
   };
 }
 
-function roomExpiryDeadline(
-  metadata: StoredRoomMetadata,
-): number | undefined {
-  if (metadata.host_joined_at === null) {
-    const createdAt = Date.parse(metadata.created_at);
-    return Number.isFinite(createdAt)
-      ? createdAt + UNCLAIMED_ROOM_TTL_MS
-      : 0;
-  }
-  return metadata.empty_expires_at ?? undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function safeSend(socket: WebSocket, serialized: string): void {
