@@ -184,13 +184,22 @@ export class MemoryRepository implements LocalRepository {
   private readonly settings = new Map<string, string>();
 
   async saveRoom(room: RoomRecord): Promise<void> {
-    this.rooms.set(room.id, structuredClone(room));
+    const existing = this.rooms.get(room.id);
+    this.rooms.set(room.id, structuredClone({
+      ...room,
+      createdAt: existing?.createdAt ?? room.createdAt,
+      lastSeq: Math.max(existing?.lastSeq ?? 0, room.lastSeq),
+    }));
   }
   async listRooms(): Promise<RoomRecord[]> {
     return [...this.rooms.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
   async saveEvent(candidate: RoomEventV1): Promise<boolean> {
     const event = roomEventSchema.parse(candidate);
+    const room = this.rooms.get(event.roomId);
+    if (!room) {
+      throw new Error(`Room ${event.roomId} must be saved before its events`);
+    }
     const roomEvents = this.events.get(event.roomId) ?? new Map<string, RoomEventV1>();
     const sameId = roomEvents.get(event.eventId);
     if (sameId) {
@@ -203,6 +212,11 @@ export class MemoryRepository implements LocalRepository {
     }
     roomEvents.set(event.eventId, structuredClone(event));
     this.events.set(event.roomId, roomEvents);
+    this.rooms.set(event.roomId, {
+      ...room,
+      lastSeq: Math.max(room.lastSeq, event.sequence),
+      updatedAt: new Date().toISOString(),
+    });
     return true;
   }
   async listEvents(roomId: string, afterSequence = 0): Promise<RoomEventV1[]> {

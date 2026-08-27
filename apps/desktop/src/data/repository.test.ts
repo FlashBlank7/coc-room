@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryRepository } from "./repository";
+import { MemoryRepository, type RoomRecord } from "./repository";
 
 describe("MemoryRepository", () => {
   it("persists an event idempotently", async () => {
@@ -14,6 +14,7 @@ describe("MemoryRepository", () => {
       type: "chat.message" as const,
       payload: { message: "有人吗？", format: "plain" as const },
     };
+    await repository.saveRoom(roomRecord(event.roomId));
     expect(await repository.saveEvent(event)).toBe(true);
     expect(await repository.saveEvent(event)).toBe(false);
     expect(await repository.listEvents(event.roomId)).toEqual([event]);
@@ -31,8 +32,53 @@ describe("MemoryRepository", () => {
       type: "chat.message" as const,
       payload: { message: "有人吗？", format: "plain" as const },
     };
+    await repository.saveRoom(roomRecord(event.roomId));
     await repository.saveEvent(event);
     await expect(repository.saveEvent({ ...event, payload: { ...event.payload, message: "不同内容" } })).rejects.toThrow(/ID/);
     await expect(repository.saveEvent({ ...event, eventId: "fe8afcab-1bcc-490f-a71d-fc0bbb1321a2" })).rejects.toThrow(/序号/);
   });
+
+  it("matches SQLite foreign-key semantics by rejecting events for unknown rooms", async () => {
+    const repository = new MemoryRepository();
+    await expect(repository.saveEvent({
+      protocolVersion: 1,
+      roomId: "missing-room",
+      eventId: "37b7a077-6ee0-4796-9786-b2217db48993",
+      sequence: 1,
+      sender: { peerId: "peer-12345678", displayName: "Investigator", role: "player" },
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "chat.message",
+      payload: { message: "hello", format: "plain" },
+    })).rejects.toThrow(/saved before its events/);
+  });
+
+  it("does not lower the persisted sequence when a room reconnects", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveRoom({ ...roomRecord("room-12345678"), lastSeq: 12 });
+    await repository.saveRoom({
+      ...roomRecord("room-12345678"),
+      lastSeq: 0,
+      createdAt: "2026-02-01T00:00:00.000Z",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    });
+
+    expect(await repository.listRooms()).toEqual([
+      expect.objectContaining({ lastSeq: 12, createdAt: "2026-01-01T00:00:00.000Z" }),
+    ]);
+  });
 });
+
+function roomRecord(id: string): RoomRecord {
+  return {
+    id,
+    name: "Test Room",
+    localRole: "player",
+    localPeerId: "peer-12345678",
+    hostPeerId: "host-12345678",
+    inviteToken: "token-12345678901234567890",
+    relayUrl: "wss://relay.example.test/v1/rooms/ws",
+    lastSeq: 0,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}

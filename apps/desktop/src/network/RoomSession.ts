@@ -110,6 +110,9 @@ export class RoomSession {
   }
 
   async start(): Promise<void> {
+    // A transport may deliver presence and sync chunks as part of start(). Persist the
+    // room first so SQLite's room_events -> rooms foreign key is always satisfied.
+    await this.options.repository.saveRoom(this.options.room);
     await this.reloadFromRepository();
     await this.transport.start();
   }

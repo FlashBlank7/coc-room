@@ -1,4 +1,5 @@
 import {
+  createSyncChunks,
   roomCommandSchema,
   roomEventSchema,
   type ParticipantV1,
@@ -120,7 +121,65 @@ class GatedRepository extends MemoryRepository {
   }
 }
 
+class LifecycleRecordingRepository extends MemoryRepository {
+  constructor(private readonly operations: string[]) {
+    super();
+  }
+
+  override async saveRoom(room: RoomRecord): Promise<void> {
+    this.operations.push("room:saved");
+    await super.saveRoom(room);
+  }
+
+  override async saveEvent(event: RoomEventV1): Promise<boolean> {
+    this.operations.push(`event:saved:${event.sequence}`);
+    return super.saveEvent(event);
+  }
+}
+
+class StartupSyncTransport extends FakeTransport {
+  constructor(
+    private readonly startupEvent: RoomEventV1,
+    private readonly lifecycleOperations: string[],
+  ) {
+    super();
+  }
+
+  override async start(): Promise<void> {
+    this.lifecycleOperations.push("transport:started");
+    const [chunk] = createSyncChunks([this.startupEvent], {
+      roomId: ROOM_ID,
+      requestId: "ff9883e8-e594-43db-8419-5d70898b2ee2",
+    });
+    if (!chunk) throw new Error("expected a startup sync chunk");
+    await this.deliver(HOST_PEER_ID, { kind: "sync.chunk", chunk });
+  }
+}
+
 describe("RoomSession", () => {
+  it("saves a newly joined room before startup sync events can be persisted", async () => {
+    const operations: string[] = [];
+    const repository = new LifecycleRecordingRepository(operations);
+    const startupEvent = roomEventSchema.parse({
+      protocolVersion: 1,
+      roomId: ROOM_ID,
+      eventId: "acee8cfb-c6d5-4c3f-b001-97e7df6faef6",
+      sequence: 1,
+      sender: HOST,
+      occurredAt: "2026-08-27T00:00:01.000Z",
+      type: "chat.message",
+      payload: { message: "history", format: "plain" },
+    });
+    const transport = new StartupSyncTransport(startupEvent, operations);
+    const session = createSession("player", repository, transport);
+
+    await session.start();
+
+    expect(operations).toEqual(["room:saved", "transport:started", "event:saved:1"]);
+    expect(await repository.listEvents(ROOM_ID)).toEqual([startupEvent]);
+    expect((await repository.listRooms()).find((room) => room.id === ROOM_ID)?.lastSeq).toBe(1);
+  });
+
   it("persists before applying or broadcasting and rebuilds authority after a failed save", async () => {
     const operations: string[] = [];
     const repository = new RecordingRepository(operations);

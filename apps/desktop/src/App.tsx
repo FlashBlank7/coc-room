@@ -27,6 +27,7 @@ export function App() {
   const enterRoom = useAppStore((state) => state.enterRoom);
   const leaveRoomState = useAppStore((state) => state.leaveRoom);
   const [session, setSession] = useState<RoomSession>();
+  const [isViewingLocalRecord, setIsViewingLocalRecord] = useState(false);
   const sessionRef = useRef<RoomSession>();
 
   useEffect(() => {
@@ -70,7 +71,6 @@ export function App() {
     };
     try {
       await next.start();
-      await repository.saveRoom(room);
       useAppStore.getState().setRooms(await repository.listRooms());
       enterRoom(room);
       sessionRef.current = next;
@@ -78,6 +78,7 @@ export function App() {
       useAppStore.getState().setEvents(latestEvents);
       useAppStore.getState().setParticipants(latestParticipants);
       for (const [peerId, path] of Object.entries(latestPaths)) useAppStore.getState().setPath(peerId, path);
+      setIsViewingLocalRecord(false);
       setSession(next);
     } catch (error) {
       next.stop();
@@ -87,10 +88,23 @@ export function App() {
     }
   };
 
+  const openLocalRecord = async (room: RoomRecord) => {
+    const repository = await getRepository();
+    const events = await repository.listEvents(room.id);
+    sessionRef.current?.stop();
+    sessionRef.current = undefined;
+    setSession(undefined);
+    useAppStore.getState().setConnectionError(undefined);
+    enterRoom(room);
+    useAppStore.getState().setEvents(events);
+    setIsViewingLocalRecord(true);
+  };
+
   const leave = () => {
     sessionRef.current?.stop();
     sessionRef.current = undefined;
     setSession(undefined);
+    setIsViewingLocalRecord(false);
     leaveRoomState();
   };
 
@@ -125,13 +139,13 @@ export function App() {
           })}
         </nav>
         <div className="mt-auto flex items-center gap-2 px-3 text-[10px] text-zinc-600">
-          <Wifi className={cn("h-4 w-4", currentRoom && "text-emerald-500")} />
-          <span>{currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
+          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && "text-emerald-500")} />
+          <span>{isViewingLocalRecord ? "本地记录（只读）" : currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
         </div>
       </aside>
       <main className="min-w-0 flex-1">
-        {activeView === "lobby" && <LobbyView onConnect={connect} />}
-        {activeView === "room" && <RoomView session={session} onLeave={leave} />}
+        {activeView === "lobby" && <LobbyView onConnect={connect} onOpenLocalRecord={openLocalRecord} />}
+        {activeView === "room" && <RoomView session={session} readOnly={isViewingLocalRecord} onLeave={leave} />}
         {activeView === "characters" && <CharactersView session={session} />}
         {activeView === "modules" && <ModulesView session={session} />}
         {activeView === "settings" && <SettingsView />}

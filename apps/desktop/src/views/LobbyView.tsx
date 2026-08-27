@@ -12,7 +12,12 @@ import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
 
-export function LobbyView({ onConnect }: { onConnect: (room: RoomRecord, nickname: string) => Promise<void> }) {
+interface LobbyViewProps {
+  onConnect(room: RoomRecord, nickname: string): Promise<void>;
+  onOpenLocalRecord(room: RoomRecord): Promise<void>;
+}
+
+export function LobbyView({ onConnect, onOpenLocalRecord }: LobbyViewProps) {
   const relayUrl = useAppStore((state) => state.relayUrl);
   const rooms = useAppStore((state) => state.rooms);
   const [nickname, setNickname] = useState(localStorage.getItem("coc-room.nickname") ?? "");
@@ -80,6 +85,18 @@ export function LobbyView({ onConnect }: { onConnect: (room: RoomRecord, nicknam
     }
   };
 
+  const openLocalRecord = async (room: RoomRecord) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await onOpenLocalRecord(room);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="mx-auto grid w-full max-w-5xl gap-6 p-8">
       <header>
@@ -115,7 +132,10 @@ export function LobbyView({ onConnect }: { onConnect: (room: RoomRecord, nicknam
             {rooms.map((room) => (
               <div key={`${room.id}-${room.localPeerId}`} className="flex items-center justify-between rounded-md bg-zinc-900 px-4 py-3">
                 <div><div className="font-medium">{room.name}</div><div className="text-xs text-zinc-500">{room.localRole === "host" ? "房主" : "玩家"} · #{room.lastSeq}</div></div>
-                <Button variant="secondary" disabled={busy} onClick={() => void reconnectRoom(room)}>重新连接</Button>
+                <div className="flex gap-2">
+                  <Button variant="ghost" disabled={busy} onClick={() => void openLocalRecord(room)}>查看本地记录</Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void reconnectRoom(room)}>重新连接</Button>
+                </div>
               </div>
             ))}
           </div>
