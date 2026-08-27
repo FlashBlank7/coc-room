@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import { BookOpen, Download, Eye, FileInput, FlaskConical, Play, Save, Trash2, Upload } from "lucide-react";
 import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -24,6 +24,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const browserImportRef = useRef<HTMLInputElement>(null);
   const parsedDraft = useMemo(() => {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
   }, [draft]);
@@ -92,12 +93,9 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     }
   };
 
-  const importPackage = async () => {
-    if (!window.__TAURI_INTERNALS__) return;
-    const path = await open({ multiple: false, filters: [{ name: "CoC module", extensions: ["json"] }] });
-    if (typeof path !== "string") return;
+  const importPackageContent = async (content: string) => {
     try {
-      const candidate = modulePackageSchema.parse(JSON.parse(await readTextFile(path)));
+      const candidate = modulePackageSchema.parse(JSON.parse(content));
       const modulePackage = nextModuleRevision(candidate, modules);
       const repository = await getRepository();
       await repository.saveModule({ package: modulePackage, sourceText: "" });
@@ -105,6 +103,33 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       setDraft(JSON.stringify(modulePackage, null, 2));
       setError(undefined);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+
+  const importPackage = async () => {
+    if (!window.__TAURI_INTERNALS__) {
+      browserImportRef.current?.click();
+      return;
+    }
+    try {
+      const path = await open({ multiple: false, filters: [{ name: "CoC module", extensions: ["json"] }] });
+      if (typeof path !== "string") return;
+      await importPackageContent(await readTextFile(path));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+
+  const importBrowserPackage = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 16 * 1024 * 1024) {
+      setError("模组包超过 16 MiB，已拒绝导入");
+      return;
+    }
+    try {
+      await importPackageContent(await file.text());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   };
 
   const exportPackage = async (modulePackage: ModulePackageV1) => {
@@ -173,7 +198,19 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               {warnings.map((warning) => <div key={warning} className="text-xs text-amber-300">{warning}</div>)}
             </Panel>
             <Panel className="grid gap-3">
-              <div className="flex items-center justify-between"><h2 className="font-semibold">已保存模组</h2><Button variant="ghost" onClick={() => void importPackage()}><Upload className="h-4 w-4" /></Button></div>
+              <input
+                ref={browserImportRef}
+                type="file"
+                accept=".json,.cocmod.json,application/json"
+                className="hidden"
+                onChange={(event) => void importBrowserPackage(event)}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="font-semibold">已保存模组</h2>
+                <Button variant="secondary" className="h-8 px-2 text-xs" onClick={() => void importPackage()}>
+                  <Upload className="mr-1.5 h-3.5 w-3.5" />导入 cocmod
+                </Button>
+              </div>
               {modules.length === 0 && <p className="text-sm text-zinc-500">资料库为空。</p>}
               {modules.map((modulePackage) => (
                 <div key={modulePackage.moduleId} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
