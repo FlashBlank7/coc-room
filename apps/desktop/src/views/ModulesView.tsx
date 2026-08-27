@@ -36,14 +36,19 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   }, [draft]);
 
   const openModule = useCallback(async (modulePackage: ModulePackageV1) => {
-    const repository = await getRepository();
-    const stored = (await repository.listModules()).find((item) => item.package.moduleId === modulePackage.moduleId);
-    setSelectedModuleId(modulePackage.moduleId);
-    setDraft(JSON.stringify(modulePackage, null, 2));
-    setDraftSourceText(stored?.sourceText ?? "");
-    setDraftDirty(false);
-    setWorkspaceMode("browse");
-    setError(undefined);
+    try {
+      const repository = await getRepository();
+      const stored = (await repository.listModules()).find((item) => item.package.moduleId === modulePackage.moduleId);
+      const openedPackage = stored?.package ?? modulePackage;
+      setSelectedModuleId(openedPackage.moduleId);
+      setDraft(JSON.stringify(openedPackage, null, 2));
+      setDraftSourceText(stored?.sourceText ?? "");
+      setDraftDirty(false);
+      setWorkspaceMode("browse");
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }, []);
 
   useEffect(() => {
@@ -100,8 +105,9 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const saveDraft = async () => {
     try {
       const candidate = modulePackageSchema.parse(JSON.parse(draft));
-      const modulePackage = nextModuleRevision(candidate, modules);
       const repository = await getRepository();
+      const storedModules = await repository.listModules();
+      const modulePackage = nextModuleRevision(candidate, storedModules.map((item) => item.package));
       await repository.saveModule({ package: modulePackage, sourceText: draftSourceText });
       setModules((await repository.listModules()).map((item) => item.package));
       setDraft(JSON.stringify(modulePackage, null, 2));
@@ -138,12 +144,14 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const importPackageContent = async (content: string) => {
     try {
       const candidate = modulePackageSchema.parse(JSON.parse(content));
-      const modulePackage = nextModuleRevision(candidate, modules);
       const repository = await getRepository();
-      await repository.saveModule({ package: modulePackage, sourceText: "" });
+      const storedModules = await repository.listModules();
+      const existing = storedModules.find((item) => item.package.moduleId === candidate.moduleId);
+      const modulePackage = nextModuleRevision(candidate, storedModules.map((item) => item.package));
+      await repository.saveModule({ package: modulePackage, sourceText: existing?.sourceText ?? "" });
       setModules((await repository.listModules()).map((item) => item.package));
       setDraft(JSON.stringify(modulePackage, null, 2));
-      setDraftSourceText("");
+      setDraftSourceText(existing?.sourceText ?? "");
       setDraftDirty(false);
       setSelectedModuleId(modulePackage.moduleId);
       setWorkspaceMode("browse");
@@ -261,6 +269,8 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               {modules.map((modulePackage) => (
                 <div
                   key={modulePackage.moduleId}
+                  aria-label={`已保存模组：${modulePackage.metadata.title}`}
+                  aria-current={selectedModuleId === modulePackage.moduleId ? "true" : undefined}
                   className={`rounded-lg border bg-zinc-900 p-3 ${selectedModuleId === modulePackage.moduleId ? "border-brass/60" : "border-zinc-800"}`}
                 >
                   <div className="font-medium text-ink">{modulePackage.metadata.title}</div>
@@ -386,7 +396,7 @@ function nextModuleRevision(candidate: ModulePackageV1, modules: ModulePackageV1
   const now = new Date().toISOString();
   return modulePackageSchema.parse({
     ...candidate,
-    revision: existing ? existing.revision + 1 : Math.max(1, candidate.revision),
+    revision: existing ? Math.max(candidate.revision, existing.revision + 1) : candidate.revision,
     metadata: {
       ...candidate.metadata,
       createdAt: existing?.metadata.createdAt ?? candidate.metadata.createdAt,

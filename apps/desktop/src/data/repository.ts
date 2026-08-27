@@ -37,6 +37,12 @@ export interface LocalRepository {
   setSetting(key: string, value: string): Promise<void>;
 }
 
+function assertNewerModuleRevision(existing: ModulePackageV1 | undefined, candidate: ModulePackageV1): void {
+  if (existing && candidate.revision <= existing.revision) {
+    throw new Error(`模组修订号必须高于已保存的 v${existing.revision}`);
+  }
+}
+
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
 }
@@ -141,9 +147,7 @@ class SqliteRepository implements LocalRepository {
     const existing = existingRows[0]
       ? modulePackageSchema.parse(JSON.parse(existingRows[0].module_json))
       : undefined;
-    if (existing && modulePackage.revision <= existing.revision) {
-      throw new Error(`模组修订号必须高于已保存的 v${existing.revision}`);
-    }
+    assertNewerModuleRevision(existing, modulePackage);
     await this.db.execute(
       `INSERT INTO modules (id, title, schema_version, source_text, module_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -227,13 +231,13 @@ export class MemoryRepository implements LocalRepository {
   async saveModule(value: StoredModule): Promise<void> {
     const modulePackage = modulePackageSchema.parse(value.package);
     const existing = this.modules.get(modulePackage.moduleId);
-    if (existing && modulePackage.revision <= existing.package.revision) {
-      throw new Error(`模组修订号必须高于已保存的 v${existing.package.revision}`);
-    }
-    this.modules.set(value.package.moduleId, structuredClone(value));
+    assertNewerModuleRevision(existing?.package, modulePackage);
+    this.modules.set(modulePackage.moduleId, structuredClone({ package: modulePackage, sourceText: value.sourceText }));
   }
   async listModules(): Promise<StoredModule[]> {
-    return [...this.modules.values()].map((value) => structuredClone(value));
+    return [...this.modules.values()]
+      .map((value) => structuredClone(value))
+      .sort((a, b) => b.package.metadata.updatedAt.localeCompare(a.package.metadata.updatedAt));
   }
   async deleteModule(moduleId: string): Promise<void> {
     this.modules.delete(moduleId);

@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModulePackageV1 } from "@coc-room/protocol";
-import type { RoomRecord } from "../data/repository";
+import { getRepository, type RoomRecord } from "../data/repository";
 import type { RoomSession } from "../network/RoomSession";
 import { useAppStore } from "../store/app-store";
 import { ModulesView } from "./ModulesView";
@@ -15,8 +15,8 @@ afterEach(() => {
 });
 
 describe("ModulesView browser import", () => {
-  it("imports a cocmod JSON file into the preview repository", async () => {
-    const modulePackage = createModulePackage();
+  it("imports, selects, and opens a cocmod with browsable locations and NPCs", async () => {
+    const modulePackage = createModulePackageWithEntities();
     const { container } = render(<ModulesView />);
     const input = container.querySelector<HTMLInputElement>('input[type="file"]');
     if (!input) throw new Error("browser module input was not rendered");
@@ -26,10 +26,69 @@ describe("ModulesView browser import", () => {
     Object.defineProperty(file, "text", { value: async () => content });
     fireEvent.change(input, { target: { files: [file] } });
 
-    expect((await screen.findAllByText(modulePackage.metadata.title)).length).toBeGreaterThanOrEqual(2);
+    const browser = await screen.findByLabelText(`${modulePackage.metadata.title}模组内容浏览`);
+    expect(screen.getByLabelText(`已保存模组：${modulePackage.metadata.title}`).getAttribute("aria-current")).toBe("true");
     expect(screen.getByRole("tab", { name: "资料浏览" }).getAttribute("aria-selected")).toBe("true");
     expect(useAppStore.getState().modules).toHaveLength(1);
     expect(useAppStore.getState().modules[0]?.moduleId).toBe(modulePackage.moduleId);
+
+    fireEvent.click(within(browser).getByRole("tab", { name: /^地点\s*1$/ }));
+    expect(within(browser).getByText("观止剧场")).not.toBeNull();
+    fireEvent.click(within(browser).getByRole("tab", { name: /^NPC\s*1$/ }));
+    expect(within(browser).getByText("花小路")).not.toBeNull();
+  });
+
+  it("upgrades an older import from repository state and preserves its local source", async () => {
+    const repository = await getRepository();
+    const moduleId = "module_revision_upgrade_01";
+    const existing = {
+      ...createModulePackage(),
+      moduleId,
+      revision: 4,
+      metadata: {
+        ...createModulePackage().metadata,
+        title: "旧版模组",
+        updatedAt: "2026-08-27T01:00:00.000Z",
+      },
+    };
+    await repository.saveModule({ package: existing, sourceText: "本机保存的原始模组正文" });
+
+    const incoming = {
+      ...createModulePackageWithEntities(),
+      moduleId,
+      revision: 2,
+      metadata: {
+        ...createModulePackageWithEntities().metadata,
+        title: "新版导入内容",
+      },
+    };
+    const { container } = render(<ModulesView />);
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!input) throw new Error("browser module input was not rendered");
+    const content = JSON.stringify(incoming);
+    const file = new File([content], "older-revision.cocmod.json", { type: "application/json" });
+    Object.defineProperty(file, "text", { value: async () => content });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await screen.findByLabelText(`${incoming.metadata.title}模组内容浏览`);
+    const imported = useAppStore.getState().modules.find((item) => item.moduleId === moduleId);
+    expect(imported?.revision).toBe(5);
+    expect(imported?.locations[0]?.name).toBe("观止剧场");
+    expect(imported?.npcs[0]?.name).toBe("花小路");
+    const stored = (await repository.listModules()).find((item) => item.package.moduleId === moduleId);
+    expect(stored?.sourceText).toBe("本机保存的原始模组正文");
+
+    const newerContent = JSON.stringify({
+      ...incoming,
+      revision: 12,
+      metadata: { ...incoming.metadata, title: "上游高版本内容" },
+    });
+    const newerFile = new File([newerContent], "newer-revision.cocmod.json", { type: "application/json" });
+    Object.defineProperty(newerFile, "text", { value: async () => newerContent });
+    fireEvent.change(input, { target: { files: [newerFile] } });
+
+    await screen.findByLabelText("上游高版本内容模组内容浏览");
+    expect(useAppStore.getState().modules.find((item) => item.moduleId === moduleId)?.revision).toBe(12);
   });
 });
 
@@ -134,6 +193,32 @@ function createModulePackage(): ModulePackageV1 {
     keeperNotes: [],
     relations: [],
     extensions: {},
+  };
+}
+
+function createModulePackageWithEntities(): ModulePackageV1 {
+  return {
+    ...createModulePackage(),
+    locations: [
+      {
+        id: "location-theater",
+        name: "观止剧场",
+        description: "调查开始的剧场。",
+        aliases: ["剧场"],
+        sourceRefs: [],
+      },
+    ],
+    npcs: [
+      {
+        id: "npc-hana",
+        name: "花小路",
+        description: "剧场中的关键人物。",
+        role: "剧场演员",
+        motivation: "寻找失踪的同伴",
+        traits: ["谨慎"],
+        sourceRefs: [],
+      },
+    ],
   };
 }
 

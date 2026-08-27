@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ModulePackageV1 } from "@coc-room/protocol";
 import { MemoryRepository, type RoomRecord } from "./repository";
 
 describe("MemoryRepository", () => {
@@ -66,7 +67,64 @@ describe("MemoryRepository", () => {
       expect.objectContaining({ lastSeq: 12, createdAt: "2026-01-01T00:00:00.000Z" }),
     ]);
   });
+
+  it("enforces the same strictly increasing module revisions used by SQLite", async () => {
+    const repository = new MemoryRepository();
+    const revisionOne = modulePackage("module-revision-test", 1, "2026-01-01T00:00:00.000Z");
+    await repository.saveModule({ package: revisionOne, sourceText: "source v1" });
+
+    await expect(repository.saveModule({ package: revisionOne, sourceText: "duplicate" })).rejects.toThrow(/v1/);
+    await expect(repository.saveModule({
+      package: { ...revisionOne, revision: 2, metadata: { ...revisionOne.metadata, updatedAt: "2026-01-02T00:00:00.000Z" } },
+      sourceText: "source v2",
+    })).resolves.toBeUndefined();
+
+    expect(await repository.listModules()).toEqual([
+      expect.objectContaining({ package: expect.objectContaining({ revision: 2 }), sourceText: "source v2" }),
+    ]);
+  });
+
+  it("orders memory-backed modules like SQLite and returns defensive copies", async () => {
+    const repository = new MemoryRepository();
+    const older = modulePackage("module-older-test", 1, "2026-01-01T00:00:00.000Z");
+    const newer = modulePackage("module-newer-test", 1, "2026-02-01T00:00:00.000Z");
+    await repository.saveModule({ package: older, sourceText: "older" });
+    await repository.saveModule({ package: newer, sourceText: "newer" });
+
+    const firstRead = await repository.listModules();
+    expect(firstRead.map((item) => item.package.moduleId)).toEqual([newer.moduleId, older.moduleId]);
+    firstRead[0]!.package.metadata.title = "mutated outside repository";
+    expect((await repository.listModules())[0]?.package.metadata.title).toBe("module-newer-test");
+  });
 });
+
+function modulePackage(moduleId: string, revision: number, updatedAt: string): ModulePackageV1 {
+  return {
+    schemaVersion: 1,
+    moduleId,
+    revision,
+    metadata: {
+      title: moduleId,
+      authors: [],
+      language: "zh-CN",
+      summary: "",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt,
+    },
+    overview: "",
+    sourceDocuments: [],
+    chapters: [],
+    scenes: [],
+    locations: [],
+    npcs: [],
+    clues: [],
+    handouts: [],
+    suggestedChecks: [],
+    keeperNotes: [],
+    relations: [],
+    extensions: {},
+  };
+}
 
 function roomRecord(id: string): RoomRecord {
   return {
