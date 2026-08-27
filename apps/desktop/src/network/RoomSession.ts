@@ -52,6 +52,7 @@ export class RoomSession {
   private readonly syncCollectors = new Map<string, SyncChunkCollector>();
   private readonly participants = new Map<string, ParticipantV1>();
   private readonly pendingCommands = new Map<string, RoomCommandV1>();
+  private hostPath?: ConnectionPath;
   private commandCommitTail: Promise<void> = Promise.resolve();
 
   onEvents?: (events: RoomEventV1[]) => void;
@@ -90,6 +91,11 @@ export class RoomSession {
       }));
       this.participants.clear();
       for (const participant of canonicalParticipants) this.participants.set(participant.peerId, participant);
+      if (canonicalParticipants.some((peer) => peer.peerId === options.room.hostPeerId && peer.role === "host")) {
+        // A fresh authenticated presence snapshot proves the relay can see the
+        // host again, even if the previous send marked the route offline.
+        this.hostPath = undefined;
+      }
       this.onPresence?.(canonicalParticipants);
       if (!this.isHost && canonicalParticipants.some((peer) => peer.peerId === options.room.hostPeerId)) {
         const syncSent = this.transport.sendToHost({
@@ -101,12 +107,21 @@ export class RoomSession {
         this.resendPendingCommands();
       }
     };
-    this.transport.onPathChange = (peerId, path) => this.onPathChange?.(peerId, path);
+    this.transport.onPathChange = (peerId, path) => {
+      if (peerId === options.room.hostPeerId) this.hostPath = path;
+      this.onPathChange?.(peerId, path);
+    };
     this.transport.onError = (message) => this.onError?.(message);
   }
 
   get isHost(): boolean {
     return this.participant.role === "host";
+  }
+
+  get isHostAvailable(): boolean {
+    if (this.isHost) return true;
+    const host = this.participants.get(this.options.room.hostPeerId);
+    return host?.role === "host" && this.hostPath !== "offline";
   }
 
   async start(): Promise<void> {
@@ -122,6 +137,9 @@ export class RoomSession {
   }
 
   async submit(type: RoomCommandV1["type"], payload: RoomCommandV1["payload"]): Promise<void> {
+    if (!this.isHostAvailable) {
+      throw new Error("房主当前离线，房间已暂停；房主回来后再继续操作");
+    }
     const command = roomCommandSchema.parse({
       protocolVersion: 1,
       roomId: this.options.room.id,

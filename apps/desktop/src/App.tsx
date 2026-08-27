@@ -11,6 +11,7 @@ import { ModulesView } from "./views/ModulesView";
 import { SettingsView } from "./views/SettingsView";
 import { CharactersView } from "./views/CharactersView";
 import { cn } from "./lib/cn";
+import { isRoomHostAvailable } from "./lib/room-availability";
 
 const navigation: Array<{ id: AppView; label: string; icon: typeof DoorOpen }> = [
   { id: "lobby", label: "大厅", icon: DoorOpen },
@@ -24,11 +25,18 @@ export function App() {
   const activeView = useAppStore((state) => state.activeView);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const currentRoom = useAppStore((state) => state.currentRoom);
+  const participants = useAppStore((state) => state.participants);
+  const paths = useAppStore((state) => state.paths);
   const enterRoom = useAppStore((state) => state.enterRoom);
   const leaveRoomState = useAppStore((state) => state.leaveRoom);
   const [session, setSession] = useState<RoomSession>();
   const [isViewingLocalRecord, setIsViewingLocalRecord] = useState(false);
   const sessionRef = useRef<RoomSession>();
+  const roomPaused = Boolean(
+    currentRoom &&
+      !isViewingLocalRecord &&
+      !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId]),
+  );
 
   useEffect(() => {
     void getRepository().then(async (repository) => {
@@ -139,8 +147,8 @@ export function App() {
           })}
         </nav>
         <div className="mt-auto flex items-center gap-2 px-3 text-[10px] text-zinc-600">
-          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && "text-emerald-500")} />
-          <span>{isViewingLocalRecord ? "本地记录（只读）" : currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
+          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && !roomPaused && "text-emerald-500", roomPaused && "text-amber-400")} />
+          <span>{isViewingLocalRecord ? "本地记录（只读）" : roomPaused ? "房主离线 · 房间暂停" : currentRoom ? "房间已连接" : "未连接"} · v0.1</span>
         </div>
       </aside>
       <main className="min-w-0 flex-1">

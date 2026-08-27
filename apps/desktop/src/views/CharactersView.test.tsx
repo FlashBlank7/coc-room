@@ -15,13 +15,14 @@ import { useAppStore } from "../store/app-store";
 import { CharactersView } from "./CharactersView";
 
 const playerRoom = createRoom("player", "player-local");
+const hostPresence: ParticipantV1 = { peerId: playerRoom.hostPeerId, displayName: "Keeper", role: "host" };
 
 beforeEach(() => {
   useAppStore.setState({
     activeView: "characters",
     currentRoom: playerRoom,
     events: [],
-    participants: [],
+    participants: [hostPresence],
     paths: {},
     connectionError: undefined,
   });
@@ -128,12 +129,25 @@ describe("CharactersView permissions and editing", () => {
   });
 
   it("disables creation, editing, and saving for an offline local record", () => {
+    useAppStore.setState({ participants: [], paths: {} });
     render(<CharactersView />);
 
     expect(screen.getByText("本地记录为只读；重新连接房间后才能新建或修改角色卡。")).toBeTruthy();
     expect((screen.getByRole("button", { name: "新建我的角色" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByLabelText("姓名") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "保存并同步" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("locks player character commands while the host is offline", () => {
+    useAppStore.setState({ participants: [] });
+    const { session, submit } = createSession("player", "player-local", "Alice");
+    render(<CharactersView session={session} />);
+
+    expect(screen.getByText(/房主已离线，房间暂停/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "新建我的角色" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("姓名") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "保存并同步" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
   });
 });
 

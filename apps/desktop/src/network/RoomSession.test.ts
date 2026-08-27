@@ -70,6 +70,10 @@ class FakeTransport implements RoomSessionTransport {
   emitPresence(participants: ParticipantV1[]): void {
     this.onPresence?.(participants);
   }
+
+  emitPath(peerId: string, path: ConnectionPath): void {
+    this.onPathChange?.(peerId, path);
+  }
 }
 
 class RecordingRepository extends MemoryRepository {
@@ -272,11 +276,15 @@ describe("RoomSession", () => {
     const session = createSession("player", repository, transport);
     await session.start();
 
+    transport.emitPresence([PLAYER, HOST]);
+    transport.sentToHost.length = 0;
+
     await session.submit("chat.send", { message: "retry me", format: "plain" });
     const initialAttempt = transport.sentToHost[0];
     if (initialAttempt?.kind !== "command") throw new Error("expected a command attempt");
     const pendingCommand = initialAttempt.command;
 
+    transport.emitPresence([PLAYER]);
     transport.sentToHost.length = 0;
     transport.sendToHostResult = true;
     transport.emitPresence([
@@ -306,6 +314,44 @@ describe("RoomSession", () => {
     transport.sentToHost.length = 0;
     transport.emitPresence([PLAYER, HOST]);
     expect(transport.sentToHost.map((message) => message.kind)).toEqual(["sync.request"]);
+  });
+
+  it("rejects player commands while the host is absent and resumes after presence returns", async () => {
+    const repository = new MemoryRepository();
+    const transport = new FakeTransport();
+    const session = createSession("player", repository, transport);
+    await session.start();
+
+    expect(session.isHostAvailable).toBe(false);
+    await expect(session.submit("chat.send", { message: "paused", format: "plain" }))
+      .rejects.toThrow("房主当前离线，房间已暂停");
+    expect(transport.sentToHost).toEqual([]);
+
+    transport.emitPresence([PLAYER, HOST]);
+    transport.sentToHost.length = 0;
+    expect(session.isHostAvailable).toBe(true);
+    await session.submit("chat.send", { message: "resumed", format: "plain" });
+    expect(transport.sentToHost).toHaveLength(1);
+    expect(transport.sentToHost[0]?.kind).toBe("command");
+
+    transport.emitPath(HOST_PEER_ID, "offline");
+    expect(session.isHostAvailable).toBe(false);
+    await expect(session.submit("chat.send", { message: "path lost", format: "plain" }))
+      .rejects.toThrow("房主当前离线，房间已暂停");
+
+    transport.emitPresence([PLAYER, HOST]);
+    expect(session.isHostAvailable).toBe(true);
+  });
+
+  it("keeps host authority active without relying on a presence echo", async () => {
+    const repository = new MemoryRepository();
+    const transport = new FakeTransport();
+    const session = createSession("host", repository, transport);
+    await session.start();
+
+    expect(session.isHostAvailable).toBe(true);
+    await session.submit("chat.send", { message: "host remains authoritative", format: "plain" });
+    expect((await repository.listEvents(ROOM_ID))).toHaveLength(1);
   });
 });
 

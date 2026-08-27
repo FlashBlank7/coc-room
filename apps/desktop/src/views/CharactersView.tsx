@@ -4,6 +4,7 @@ import { coc7CharacterSchema, type Coc7Character } from "@coc-room/protocol";
 import type { RoomSession } from "../network/RoomSession";
 import { useAppStore } from "../store/app-store";
 import { deriveCoc7Stats } from "../lib/character-derivation";
+import { isRoomHostAvailable } from "../lib/room-availability";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
@@ -57,6 +58,8 @@ const currentResourceMaximum: Record<CurrentResourceKey, keyof Coc7Character["de
 export function CharactersView({ session }: { session?: RoomSession }) {
   const events = useAppStore((state) => state.events);
   const currentRoom = useAppStore((state) => state.currentRoom);
+  const participants = useAppStore((state) => state.participants);
+  const paths = useAppStore((state) => state.paths);
   const characters = useMemo(() => {
     const byId = new Map<string, Coc7Character>();
     for (const event of events) {
@@ -97,7 +100,10 @@ export function CharactersView({ session }: { session?: RoomSession }) {
     return <div className="grid h-full place-items-center text-zinc-500">加入房间后才能编辑角色卡</div>;
   }
 
-  const canEdit = Boolean(session && (session.isHost || draft.ownerPeerId === currentRoom.localPeerId));
+  const roomPaused = Boolean(
+    session && !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId]),
+  );
+  const canEdit = Boolean(session && !roomPaused && (session.isHost || draft.ownerPeerId === currentRoom.localPeerId));
 
   const editDraft = (
     updater: (current: Coc7Character) => Coc7Character,
@@ -190,6 +196,7 @@ export function CharactersView({ session }: { session?: RoomSession }) {
 
   const saveCharacter = async () => {
     try {
+      if (roomPaused) throw new Error("房主当前离线，房间已暂停");
       if (!session || (!session.isHost && draft.ownerPeerId !== currentRoom.localPeerId)) {
         throw new Error("玩家只能保存自己的角色卡");
       }
@@ -245,7 +252,7 @@ export function CharactersView({ session }: { session?: RoomSession }) {
               {!own && (
                 <Button
                   variant="secondary"
-                  disabled={!session}
+                  disabled={!session || roomPaused}
                   onClick={() => {
                     setDraft(createCharacter(currentRoom.localPeerId, session?.participant.displayName ?? "调查员"));
                     setDirty(true);
@@ -262,7 +269,9 @@ export function CharactersView({ session }: { session?: RoomSession }) {
             {!canEdit && (
               <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-400">
                 <LockKeyhole className="h-4 w-4 shrink-0" />
-                {session
+                {roomPaused
+                  ? "房主已离线，房间暂停；房主回来后才能新建、修改或同步角色卡。"
+                  : session
                   ? "只有角色所有者与主持人可以修改这张角色卡。"
                   : "本地记录为只读；重新连接房间后才能新建或修改角色卡。"}
               </div>

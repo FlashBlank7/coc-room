@@ -21,6 +21,9 @@ const room: RoomRecord = {
   updatedAt: "2026-01-02T00:00:00.000Z",
 };
 
+const host = { peerId: room.hostPeerId, displayName: "守秘人", role: "host" as const };
+const player = { peerId: room.localPeerId, displayName: "调查员", role: "player" as const };
+
 const event: RoomEventV1 = {
   protocolVersion: 1,
   roomId: room.id,
@@ -37,7 +40,7 @@ beforeEach(() => {
     activeView: "room",
     currentRoom: room,
     events: [event],
-    participants: [],
+    participants: [player, host],
     paths: {},
     connectionError: undefined,
   });
@@ -90,5 +93,39 @@ describe("RoomView", () => {
     const payload = submit.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(payload).not.toHaveProperty("target");
     expect(payload).not.toHaveProperty("requiredDifficulty");
+  });
+
+  it("pauses player commands while the host is absent but keeps records exportable", () => {
+    useAppStore.setState({ participants: [player, host], paths: { [room.hostPeerId]: "offline" } });
+    const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
+    const session = { participant: player, isHost: false, submit } as unknown as RoomSession;
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    expect(screen.getByRole("status").textContent).toContain("房主已离线，房间暂停");
+    expect(screen.getByText(/房主离线 · 房间已暂停/)).toBeTruthy();
+    expect((screen.getByPlaceholderText("等待房主回来……") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "发送消息" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "掷骰并记录" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("骰式") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Markdown" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "HTML" })).toBeTruthy();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("does not pause the host when its own presence snapshot is empty", () => {
+    const hostRoom: RoomRecord = {
+      ...room,
+      localRole: "host",
+      localPeerId: room.hostPeerId,
+      joinToken: "player-join-token",
+    };
+    useAppStore.setState({ currentRoom: hostRoom, participants: [], paths: {} });
+    const session = { participant: host, isHost: true, submit: vi.fn() } as unknown as RoomSession;
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText(/房主权威源/)).toBeTruthy();
+    expect((screen.getByPlaceholderText("说点什么……") as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "掷骰并记录" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

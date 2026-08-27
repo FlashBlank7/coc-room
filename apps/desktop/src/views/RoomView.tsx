@@ -10,6 +10,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import type { RoomSession } from "../network/RoomSession";
 import { encodeInvitation } from "../lib/invitation";
+import { isRoomHostAvailable } from "../lib/room-availability";
 import { useAppStore } from "../store/app-store";
 import { Button } from "../components/ui/Button";
 import { Field, Input } from "../components/ui/Field";
@@ -55,9 +56,12 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
 
   if (!room) return <EmptyRoom />;
 
+  const roomPaused = !readOnly && !isRoomHostAvailable(room, participants, paths[room.hostPeerId]);
+  const commandsDisabled = !session || roomPaused;
+
   const sendChat = async () => {
     const value = message.trim();
-    if (!value || !session) return;
+    if (!value || commandsDisabled || !session) return;
     try {
       await session.submit("chat.send", { message: value, format: "plain" });
       setMessage("");
@@ -68,7 +72,7 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
   };
 
   const roll = async () => {
-    if (!session) return;
+    if (commandsDisabled || !session) return;
     try {
       await session.submit("dice.roll", {
         expression: dice, reason: reason.trim(), bonusDice: bonus, penaltyDice: penalty,
@@ -101,13 +105,18 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
     <div className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)_270px]">
       <section className="flex min-h-0 flex-col border-r border-zinc-800">
         <header className="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
-          <div><h1 className="font-serif text-xl text-ink">{room.name}</h1><p className="text-xs text-zinc-500">事件 #{events.at(-1)?.sequence ?? 0} · {readOnly ? "本地记录（只读）" : room.localRole === "host" ? "房主权威源" : "已同步副本"}</p></div>
+          <div><h1 className="font-serif text-xl text-ink">{room.name}</h1><p className="text-xs text-zinc-500">事件 #{events.at(-1)?.sequence ?? 0} · {readOnly ? "本地记录（只读）" : room.localRole === "host" ? "房主权威源" : roomPaused ? "房主离线 · 房间已暂停" : "已同步副本"}</p></div>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => void exportTranscript("md")}><Download className="mr-2 h-4 w-4" />Markdown</Button>
             <Button variant="secondary" onClick={() => void exportTranscript("html")}>HTML</Button>
             <Button variant="ghost" onClick={onLeave} aria-label={readOnly ? "返回大厅" : "离开房间"}><LogOut className="h-4 w-4" />{readOnly && <span className="ml-2">返回大厅</span>}</Button>
           </div>
         </header>
+        {roomPaused && (
+          <div role="status" className="border-b border-amber-900 bg-amber-950/30 px-5 py-3 text-sm text-amber-200">
+            房主已离线，房间暂停。你仍可查看和导出本机记录；房主回来后会自动继续同步。
+          </div>
+        )}
         {connectionError && <div className="border-b border-amber-900 bg-amber-950/30 px-5 py-2 text-xs text-amber-300">{connectionError}</div>}
         <div className="event-scroll flex-1 overflow-y-auto p-5">
           {events.length === 0 && <div className="grid h-full place-items-center text-sm text-zinc-600">{readOnly ? "本机暂无已同步记录" : "等待第一条调查记录……"}</div>}
@@ -122,8 +131,8 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
         ) : (
           <div className="border-t border-zinc-800 bg-zinc-950/80 p-4">
             <div className="mx-auto flex max-w-3xl gap-2">
-              <Input value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) void sendChat(); }} placeholder="说点什么……" className="flex-1" />
-              <Button onClick={() => void sendChat()} disabled={!session}><Send className="h-4 w-4" /></Button>
+              <Input disabled={commandsDisabled} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) void sendChat(); }} placeholder={roomPaused ? "等待房主回来……" : "说点什么……"} className="flex-1" />
+              <Button aria-label="发送消息" onClick={() => void sendChat()} disabled={commandsDisabled}><Send className="h-4 w-4" /></Button>
             </div>
           </div>
         )}
@@ -140,19 +149,31 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
         ) : (
           <Panel className="mb-4 p-4">
             <h2 className="mb-3 text-sm font-semibold">在线成员</h2>
-            <div className="grid gap-2 text-sm">{participants.map((participant) => <div key={participant.peerId} className="flex justify-between"><span>{participant.displayName}{participant.role === "host" ? "（房主）" : ""}</span><span className={paths[participant.peerId] === "direct" ? "text-emerald-400" : "text-amber-400"}>{participant.peerId === room.localPeerId ? "本机" : paths[participant.peerId] === "direct" ? "直连" : paths[participant.peerId] === "relay" ? "中继" : "连接中"}</span></div>)}</div>
+            <div className="grid gap-2 text-sm">{participants.map((participant) => {
+              const path = paths[participant.peerId];
+              const status = participant.peerId === room.localPeerId
+                ? "本机"
+                : path === "direct"
+                  ? "直连"
+                  : path === "relay"
+                    ? "中继"
+                    : path === "offline"
+                      ? "离线"
+                      : "连接中";
+              return <div key={participant.peerId} className="flex justify-between"><span>{participant.displayName}{participant.role === "host" ? "（房主）" : ""}</span><span className={path === "direct" ? "text-emerald-400" : path === "offline" ? "text-zinc-500" : "text-amber-400"}>{status}</span></div>;
+            })}</div>
           </Panel>
         )}
         {!readOnly && <Panel className="grid gap-3 p-4">
           <div className="flex items-center gap-2"><Dices className="h-4 w-4 text-brass" /><h2 className="text-sm font-semibold">骰子与检定</h2></div>
-          <Field label="骰式"><Input value={dice} onChange={(event) => setDice(event.target.value)} /></Field>
-          <Field label="原因"><Input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="侦查旧宅" /></Field>
-          <Field label="目标值（可选）"><Input type="number" min={1} max={100} value={target} onChange={(event) => setTarget(event.target.value)} /></Field>
+          <Field label="骰式"><Input disabled={commandsDisabled} value={dice} onChange={(event) => setDice(event.target.value)} /></Field>
+          <Field label="原因"><Input disabled={commandsDisabled} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="侦查旧宅" /></Field>
+          <Field label="目标值（可选）"><Input disabled={commandsDisabled} type="number" min={1} max={100} value={target} onChange={(event) => setTarget(event.target.value)} /></Field>
           <Field label="成功难度" hint={target ? undefined : "填写目标值后可选"}>
             <select
               aria-label="成功难度"
               className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-ink outline-none focus:border-brass disabled:opacity-40"
-              disabled={!target}
+              disabled={commandsDisabled || !target}
               value={difficulty}
               onChange={(event) => setDifficulty(event.target.value as CheckDifficulty)}
             >
@@ -161,8 +182,8 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
               <option value="extreme">极难</option>
             </select>
           </Field>
-          <div className="grid grid-cols-2 gap-2"><Field label="奖励骰"><Input type="number" min={0} max={2} value={bonus} onChange={(event) => { setBonus(Number(event.target.value)); setPenalty(0); }} /></Field><Field label="惩罚骰"><Input type="number" min={0} max={2} value={penalty} onChange={(event) => { setPenalty(Number(event.target.value)); setBonus(0); }} /></Field></div>
-          <Button onClick={() => void roll()} disabled={!session}>掷骰并记录</Button>
+          <div className="grid grid-cols-2 gap-2"><Field label="奖励骰"><Input disabled={commandsDisabled} type="number" min={0} max={2} value={bonus} onChange={(event) => { setBonus(Number(event.target.value)); setPenalty(0); }} /></Field><Field label="惩罚骰"><Input disabled={commandsDisabled} type="number" min={0} max={2} value={penalty} onChange={(event) => { setPenalty(Number(event.target.value)); setBonus(0); }} /></Field></div>
+          <Button onClick={() => void roll()} disabled={commandsDisabled}>掷骰并记录</Button>
         </Panel>}
       </aside>
     </div>
