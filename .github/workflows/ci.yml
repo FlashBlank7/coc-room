@@ -132,6 +132,69 @@ jobs:
       - run: pnpm --filter @coc-room/protocol build
       - name: Build Tauri NSIS installer
         run: pnpm --filter @coc-room/desktop tauri build --target x86_64-pc-windows-msvc
+      - name: Real WebView2 direct and forced-relay smoke
+        shell: pwsh
+        run: |
+          $pnpm = (Get-Command pnpm).Source
+          $relayOut = Join-Path $env:RUNNER_TEMP "relay-webview-smoke.out.log"
+          $relayErr = Join-Path $env:RUNNER_TEMP "relay-webview-smoke.err.log"
+          $relay = Start-Process -FilePath $pnpm `
+            -ArgumentList @("--filter", "@coc-room/relay", "exec", "wrangler", "dev", "--port", "8787") `
+            -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -RedirectStandardOutput $relayOut `
+            -RedirectStandardError $relayErr `
+            -WindowStyle Hidden `
+            -PassThru
+          try {
+            $ready = $false
+            foreach ($attempt in 1..30) {
+              if ($relay.HasExited) { break }
+              try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:8787/health" -UseBasicParsing -TimeoutSec 2
+                if ($response.StatusCode -eq 200) { $ready = $true; break }
+              } catch {}
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) {
+              Get-Content -LiteralPath $relayOut -ErrorAction SilentlyContinue
+              Get-Content -LiteralPath $relayErr -ErrorAction SilentlyContinue
+              throw "Local relay did not become ready"
+            }
+
+            $app = Get-ChildItem -Path apps/desktop/src-tauri/target -Filter "coc-room.exe" -File -Recurse |
+              Where-Object { $_.FullName -notmatch "[\\/]bundle[\\/]" } |
+              Select-Object -First 1
+            if (-not $app) { throw "Built desktop executable was not found" }
+
+            foreach ($mode in @("direct", "relay")) {
+              $resultPath = Join-Path $env:RUNNER_TEMP "network-$mode.json"
+              $env:COC_ROOM_NETWORK_SMOKE = "1"
+              $env:COC_ROOM_NETWORK_SMOKE_URL = "http://127.0.0.1:8787"
+              $env:COC_ROOM_NETWORK_SMOKE_MODE = $mode
+              $env:COC_ROOM_NETWORK_SMOKE_RESULT = $resultPath
+              $process = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
+              try {
+                foreach ($attempt in 1..60) {
+                  if (Test-Path -LiteralPath $resultPath) { break }
+                  if ($process.HasExited) { throw "Desktop $mode smoke exited before reporting" }
+                  Start-Sleep -Milliseconds 500
+                }
+                if (-not (Test-Path -LiteralPath $resultPath)) {
+                  throw "Desktop $mode smoke did not report within 30 seconds"
+                }
+                $report = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+                if (-not $report.ok) { throw "Desktop $mode smoke failed: $($report.message)" }
+              } finally {
+                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+              }
+            }
+          } finally {
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_URL -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_MODE -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RESULT -ErrorAction SilentlyContinue
+            if (-not $relay.HasExited) { Stop-Process -Id $relay.Id -Force }
+          }
       - name: Install and launch NSIS smoke test
         shell: pwsh
         run: |

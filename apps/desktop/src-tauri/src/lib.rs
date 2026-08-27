@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -26,6 +28,23 @@ const MAX_SOURCE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
+const MAX_NETWORK_SMOKE_REPORT_BYTES: usize = 64 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkSmokeConfig {
+    relay_url: String,
+    mode: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkSmokeReport {
+    ok: bool,
+    mode: String,
+    message: String,
+    details: Option<Value>,
+}
 
 #[derive(Default)]
 struct AuthorizedModuleSources(Mutex<HashSet<PathBuf>>);
@@ -148,6 +167,83 @@ fn delete_deepseek_key() -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+#[tauri::command]
+fn network_smoke_config() -> Result<Option<NetworkSmokeConfig>, String> {
+    parse_network_smoke_config(
+        std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_URL").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_MODE").ok().as_deref(),
+    )
+}
+
+fn parse_network_smoke_config(
+    enabled: Option<&str>,
+    relay_url: Option<&str>,
+    mode: Option<&str>,
+) -> Result<Option<NetworkSmokeConfig>, String> {
+    if enabled != Some("1") {
+        return Ok(None);
+    }
+    let relay_url = relay_url
+        .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_URL is required".to_string())?
+        .to_string();
+    if !(relay_url.starts_with("http://127.0.0.1:")
+        || relay_url.starts_with("http://localhost:")
+        || relay_url.starts_with("https://"))
+    {
+        return Err("network smoke relay URL must use HTTPS or a loopback HTTP origin".to_string());
+    }
+    let mode = mode
+        .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_MODE is required".to_string())?
+        .to_string();
+    if !matches!(mode.as_str(), "direct" | "relay") {
+        return Err("network smoke mode must be direct or relay".to_string());
+    }
+    Ok(Some(NetworkSmokeConfig { relay_url, mode }))
+}
+
+#[tauri::command]
+fn finish_network_smoke(app: tauri::AppHandle, report: NetworkSmokeReport) -> Result<(), String> {
+    if std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref() != Some("1") {
+        return Err("network smoke mode is not enabled".to_string());
+    }
+    if !matches!(report.mode.as_str(), "direct" | "relay") || report.message.len() > 4_000 {
+        return Err("network smoke report is invalid".to_string());
+    }
+    let target = PathBuf::from(
+        std::env::var("COC_ROOM_NETWORK_SMOKE_RESULT")
+            .map_err(|_| "COC_ROOM_NETWORK_SMOKE_RESULT is required".to_string())?,
+    );
+    if !target.is_absolute() || target.file_name().is_none() {
+        return Err("network smoke result path must be an absolute file path".to_string());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| "network smoke result path has no parent".to_string())?
+        .canonicalize()
+        .map_err(|_| "network smoke result directory does not exist".to_string())?;
+    let target = parent.join(
+        target
+            .file_name()
+            .ok_or_else(|| "network smoke result path has no file name".to_string())?,
+    );
+    let serialized = serde_json::to_vec(&report)
+        .map_err(|_| "network smoke report could not be serialized".to_string())?;
+    if serialized.len() > MAX_NETWORK_SMOKE_REPORT_BYTES {
+        return Err("network smoke report exceeds the size limit".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|error| format!("cannot create network smoke result: {error}"))?;
+    file.write_all(&serialized)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("cannot persist network smoke result: {error}"))?;
+    app.exit(if report.ok { 0 } else { 1 });
+    Ok(())
 }
 
 #[tauri::command]
@@ -487,6 +583,8 @@ pub fn run() {
             save_deepseek_key,
             has_deepseek_key,
             delete_deepseek_key,
+            network_smoke_config,
+            finish_network_smoke,
             select_module_source,
             run_module_parser
         ])
@@ -578,6 +676,26 @@ mod tests {
     }
 
     #[test]
+    fn network_smoke_configuration_is_explicit_and_restricts_plain_http() {
+        assert!(parse_network_smoke_config(None, None, None)
+            .expect("disabled smoke mode should be valid")
+            .is_none());
+        assert!(parse_network_smoke_config(
+            Some("1"),
+            Some("http://relay.example.test"),
+            Some("direct")
+        )
+        .is_err());
+
+        let config =
+            parse_network_smoke_config(Some("1"), Some("http://127.0.0.1:8787"), Some("relay"))
+                .expect("loopback relay smoke should be accepted")
+                .expect("enabled smoke should return a configuration");
+        assert_eq!(config.relay_url, "http://127.0.0.1:8787");
+        assert_eq!(config.mode, "relay");
+    }
+
+    #[test]
     fn module_revision_migration_preserves_legacy_data_and_accepts_history() {
         tauri::async_runtime::block_on(async {
             let mut connection = SqliteConnection::connect("sqlite::memory:")
@@ -641,30 +759,35 @@ mod tests {
             .await
             .expect("legacy SQLite could contain externally modified data");
 
-            sqlx::raw_sql(include_str!("../migrations/0002_module_revision_history.sql"))
-                .execute(&mut connection)
-                .await
-                .expect("revision migration should apply");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0002_module_revision_history.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("revision migration should apply");
 
-            let row = sqlx::query("SELECT revision, source_text, module_json FROM modules WHERE id=?")
-                .bind("legacy-module")
-                .fetch_one(&mut connection)
-                .await
-                .expect("legacy module should survive migration");
+            let row =
+                sqlx::query("SELECT revision, source_text, module_json FROM modules WHERE id=?")
+                    .bind("legacy-module")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("legacy module should survive migration");
             assert_eq!(row.get::<i64, _>("revision"), 4);
             assert_eq!(row.get::<String, _>("source_text"), "legacy source");
             assert_eq!(row.get::<String, _>("module_json"), legacy_json);
 
-            let corrupt_row = sqlx::query(
-                "SELECT revision, source_text, module_json FROM modules WHERE id=?",
-            )
-            .bind("corrupt-module")
-            .fetch_one(&mut connection)
-            .await
-            .expect("migration should preserve malformed legacy rows instead of aborting");
+            let corrupt_row =
+                sqlx::query("SELECT revision, source_text, module_json FROM modules WHERE id=?")
+                    .bind("corrupt-module")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("migration should preserve malformed legacy rows instead of aborting");
             assert_eq!(corrupt_row.get::<i64, _>("revision"), 1);
             assert_eq!(corrupt_row.get::<String, _>("source_text"), "recover me");
-            assert_eq!(corrupt_row.get::<String, _>("module_json"), "not valid JSON");
+            assert_eq!(
+                corrupt_row.get::<String, _>("module_json"),
+                "not valid JSON"
+            );
 
             sqlx::query(
                 "INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -701,7 +824,10 @@ mod tests {
             .bind("2026-01-05T00:00:00.000Z")
             .execute(&mut connection)
             .await;
-            assert!(duplicate.is_err(), "composite key must reject an exact duplicate revision");
+            assert!(
+                duplicate.is_err(),
+                "composite key must reject an exact duplicate revision"
+            );
         });
     }
 }

@@ -247,9 +247,12 @@ describe("RoomTransport delivery paths", () => {
 
   it("can force the complete relay path without constructing WebRTC", async () => {
     const transport = createTransport({ forceRelay: true });
+    const paths: string[] = [];
+    transport.onPathChange = (peerId, path) => paths.push(`${peerId}:${path}`);
     const socket = await authenticateTransport(transport, [remotePlayer]);
 
     expect(FakeRTCPeerConnection.instances).toHaveLength(0);
+    expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:relay`);
     transport.broadcast(wireMessage);
     expect(sentEnvelopes(socket).filter(({ kind }) => kind === "relay")).toEqual([
       { kind: "relay", targetPeerId: remotePlayer.peerId, payload: wireMessage },

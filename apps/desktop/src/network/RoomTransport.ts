@@ -189,7 +189,7 @@ export class RoomTransport {
     if (existing) return existing;
 
     if (this.options.forceRelay) {
-      const relayLink: PeerLink = { pendingCandidates: [], path: "relay" };
+      const relayLink: PeerLink = { pendingCandidates: [], path: "connecting" };
       this.links.set(peerId, relayLink);
       this.setPath(peerId, "relay");
       return relayLink;
