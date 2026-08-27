@@ -28,6 +28,7 @@ from .models import (
     SourceDocumentV1,
     SourceRefV1,
 )
+from .source_refs import find_excerpt_matches, reference_matches_span
 from .text import TextChunk, infer_title, normalize_text, segment_text, stable_id
 
 
@@ -169,43 +170,155 @@ def _clean_refs(
     refs: list[SourceRefV1],
     *,
     chunks: dict[str, TextChunk],
-    source_length: int,
+    source_text: str,
     entity_id: str,
     issues: list[ParseIssueV1],
 ) -> list[SourceRefV1]:
     cleaned: list[SourceRefV1] = []
     for ref in refs:
         chunk = chunks.get(ref.chunk_id)
-        candidate = ref
-        is_already_global = (
-            chunk is not None and ref.start >= chunk.start and ref.end <= chunk.end
-        )
-        if (
-            chunk is not None
-            and not is_already_global
-            and chunk.start > 0
-            and ref.start >= 0
-            and ref.end <= len(chunk.text)
-        ):
-            candidate = ref.model_copy(
-                update={"start": ref.start + chunk.start, "end": ref.end + chunk.start}
-            )
-        if (
-            chunk is None
-            or candidate.start < 0
-            or candidate.end <= candidate.start
-            or candidate.end > source_length
-        ):
+        if chunk is None:
             issues.append(
                 ParseIssueV1(
                     severity=IssueSeverity.WARNING,
-                    code="INVALID_SOURCE_REFERENCE",
+                    code="SOURCE_REFERENCE_UNKNOWN_CHUNK",
                     stage="resolve_references",
-                    message=f"Removed an invalid source reference from {entity_id}.",
+                    message=(
+                        f"Removed source reference from {entity_id}: chunk "
+                        f"{ref.chunk_id!r} does not exist."
+                    ),
                     entity_id=entity_id,
+                    chunk_id=ref.chunk_id,
+                    source_ref=ref,
                 )
             )
             continue
+        if not ref.excerpt.strip():
+            issues.append(
+                ParseIssueV1(
+                    severity=IssueSeverity.WARNING,
+                    code="SOURCE_REFERENCE_MISSING_EXCERPT",
+                    stage="resolve_references",
+                    message=(
+                        f"Removed source reference {ref.start}:{ref.end} from {entity_id}: "
+                        "an excerpt is required to verify its offsets."
+                    ),
+                    entity_id=entity_id,
+                    chunk_id=ref.chunk_id,
+                    source_ref=ref,
+                )
+            )
+            continue
+
+        candidate: SourceRefV1 | None = None
+        reason = ""
+        # The extraction contract uses global offsets. Check that interpretation
+        # first, then tolerate a model returning offsets local to its chunk.
+        if (
+            ref.start >= chunk.start
+            and ref.end <= chunk.end
+            and reference_matches_span(source_text, ref.start, ref.end, ref.excerpt)
+        ):
+            candidate = ref
+        elif (
+            ref.end <= len(chunk.text)
+            and reference_matches_span(
+                source_text,
+                chunk.start + ref.start,
+                chunk.start + ref.end,
+                ref.excerpt,
+            )
+        ):
+            candidate = ref.model_copy(
+                update={"start": chunk.start + ref.start, "end": chunk.start + ref.end}
+            )
+            reason = "converted chunk-local offsets to cumulative document offsets"
+        else:
+            chunk_matches = find_excerpt_matches(
+                source_text,
+                ref.excerpt,
+                region_start=chunk.start,
+                region_end=chunk.end,
+            )
+            if len(chunk_matches) == 1:
+                start, end = chunk_matches[0]
+                candidate = ref.model_copy(update={"start": start, "end": end})
+                reason = "found one excerpt match in the declared chunk"
+            elif len(chunk_matches) > 1:
+                issues.append(
+                    ParseIssueV1(
+                        severity=IssueSeverity.WARNING,
+                        code="SOURCE_REFERENCE_AMBIGUOUS",
+                        stage="resolve_references",
+                        message=(
+                            f"Removed source reference {ref.start}:{ref.end} from {entity_id}: "
+                            f"the excerpt matched {len(chunk_matches)} places in "
+                            f"{ref.chunk_id}."
+                        ),
+                        entity_id=entity_id,
+                        chunk_id=ref.chunk_id,
+                        source_ref=ref,
+                    )
+                )
+                continue
+            else:
+                global_matches = find_excerpt_matches(source_text, ref.excerpt)
+                if len(global_matches) == 1:
+                    start, end = global_matches[0]
+                    candidate = ref.model_copy(update={"start": start, "end": end})
+                    reason = "found one excerpt match in the normalized document"
+                elif len(global_matches) > 1:
+                    issues.append(
+                        ParseIssueV1(
+                            severity=IssueSeverity.WARNING,
+                            code="SOURCE_REFERENCE_AMBIGUOUS",
+                            stage="resolve_references",
+                            message=(
+                                f"Removed source reference {ref.start}:{ref.end} from "
+                                f"{entity_id}: the excerpt matched {len(global_matches)} "
+                                "places in the normalized document."
+                            ),
+                            entity_id=entity_id,
+                            chunk_id=ref.chunk_id,
+                            source_ref=ref,
+                        )
+                    )
+                    continue
+                else:
+                    issues.append(
+                        ParseIssueV1(
+                            severity=IssueSeverity.WARNING,
+                            code="SOURCE_REFERENCE_NOT_FOUND",
+                            stage="resolve_references",
+                            message=(
+                                f"Removed source reference {ref.start}:{ref.end} from "
+                                f"{entity_id}: its excerpt was not found in the declared "
+                                "chunk or the normalized document."
+                            ),
+                            entity_id=entity_id,
+                            chunk_id=ref.chunk_id,
+                            source_ref=ref,
+                        )
+                    )
+                    continue
+
+        if candidate is None:
+            continue
+        if candidate.start != ref.start or candidate.end != ref.end:
+            issues.append(
+                ParseIssueV1(
+                    severity=IssueSeverity.INFO,
+                    code="SOURCE_REFERENCE_RELOCATED",
+                    stage="resolve_references",
+                    message=(
+                        f"Corrected source reference for {entity_id} from "
+                        f"{ref.start}:{ref.end} to {candidate.start}:{candidate.end}: {reason}."
+                    ),
+                    entity_id=entity_id,
+                    chunk_id=ref.chunk_id,
+                    source_ref=ref,
+                )
+            )
         cleaned.append(candidate)
     return _unique_refs(cleaned)
 
@@ -497,7 +610,7 @@ class ModuleParser:
             item.source_refs = _clean_refs(
                 item.source_refs,
                 chunks=chunk_map,
-                source_length=source_length,
+                source_text=state["normalized_text"],
                 entity_id=item.id,
                 issues=issues,
             )
@@ -545,7 +658,7 @@ class ModuleParser:
                 refs = _clean_refs(
                     relation.source_refs,
                     chunks=chunk_map,
-                    source_length=source_length,
+                    source_text=state["normalized_text"],
                     entity_id=source_id,
                     issues=issues,
                 )

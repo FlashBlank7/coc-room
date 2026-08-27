@@ -25,13 +25,15 @@ from .text import TextChunk, stable_id
 
 
 # Bump whenever the base extraction instructions change; this invalidates old cache entries.
-DEEPSEEK_EXTRACTION_PROMPT_VERSION = "deepseek-fragment-v2-player-safe-clues"
+DEEPSEEK_EXTRACTION_PROMPT_VERSION = "deepseek-fragment-v3-verified-source-refs"
 
 DEEPSEEK_EXTRACTION_INSTRUCTIONS = (
     "Extract only facts explicitly present in this Call of Cthulhu module chunk. "
     "Return JSON conforming exactly to the supplied schema. IDs must be short, stable, "
     "globally unique strings. Source offsets are character offsets in the full normalized "
-    "document: add SOURCE_START to chunk-local offsets. Use existing IDs or visible names "
+    "document: add SOURCE_START to chunk-local offsets. Every source reference must include "
+    "a verbatim excerpt from that exact range; omit a reference if you cannot quote it. "
+    "Use existing IDs or visible names "
     "for cross-references; unresolved references may be omitted. Do not create chapters; "
     "chapter grouping is a manual editor action. Keeper-only information belongs in "
     "keeper_notes. If a document title is present, copy it exactly and never append a "

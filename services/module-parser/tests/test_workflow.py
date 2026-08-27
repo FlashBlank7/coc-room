@@ -76,14 +76,18 @@ def test_reference_resolution_accepts_ids_or_visible_names() -> None:
                 id="raw-scene",
                 title="Station",
                 npc_ids=["Raw NPC", "missing"],
-                source_refs=[SourceRefV1(chunk_id="chunk-0001", start=0, end=2)],
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0001", start=0, end=2, excerpt="te")
+                ],
             )
         ],
         npcs=[
             NPCV1(
                 id="raw-npc",
                 name="Raw NPC",
-                source_refs=[SourceRefV1(chunk_id="chunk-0001", start=2, end=4)],
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0001", start=2, end=4, excerpt="st")
+                ],
             )
         ],
     )
@@ -187,7 +191,9 @@ def test_overlapping_chunks_merge_nested_source_references() -> None:
             SceneV1(
                 id="scene-one",
                 title="Repeated",
-                source_refs=[SourceRefV1(chunk_id="chunk-0001", start=0, end=4)],
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0001", start=0, end=4, excerpt="xxxx")
+                ],
             )
         ]
     )
@@ -196,7 +202,9 @@ def test_overlapping_chunks_merge_nested_source_references() -> None:
             SceneV1(
                 id="scene-two",
                 title="Repeated",
-                source_refs=[SourceRefV1(chunk_id="chunk-0002", start=100, end=104)],
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0002", start=100, end=104, excerpt="xxxx")
+                ],
             )
         ]
     )

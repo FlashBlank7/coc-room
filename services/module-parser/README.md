@@ -98,6 +98,17 @@ SHA-256, chunk SHA-256/range and splitting parameters, extractor/model identity,
 hash, and cache format version. Only already-validated fragments are stored. Credentials
 are not accepted by the cache API and cannot become part of either cache keys or values.
 
+Source-reference offsets use Python Unicode code points in the normalized document.
+For a development audit of an existing canonical package, run:
+
+```powershell
+uv run python scripts/audit_source_refs.py scenario.cocmod.json scenario.zip
+```
+
+Add `--fix` to relocate only globally unique excerpt matches and remove every reference
+that remains ambiguous or cannot be verified. The report contains paths and offsets but
+never copies source excerpts.
+
 ## Windows sidecar build
 
 ```powershell

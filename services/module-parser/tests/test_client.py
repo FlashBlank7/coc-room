@@ -52,7 +52,7 @@ def test_responses_api_uses_json_schema_and_parses_fragment() -> None:
     assert request_body["text"]["format"]["name"] == "module_fragment_v1"
     assert request_body["model"] == "deepseek-v4-flash"
     assert extractor.extraction_prompt_version == DEEPSEEK_EXTRACTION_PROMPT_VERSION
-    assert DEEPSEEK_EXTRACTION_PROMPT_VERSION == "deepseek-fragment-v2-player-safe-clues"
+    assert DEEPSEEK_EXTRACTION_PROMPT_VERSION == "deepseek-fragment-v3-verified-source-refs"
     assert (
         "handout_text only when the source explicitly contains exact player-safe wording"
         in request_body["instructions"]
