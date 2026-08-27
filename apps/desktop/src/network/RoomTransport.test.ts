@@ -265,6 +265,68 @@ describe("RoomTransport delivery paths", () => {
     transport.stop();
   });
 
+  it("fragments a large Unicode relay message into Worker-safe frames and reassembles it once", async () => {
+    const transport = createTransport();
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+    const delivered = vi.fn();
+    transport.onWireMessage = delivered;
+    const message = largeUnicodeWireMessage();
+
+    expect(transport.sendToPeer(remotePlayer.peerId, message)).toBe(true);
+    const fragmentEnvelopes = sentEnvelopes(socket).filter(
+      (envelope) =>
+        envelope.kind === "relay" &&
+        (envelope.payload as { kind?: unknown } | undefined)?.kind === "transport.fragment",
+    );
+    expect(fragmentEnvelopes.length).toBeGreaterThan(2);
+    for (const envelope of fragmentEnvelopes) {
+      expect(new TextEncoder().encode(JSON.stringify(envelope)).byteLength).toBeLessThanOrEqual(64 * 1024);
+      const forwarded = {
+        kind: "relay",
+        protocolVersion: 1,
+        fromPeerId: remotePlayer.peerId,
+        payload: envelope.payload,
+      };
+      expect(new TextEncoder().encode(JSON.stringify(forwarded)).byteLength).toBeLessThanOrEqual(64 * 1024);
+    }
+
+    const first = fragmentEnvelopes[0]!;
+    socket.receive({
+      kind: "relay",
+      protocolVersion: 1,
+      fromPeerId: remotePlayer.peerId,
+      payload: first.payload,
+    });
+    socket.receive({
+      kind: "relay",
+      protocolVersion: 1,
+      fromPeerId: remotePlayer.peerId,
+      payload: first.payload,
+    });
+    for (const envelope of fragmentEnvelopes.slice(1).reverse()) {
+      socket.receive({
+        kind: "relay",
+        protocolVersion: 1,
+        fromPeerId: remotePlayer.peerId,
+        payload: envelope.payload,
+      });
+    }
+    expect(delivered).toHaveBeenCalledTimes(1);
+    expect(delivered).toHaveBeenCalledWith(remotePlayer.peerId, message);
+
+    for (const envelope of fragmentEnvelopes) {
+      socket.receive({
+        kind: "relay",
+        protocolVersion: 1,
+        fromPeerId: remotePlayer.peerId,
+        payload: envelope.payload,
+      });
+    }
+    expect(delivered).toHaveBeenCalledTimes(1);
+    transport.stop();
+  });
+
   it("buffers an early ICE candidate and flushes it after the offer sets a remote description", async () => {
     const transport = createTransport();
     const socket = await authenticateTransport(transport);
@@ -348,4 +410,27 @@ function createTransport(overrides: Partial<ConstructorParameters<typeof RoomTra
     hostPeerId: "host-peer-1234",
     ...overrides,
   });
+}
+
+function largeUnicodeWireMessage() {
+  return {
+    kind: "event" as const,
+    event: {
+      protocolVersion: 1 as const,
+      roomId: "room_abcdefghijklmnop",
+      eventId: "00000000-0000-4000-8000-000000000301",
+      sequence: 1,
+      sender: { peerId: remotePlayer.peerId, displayName: "调查员", role: "player" as const },
+      type: "content.revealed" as const,
+      occurredAt: "2026-08-28T00:00:00.000Z",
+      payload: {
+        moduleId: "module-butterfly",
+        revision: 1,
+        contentId: "handout-butterfly",
+        contentType: "handout" as const,
+        title: "见世之蝶",
+        body: "见🦋".repeat(15_000),
+      },
+    },
+  };
 }

@@ -5,6 +5,12 @@ import { syncChunkSchema } from "../sync.js";
 
 const requestIdSchema = z.string().min(1).max(128).optional();
 const presenceStatusSchema = z.enum(["online", "away"]);
+export const MAX_RELAY_FRAME_BYTES = 64 * 1024;
+export const SAFE_RELAY_FRAME_BYTES = 60 * 1024;
+export const RELAY_FRAGMENT_BYTES = 32 * 1024;
+export const MAX_RELAY_MESSAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_RELAY_FRAGMENT_COUNT = MAX_RELAY_MESSAGE_BYTES / RELAY_FRAGMENT_BYTES;
+export const MAX_RELAY_FRAGMENT_BASE64_CHARS = 4 * Math.ceil(RELAY_FRAGMENT_BYTES / 3);
 export const relayRoomIdSchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/);
 export const relayPeerIdSchema = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 const relayDisplayNameSchema = z
@@ -76,6 +82,45 @@ export const peerMessageSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("sync.chunk"), chunk: syncChunkSchema }).strict(),
 ]);
 
+/**
+ * A transport-only fragment used when a peer message cannot fit safely in one
+ * Worker relay frame. RoomTransport consumes these before RoomSession sees them.
+ */
+export const relayFragmentSchema = z
+  .object({
+    kind: z.literal("transport.fragment"),
+    transferId: z.string().uuid(),
+    chunkIndex: z.number().int().nonnegative().max(MAX_RELAY_FRAGMENT_COUNT - 1),
+    chunkCount: z.number().int().positive().max(MAX_RELAY_FRAGMENT_COUNT),
+    messageBytes: z.number().int().positive().max(MAX_RELAY_MESSAGE_BYTES),
+    payloadEncoding: z.literal("base64-json-utf8"),
+    checksum: z.string().regex(/^[0-9a-f]{8}$/),
+    data: z
+      .string()
+      .min(4)
+      .max(MAX_RELAY_FRAGMENT_BASE64_CHARS)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  })
+  .strict()
+  .superRefine((fragment, context) => {
+    if (fragment.chunkIndex >= fragment.chunkCount) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["chunkIndex"],
+        message: "chunkIndex must be less than chunkCount",
+      });
+    }
+    if (fragment.chunkCount !== Math.ceil(fragment.messageBytes / RELAY_FRAGMENT_BYTES)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["chunkCount"],
+        message: "chunkCount does not match messageBytes",
+      });
+    }
+  });
+
+export const relayPayloadSchema = z.union([peerMessageSchema, relayFragmentSchema]);
+
 export const relayClientEnvelopeSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -108,7 +153,7 @@ export const relayClientEnvelopeSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("relay"),
       targetPeerId: relayPeerIdSchema,
-      payload: peerMessageSchema,
+      payload: relayPayloadSchema,
       requestId: requestIdSchema,
     })
     .strict(),
@@ -173,7 +218,7 @@ export const relayServerEnvelopeSchema = z.union([
       kind: z.literal("relay"),
       protocolVersion: z.literal(1),
       fromPeerId: relayPeerIdSchema,
-      payload: peerMessageSchema,
+      payload: relayPayloadSchema,
       requestId: requestIdSchema,
     })
     .strict(),
@@ -193,5 +238,7 @@ export type RelayCreateRoomRequestV1 = z.infer<typeof relayCreateRoomRequestSche
 export type RelayCreateRoomResponseV1 = z.infer<typeof relayCreateRoomResponseSchema>;
 export type WebRtcSignalV1 = z.infer<typeof webRtcSignalSchema>;
 export type PeerMessageV1 = z.infer<typeof peerMessageSchema>;
+export type RelayFragmentV1 = z.infer<typeof relayFragmentSchema>;
+export type RelayPayloadV1 = z.infer<typeof relayPayloadSchema>;
 export type RelayClientEnvelopeV1 = z.infer<typeof relayClientEnvelopeSchema>;
 export type RelayServerEnvelopeV1 = z.infer<typeof relayServerEnvelopeSchema>;

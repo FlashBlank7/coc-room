@@ -213,6 +213,36 @@ describe("relay Worker", () => {
     });
   });
 
+  it("forwards transport fragments with room for the server relay envelope", async () => {
+    const room = await createRoom();
+    const host = await join(room.websocketUrl, room.hostToken, room.hostPeerId, "host");
+    const player = await join(room.websocketUrl, room.joinToken, "player-fragment", "player");
+    const payload = {
+      kind: "transport.fragment",
+      transferId: "00000000-0000-4000-8000-000000000001",
+      chunkIndex: 0,
+      chunkCount: 1,
+      messageBytes: 32 * 1024,
+      payloadEncoding: "base64-json-utf8",
+      checksum: "01234567",
+      data: `${"A".repeat(4 * Math.ceil((32 * 1024) / 3) - 1)}=`,
+    };
+    const frame = JSON.stringify({
+      kind: "relay",
+      targetPeerId: "player-fragment",
+      payload,
+    });
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThan(MAX_FRAME_BYTES);
+
+    const relayed = nextMessage(player);
+    host.send(frame);
+    expect(await relayed).toMatchObject({
+      kind: "relay",
+      fromPeerId: room.hostPeerId,
+      payload,
+    });
+  });
+
   it("rejects bad tokens, a mismatched host identity, and an eighth player", async () => {
     const room = await createRoom();
     const host = await join(

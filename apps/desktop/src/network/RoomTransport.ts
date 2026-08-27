@@ -1,4 +1,8 @@
 import {
+  MAX_RELAY_FRAME_BYTES,
+  SAFE_RELAY_FRAME_BYTES,
+  RelayFragmentReassembler,
+  createRelayFragments,
   peerMessageSchema,
   relayClientEnvelopeSchema,
   relayServerEnvelopeSchema,
@@ -34,6 +38,7 @@ export interface RoomTransportOptions {
 export class RoomTransport {
   private socket?: WebSocket;
   private readonly links = new Map<string, PeerLink>();
+  private readonly relayReassembler = new RelayFragmentReassembler();
   private readonly iceTimeoutMs: number;
   private stopped = false;
   private readonly participants = new Map<string, ParticipantV1>();
@@ -71,6 +76,7 @@ export class RoomTransport {
       link.connection.close();
     }
     this.links.clear();
+    this.relayReassembler.clear();
   }
 
   sendToHost(message: RoomWireMessage): boolean {
@@ -89,7 +95,7 @@ export class RoomTransport {
         this.setPath(peerId, "relay");
       }
     }
-    const sent = this.sendSocket({ kind: "relay", targetPeerId: peerId, payload: message });
+    const sent = this.sendRelay(peerId, message);
     this.setPath(peerId, sent ? "relay" : "offline");
     return sent;
   }
@@ -129,7 +135,20 @@ export class RoomTransport {
         void this.handleSignal(message.fromPeerId, message.data);
         break;
       case "relay":
-        this.onWireMessage?.(message.fromPeerId, message.payload);
+        if (message.payload.kind === "transport.fragment") {
+          try {
+            const assembled = this.relayReassembler.add(message.fromPeerId, message.payload);
+            if (assembled !== undefined) this.onWireMessage?.(message.fromPeerId, assembled);
+          } catch (error) {
+            this.onError?.(
+              `Unable to reassemble relayed message from ${message.fromPeerId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        } else {
+          this.onWireMessage?.(message.fromPeerId, message.payload);
+        }
         break;
       case "error":
         this.onError?.(message.message);
@@ -249,11 +268,43 @@ export class RoomTransport {
     for (const candidate of pending) await link.connection.addIceCandidate(candidate);
   }
 
+  private sendRelay(peerId: string, message: RoomWireMessage): boolean {
+    const unfragmented = relayClientEnvelopeSchema.parse({
+      kind: "relay",
+      targetPeerId: peerId,
+      payload: message,
+    });
+    if (frameByteLength(JSON.stringify(unfragmented)) <= SAFE_RELAY_FRAME_BYTES) {
+      return this.sendSocket(unfragmented);
+    }
+
+    let fragments;
+    try {
+      fragments = createRelayFragments(message, crypto.randomUUID());
+    } catch (error) {
+      this.onError?.(
+        `Unable to split relayed message: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+    for (const fragment of fragments) {
+      if (!this.sendSocket({ kind: "relay", targetPeerId: peerId, payload: fragment })) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private sendSocket(message: unknown): boolean {
     const envelope = relayClientEnvelopeSchema.parse(message);
+    const serialized = JSON.stringify(envelope);
+    if (frameByteLength(serialized) > MAX_RELAY_FRAME_BYTES) {
+      this.onError?.("WebSocket relay frame exceeds the 64 KiB limit");
+      return false;
+    }
     if (this.socket?.readyState === WebSocket.OPEN) {
       try {
-        this.socket.send(JSON.stringify(envelope));
+        this.socket.send(serialized);
         return true;
       } catch {
         return false;
@@ -376,4 +427,8 @@ export class RoomTransport {
     if (link) link.path = path;
     this.onPathChange?.(peerId, path);
   }
+}
+
+function frameByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
