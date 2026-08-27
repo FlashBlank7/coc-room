@@ -132,7 +132,7 @@ jobs:
       - run: pnpm --filter @coc-room/protocol build
       - name: Build Tauri NSIS installer
         run: pnpm --filter @coc-room/desktop tauri build --target x86_64-pc-windows-msvc
-      - name: Real WebView2 direct and forced-relay smoke
+      - name: Real WebView2 direct, forced-relay, storage, export, and sidecar smoke
         shell: pwsh
         run: |
           $pnpm = (Get-Command pnpm).Source
@@ -166,24 +166,63 @@ jobs:
               Select-Object -First 1
             if (-not $app) { throw "Built desktop executable was not found" }
 
-            foreach ($mode in @("direct", "relay")) {
+            foreach ($mode in @("direct", "relay", "storage")) {
               $resultPath = Join-Path $env:RUNNER_TEMP "network-$mode.json"
               $env:COC_ROOM_NETWORK_SMOKE = "1"
               $env:COC_ROOM_NETWORK_SMOKE_URL = "http://127.0.0.1:8787"
               $env:COC_ROOM_NETWORK_SMOKE_MODE = $mode
               $env:COC_ROOM_NETWORK_SMOKE_RESULT = $resultPath
+              $storageExportDir = $null
+              if ($mode -eq "storage") {
+                $storageExportDir = Join-Path $env:RUNNER_TEMP "storage-smoke-$([guid]::NewGuid().ToString('N'))"
+                New-Item -ItemType Directory -Path $storageExportDir | Out-Null
+                $env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR = $storageExportDir
+              } else {
+                Remove-Item Env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR -ErrorAction SilentlyContinue
+              }
               $process = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
               try {
-                foreach ($attempt in 1..60) {
+                $attemptLimit = if ($mode -eq "storage") { 240 } else { 60 }
+                foreach ($attempt in 1..$attemptLimit) {
                   if (Test-Path -LiteralPath $resultPath) { break }
                   if ($process.HasExited) { throw "Desktop $mode smoke exited before reporting" }
                   Start-Sleep -Milliseconds 500
                 }
                 if (-not (Test-Path -LiteralPath $resultPath)) {
-                  throw "Desktop $mode smoke did not report within 30 seconds"
+                  throw "Desktop $mode smoke did not report within $($attemptLimit / 2) seconds"
                 }
                 $report = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
                 if (-not $report.ok) { throw "Desktop $mode smoke failed: $($report.message)" }
+                if ($mode -eq "storage") {
+                  if (-not $report.details.cleanupVerified) { throw "Storage smoke did not verify room cleanup" }
+                  if ($report.details.persistedEvents -ne 1 -or $report.details.lastSeq -ne 1) {
+                    throw "Storage smoke persistence counters are invalid"
+                  }
+                  if (-not $report.details.duplicateWasIdempotent) {
+                    throw "Storage smoke did not verify duplicate-event idempotency"
+                  }
+                  if ($report.details.sidecarProvider -ne "mock" -or $report.details.sidecarTitle -ne "存储冒烟模组 🦋") {
+                    throw "Storage smoke did not verify the packaged mock sidecar"
+                  }
+                  if ($report.details.markdownFile -ne "transcript.md" -or $report.details.htmlFile -ne "transcript.html") {
+                    throw "Storage smoke returned unexpected export file names"
+                  }
+                  $markdownPath = Join-Path $storageExportDir "transcript.md"
+                  $htmlPath = Join-Path $storageExportDir "transcript.html"
+                  if (-not (Test-Path -LiteralPath $markdownPath -PathType Leaf)) { throw "Markdown export was not created" }
+                  if (-not (Test-Path -LiteralPath $htmlPath -PathType Leaf)) { throw "HTML export was not created" }
+                  $markdownBytes = [IO.File]::ReadAllBytes($markdownPath)
+                  $htmlBytes = [IO.File]::ReadAllBytes($htmlPath)
+                  if ($markdownBytes.Length -ne $report.details.markdownBytes) { throw "Markdown export size differs from report" }
+                  if ($htmlBytes.Length -ne $report.details.htmlBytes) { throw "HTML export size differs from report" }
+                  $markdown = [Text.Encoding]::UTF8.GetString($markdownBytes)
+                  $html = [Text.Encoding]::UTF8.GetString($htmlBytes)
+                  if (-not $markdown.Contains([string]$report.details.marker)) { throw "Markdown export lost the stored event" }
+                  if (-not $html.Contains([string]$report.details.marker)) { throw "HTML export lost the stored event" }
+                  if (-not $html.StartsWith("<!doctype html>") -or $html -match "(?i)<script\b") {
+                    throw "HTML export is not a script-free self-contained document"
+                  }
+                }
               } finally {
                 if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
               }
@@ -193,6 +232,7 @@ jobs:
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_URL -ErrorAction SilentlyContinue
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_MODE -ErrorAction SilentlyContinue
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RESULT -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR -ErrorAction SilentlyContinue
             if (-not $relay.HasExited) { Stop-Process -Id $relay.Id -Force }
           }
       - name: Install and launch NSIS smoke test

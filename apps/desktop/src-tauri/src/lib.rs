@@ -29,12 +29,25 @@ const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_SMOKE_REPORT_BYTES: usize = 64 * 1024;
+const MAX_STORAGE_SMOKE_EXPORT_BYTES: usize = 2 * 1024 * 1024;
+const STORAGE_SMOKE_MARKDOWN_FILE: &str = "transcript.md";
+const STORAGE_SMOKE_HTML_FILE: &str = "transcript.html";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NetworkSmokeConfig {
-    relay_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_url: Option<String>,
     mode: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageSmokeExportResult {
+    markdown_file: &'static str,
+    html_file: &'static str,
+    markdown_bytes: usize,
+    html_bytes: usize,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -186,21 +199,28 @@ fn parse_network_smoke_config(
     if enabled != Some("1") {
         return Ok(None);
     }
-    let relay_url = relay_url
-        .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_URL is required".to_string())?
-        .to_string();
-    if !(relay_url.starts_with("http://127.0.0.1:")
-        || relay_url.starts_with("http://localhost:")
-        || relay_url.starts_with("https://"))
-    {
-        return Err("network smoke relay URL must use HTTPS or a loopback HTTP origin".to_string());
-    }
     let mode = mode
         .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_MODE is required".to_string())?
         .to_string();
-    if !matches!(mode.as_str(), "direct" | "relay") {
-        return Err("network smoke mode must be direct or relay".to_string());
+    if !matches!(mode.as_str(), "direct" | "relay" | "storage") {
+        return Err("network smoke mode must be direct, relay, or storage".to_string());
     }
+    let relay_url = if mode == "storage" {
+        None
+    } else {
+        let relay_url = relay_url
+            .ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_URL is required".to_string())?
+            .to_string();
+        if !(relay_url.starts_with("http://127.0.0.1:")
+            || relay_url.starts_with("http://localhost:")
+            || relay_url.starts_with("https://"))
+        {
+            return Err(
+                "network smoke relay URL must use HTTPS or a loopback HTTP origin".to_string(),
+            );
+        }
+        Some(relay_url)
+    };
     Ok(Some(NetworkSmokeConfig { relay_url, mode }))
 }
 
@@ -209,7 +229,9 @@ fn finish_network_smoke(app: tauri::AppHandle, report: NetworkSmokeReport) -> Re
     if std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref() != Some("1") {
         return Err("network smoke mode is not enabled".to_string());
     }
-    if !matches!(report.mode.as_str(), "direct" | "relay") || report.message.len() > 4_000 {
+    if !matches!(report.mode.as_str(), "direct" | "relay" | "storage")
+        || report.message.len() > 4_000
+    {
         return Err("network smoke report is invalid".to_string());
     }
     let target = PathBuf::from(
@@ -244,6 +266,82 @@ fn finish_network_smoke(app: tauri::AppHandle, report: NetworkSmokeReport) -> Re
         .map_err(|error| format!("cannot persist network smoke result: {error}"))?;
     app.exit(if report.ok { 0 } else { 1 });
     Ok(())
+}
+
+#[tauri::command]
+fn write_storage_smoke_exports(
+    markdown: String,
+    html: String,
+) -> Result<StorageSmokeExportResult, String> {
+    let configured_directory =
+        std::env::var_os("COC_ROOM_NETWORK_SMOKE_EXPORT_DIR").map(PathBuf::from);
+    let directory = validate_storage_smoke_export_directory(
+        std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_MODE").ok().as_deref(),
+        configured_directory.as_deref(),
+    )?;
+    persist_storage_smoke_exports(&directory, &markdown, &html)
+}
+
+fn validate_storage_smoke_export_directory(
+    enabled: Option<&str>,
+    mode: Option<&str>,
+    directory: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if enabled != Some("1") || mode != Some("storage") {
+        return Err("storage smoke export is not enabled".to_string());
+    }
+    let directory =
+        directory.ok_or_else(|| "COC_ROOM_NETWORK_SMOKE_EXPORT_DIR is required".to_string())?;
+    if !directory.is_absolute() {
+        return Err("storage smoke export directory must be absolute".to_string());
+    }
+    let canonical = directory
+        .canonicalize()
+        .map_err(|_| "storage smoke export directory does not exist".to_string())?;
+    if !canonical.is_dir() {
+        return Err("storage smoke export target must be a directory".to_string());
+    }
+    Ok(canonical)
+}
+
+fn persist_storage_smoke_exports(
+    directory: &Path,
+    markdown: &str,
+    html: &str,
+) -> Result<StorageSmokeExportResult, String> {
+    let markdown_bytes =
+        write_new_storage_smoke_file(directory, STORAGE_SMOKE_MARKDOWN_FILE, markdown.as_bytes())?;
+    let html_bytes =
+        write_new_storage_smoke_file(directory, STORAGE_SMOKE_HTML_FILE, html.as_bytes())?;
+    Ok(StorageSmokeExportResult {
+        markdown_file: STORAGE_SMOKE_MARKDOWN_FILE,
+        html_file: STORAGE_SMOKE_HTML_FILE,
+        markdown_bytes,
+        html_bytes,
+    })
+}
+
+fn write_new_storage_smoke_file(
+    directory: &Path,
+    file_name: &'static str,
+    content: &[u8],
+) -> Result<usize, String> {
+    if content.is_empty() || content.len() > MAX_STORAGE_SMOKE_EXPORT_BYTES {
+        return Err(format!(
+            "storage smoke {file_name} is empty or exceeds the size limit"
+        ));
+    }
+    let target = directory.join(file_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|error| format!("cannot create storage smoke {file_name}: {error}"))?;
+    file.write_all(content)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("cannot persist storage smoke {file_name}: {error}"))?;
+    Ok(content.len())
 }
 
 #[tauri::command]
@@ -585,6 +683,7 @@ pub fn run() {
             delete_deepseek_key,
             network_smoke_config,
             finish_network_smoke,
+            write_storage_smoke_exports,
             select_module_source,
             run_module_parser
         ])
@@ -607,6 +706,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use sqlx::{Connection, Row, SqliteConnection};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parser_execution_gate_allows_only_one_permit() {
@@ -691,8 +791,135 @@ mod tests {
             parse_network_smoke_config(Some("1"), Some("http://127.0.0.1:8787"), Some("relay"))
                 .expect("loopback relay smoke should be accepted")
                 .expect("enabled smoke should return a configuration");
-        assert_eq!(config.relay_url, "http://127.0.0.1:8787");
+        assert_eq!(config.relay_url.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(config.mode, "relay");
+
+        let storage = parse_network_smoke_config(Some("1"), None, Some("storage"))
+            .expect("storage smoke should not require a relay URL")
+            .expect("storage smoke should return a configuration");
+        assert!(storage.relay_url.is_none());
+        assert_eq!(storage.mode, "storage");
+    }
+
+    #[test]
+    fn storage_smoke_exports_require_explicit_mode_and_never_overwrite() {
+        assert!(validate_storage_smoke_export_directory(None, None, None).is_err());
+        assert!(validate_storage_smoke_export_directory(
+            Some("1"),
+            Some("storage"),
+            Some(Path::new("relative-directory")),
+        )
+        .is_err());
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "coc-room-storage-smoke-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("unique smoke directory should be created");
+        let canonical =
+            validate_storage_smoke_export_directory(Some("1"), Some("storage"), Some(&directory))
+                .expect("explicit absolute smoke directory should be accepted");
+
+        let result = persist_storage_smoke_exports(&canonical, "# transcript\n", "<!doctype html>")
+            .expect("first export should create both files");
+        assert_eq!(result.markdown_bytes, 13);
+        assert_eq!(result.html_bytes, 15);
+        assert_eq!(
+            std::fs::read_to_string(canonical.join(STORAGE_SMOKE_MARKDOWN_FILE))
+                .expect("markdown should be readable"),
+            "# transcript\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(canonical.join(STORAGE_SMOKE_HTML_FILE))
+                .expect("HTML should be readable"),
+            "<!doctype html>"
+        );
+        assert!(persist_storage_smoke_exports(&canonical, "replacement", "replacement").is_err());
+        assert!(write_new_storage_smoke_file(
+            &canonical,
+            "oversized.txt",
+            &vec![b'x'; MAX_STORAGE_SMOKE_EXPORT_BYTES + 1],
+        )
+        .is_err());
+
+        std::fs::remove_file(canonical.join(STORAGE_SMOKE_MARKDOWN_FILE))
+            .expect("test markdown should be removed");
+        std::fs::remove_file(canonical.join(STORAGE_SMOKE_HTML_FILE))
+            .expect("test HTML should be removed");
+        std::fs::remove_dir(&canonical).expect("empty test directory should be removed");
+    }
+
+    #[test]
+    fn deleting_a_sqlite_room_cascades_its_events() {
+        tauri::async_runtime::block_on(async {
+            let mut connection = SqliteConnection::connect("sqlite::memory:")
+                .await
+                .expect("in-memory SQLite should open");
+            sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("initial schema should apply");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0002_module_revision_history.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("current schema should apply");
+            sqlx::query(
+                "INSERT INTO rooms (id, name, local_role, local_peer_id, host_peer_id, invite_token, join_token, relay_url, last_seq, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("storage-smoke-room")
+            .bind("Storage smoke")
+            .bind("host")
+            .bind("storage-smoke-host")
+            .bind("storage-smoke-host")
+            .bind("throwaway-token")
+            .bind(Option::<String>::None)
+            .bind("wss://storage-smoke.invalid")
+            .bind(1_i64)
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("smoke room should insert");
+            sqlx::query(
+                "INSERT INTO room_events (room_id, event_id, seq, event_type, sender_id, created_at, event_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("storage-smoke-room")
+            .bind("throwaway-event")
+            .bind(1_i64)
+            .bind("chat.message")
+            .bind("storage-smoke-host")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("{}")
+            .execute(&mut connection)
+            .await
+            .expect("smoke event should insert");
+
+            sqlx::query("DELETE FROM rooms WHERE id=?")
+                .bind("storage-smoke-room")
+                .execute(&mut connection)
+                .await
+                .expect("room deletion should succeed");
+
+            let room_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rooms WHERE id=?")
+                .bind("storage-smoke-room")
+                .fetch_one(&mut connection)
+                .await
+                .expect("room count should be readable");
+            let event_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM room_events WHERE room_id=?")
+                    .bind("storage-smoke-room")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("event count should be readable");
+            assert_eq!(room_count, 0);
+            assert_eq!(event_count, 0);
+        });
     }
 
     #[test]

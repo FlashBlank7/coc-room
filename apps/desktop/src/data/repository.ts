@@ -34,6 +34,7 @@ export interface ModuleListOptions {
 export interface LocalRepository {
   saveRoom(room: RoomRecord): Promise<void>;
   listRooms(): Promise<RoomRecord[]>;
+  deleteRoom(roomId: string): Promise<void>;
   saveEvent(event: RoomEventV1): Promise<boolean>;
   listEvents(roomId: string, afterSequence?: number): Promise<RoomEventV1[]>;
   saveModule(value: StoredModule): Promise<void>;
@@ -92,6 +93,10 @@ class SqliteRepository implements LocalRepository {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }));
+  }
+
+  async deleteRoom(roomId: string): Promise<void> {
+    await this.db.execute("DELETE FROM rooms WHERE id=?", [roomId]);
   }
 
   async saveEvent(candidate: RoomEventV1): Promise<boolean> {
@@ -238,6 +243,10 @@ export class MemoryRepository implements LocalRepository {
   }
   async listRooms(): Promise<RoomRecord[]> {
     return [...this.rooms.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+  async deleteRoom(roomId: string): Promise<void> {
+    this.rooms.delete(roomId);
+    this.events.delete(roomId);
   }
   async saveEvent(candidate: RoomEventV1): Promise<boolean> {
     const event = roomEventSchema.parse(candidate);

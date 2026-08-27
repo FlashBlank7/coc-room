@@ -68,6 +68,31 @@ describe("MemoryRepository", () => {
     ]);
   });
 
+  it("deletes a room and all of its local events without touching other rooms", async () => {
+    const repository = new MemoryRepository();
+    const deletedRoom = roomRecord("room-delete-test");
+    const retainedRoom = roomRecord("room-retain-test");
+    const deletedEvent = {
+      protocolVersion: 1 as const,
+      roomId: deletedRoom.id,
+      eventId: "4ca2bc32-9644-498d-acbb-9b9f8e4d5ac2",
+      sequence: 1,
+      sender: { peerId: "peer-12345678", displayName: "Storage smoke", role: "player" as const },
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "chat.message" as const,
+      payload: { message: "throwaway", format: "plain" as const },
+    };
+    await repository.saveRoom(deletedRoom);
+    await repository.saveRoom(retainedRoom);
+    await repository.saveEvent(deletedEvent);
+
+    await repository.deleteRoom(deletedRoom.id);
+
+    expect((await repository.listRooms()).map((room) => room.id)).toEqual([retainedRoom.id]);
+    expect(await repository.listEvents(deletedRoom.id)).toEqual([]);
+    await expect(repository.saveEvent(deletedEvent)).rejects.toThrow(/saved before its events/);
+  });
+
   it("enforces the same strictly increasing module revisions used by SQLite", async () => {
     const repository = new MemoryRepository();
     const revisionOne = modulePackage("module-revision-test", 1, "2026-01-01T00:00:00.000Z");
