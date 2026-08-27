@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ModulePackageV1 } from "@coc-room/protocol";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -11,7 +12,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
-import { parseModule, type ParserProgress } from "./module-parser";
+import {
+  getModuleParserProvenance,
+  parseModule,
+  PARSER_PROVENANCE_NAMESPACE,
+  type ParserProgress,
+  type ParserResult,
+} from "./module-parser";
 
 describe("module parser progress events", () => {
   beforeEach(() => {
@@ -49,4 +56,105 @@ describe("module parser progress events", () => {
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: "extract", progress: 0.5 }));
     expect(mocks.unlisten).toHaveBeenCalledOnce();
   });
+
+  it("records DeepSeek provenance while stripping source references from persisted issues", async () => {
+    const sourceBody = "这段独特的原文正文不能进入解析来源元数据";
+    mocks.invoke.mockResolvedValue([{
+      type: "result",
+      module: createModulePackage(),
+      parseStatus: "needs_review",
+      issues: [{
+        severity: "warning",
+        code: "UNRESOLVED_REFERENCE",
+        stage: "resolve",
+        message: "有一条引用需要人工修正",
+        entity_id: "npc:missing",
+        retryable: false,
+        source_ref: { source_id: "source:1", start: 0, end: sourceBody.length, excerpt: sourceBody },
+      }],
+      usage: { inputTokens: 120, outputTokens: 45, calls: 2 },
+    }]);
+
+    const messages = await parseModule({
+      sourceText: sourceBody,
+      sourceName: "见世之蝶.md",
+      model: "deepseek-v4-flash",
+    });
+    const result = messages[0] as ParserResult;
+    const provenance = getModuleParserProvenance(result.module);
+
+    expect(provenance).toMatchObject({
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      sourceName: "见世之蝶.md",
+      status: "needs_review",
+      usage: { inputTokens: 120, outputTokens: 45, calls: 2 },
+    });
+    expect(Number.isNaN(Date.parse(provenance?.parsedAt ?? ""))).toBe(false);
+    expect(provenance?.issues).toEqual([{
+      severity: "warning",
+      code: "UNRESOLVED_REFERENCE",
+      stage: "resolve",
+      message: "有一条引用需要人工修正",
+      entityId: "npc:missing",
+      retryable: false,
+    }]);
+    expect(JSON.stringify(provenance)).not.toContain(sourceBody);
+    expect(result.module.extensions["org.example.existing"]).toEqual({ kept: true });
+    expect(result.module.extensions[PARSER_PROVENANCE_NAMESPACE]).toBeDefined();
+  });
+
+  it("labels browser simulation as mock provenance with zero API calls", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: undefined });
+    const sourceBody = "模拟解析的原文正文";
+
+    const messages = await parseModule({
+      sourceText: sourceBody,
+      sourceName: "preview.md",
+      model: "deepseek-v4-flash",
+      mock: true,
+    });
+    const result = messages[0] as ParserResult;
+    const provenance = getModuleParserProvenance(result.module);
+
+    expect(provenance).toMatchObject({
+      provider: "mock",
+      model: "builtin-mock",
+      sourceName: "preview.md",
+      status: "ready_for_review",
+      issues: [],
+      usage: { calls: 0 },
+    });
+    expect(JSON.stringify(provenance)).not.toContain(sourceBody);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
 });
+
+function createModulePackage(): ModulePackageV1 {
+  const timestamp = "2026-08-27T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    moduleId: "module_parser_provenance_01",
+    revision: 1,
+    metadata: {
+      title: "解析来源测试模组",
+      authors: [],
+      language: "zh-CN",
+      summary: "",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    overview: "",
+    sourceDocuments: [],
+    chapters: [],
+    scenes: [],
+    locations: [],
+    npcs: [],
+    clues: [],
+    handouts: [],
+    suggestedChecks: [],
+    keeperNotes: [],
+    relations: [],
+    extensions: { "org.example.existing": { kept: true } },
+  };
+}

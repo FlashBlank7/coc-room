@@ -10,11 +10,13 @@ import {
   MapPin,
   Search,
   ShieldAlert,
+  Sparkles,
   UserRound,
   Waypoints,
 } from "lucide-react";
 
 import { cn } from "../../lib/cn";
+import { getModuleParserProvenance } from "../../lib/module-parser";
 
 type Category =
   | "overview"
@@ -248,6 +250,7 @@ function OverviewCards({
   modulePackage: ModulePackageV1;
   entityNames: ReadonlyMap<string, string>;
 }) {
+  const parserProvenance = getModuleParserProvenance(modulePackage);
   const stats = [
     ["场景", modulePackage.scenes.length],
     ["地点", modulePackage.locations.length],
@@ -290,6 +293,23 @@ function OverviewCards({
           <MetadataRow label="建立时间" value={formatDate(modulePackage.metadata.createdAt)} />
           <MetadataRow label="更新时间" value={formatDate(modulePackage.metadata.updatedAt)} />
         </dl>
+      </article>
+
+      <article aria-label="解析来源" className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
+        <SectionHeading icon={<Sparkles className="h-4 w-4" />} title="解析来源" />
+        {!parserProvenance ? (
+          <p className="mt-3 text-sm text-zinc-500">来源未记录</p>
+        ) : (
+          <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+            <MetadataRow label="解析服务" value={formatParserProvider(parserProvenance.provider)} />
+            <MetadataRow label="模型" value={parserProvenance.model} code />
+            <MetadataRow label="解析时间" value={formatDate(parserProvenance.parsedAt)} />
+            <MetadataRow label="状态" value={formatParserStatus(parserProvenance.status)} />
+            <MetadataRow label="调用次数" value={parserProvenance.usage.calls?.toString() ?? "未记录"} />
+            <MetadataRow label="原始来源" value={parserProvenance.sourceName} />
+            <MetadataRow label="解析问题" value={`${parserProvenance.issues.length} 条`} />
+          </dl>
+        )}
       </article>
 
       {modulePackage.chapters.length > 0 && (
@@ -756,6 +776,18 @@ function searchableText(value: unknown): string {
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatParserProvider(value: string): string {
+  if (value === "deepseek") return "DeepSeek API";
+  if (value === "mock") return "内置模拟解析";
+  return value;
+}
+
+function formatParserStatus(value: string): string {
+  if (value === "ready_for_review") return "可供人工复核";
+  if (value === "needs_review") return "需要人工修正";
+  return value;
 }
 
 function buildEntityNames(modulePackage: ModulePackageV1): Map<string, string> {

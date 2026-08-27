@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
 
@@ -62,6 +62,36 @@ describe("ModuleEntityBrowser", () => {
     fireEvent.click(screen.getByRole("tab", { name: /文字手记/ }));
     expect(screen.getByRole("heading", { name: "染血的俳句" })).toBeTruthy();
     expect(screen.getByText("蝶自血泊中醒来。")).toBeTruthy();
+  });
+
+  it("shows DeepSeek provenance in the overview", () => {
+    const modulePackage = createModulePackage();
+    modulePackage.extensions["org.coc-room.parser"] = {
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      parsedAt: "2026-08-28T03:04:05.000Z",
+      sourceName: "观止-见世之蝶.docx",
+      status: "needs_review",
+      issues: [{ code: "UNRESOLVED_REFERENCE", message: "一条引用需要修正" }],
+      usage: { calls: 3, inputTokens: 2_000, outputTokens: 800 },
+    };
+
+    render(<ModuleEntityBrowser modulePackage={modulePackage} />);
+    const provenance = screen.getByLabelText("解析来源");
+
+    expect(within(provenance).getByText("DeepSeek API")).toBeTruthy();
+    expect(within(provenance).getByText("deepseek-v4-flash")).toBeTruthy();
+    expect(within(provenance).getByText("需要人工修正")).toBeTruthy();
+    expect(within(provenance).getByText("观止-见世之蝶.docx")).toBeTruthy();
+    expect(within(provenance).getByText("3")).toBeTruthy();
+    expect(within(provenance).getByText("1 条")).toBeTruthy();
+    expect(within(provenance).getByText(/2026/)).toBeTruthy();
+  });
+
+  it("explains that provenance is unavailable for an older imported package", () => {
+    render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
+
+    expect(within(screen.getByLabelText("解析来源")).getByText("来源未记录")).toBeTruthy();
   });
 });
 
