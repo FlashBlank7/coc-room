@@ -61,7 +61,13 @@ pnpm --filter @coc-room/relay deploy
 
 如默认名称已被占用，先修改 `apps/relay/wrangler.jsonc` 中的 `name`。保留 `v1` Durable Object migration；已经部署后若要改类名，应新增 rename migration，不要改写历史 tag。
 
-将 Wrangler 输出的 HTTPS origin 配成前端初始值：
+部署完成后，先用实际 HTTPS origin 验收建房、认证、分片和中继：
+
+```powershell
+pnpm --filter @coc-room/relay smoke -- https://your-worker.your-subdomain.workers.dev
+```
+
+将同一个 HTTPS origin 配成前端初始值：
 
 ```powershell
 $env:VITE_RELAY_URL = "https://your-worker.your-subdomain.workers.dev"
@@ -69,6 +75,8 @@ pnpm dev:tauri
 ```
 
 `VITE_RELAY_URL` 必须是可接受 `POST /v1/rooms` 的 HTTP(S) 源地址，不是某个房间的 `/v1/rooms/<id>/ws` 地址。生产 HTTPS origin 会由建房接口生成相应的 `wss://` 房间地址。应用内设置可覆盖构建时默认值。
+
+已经安装的桌面版不必重新构建：房主可在“设置 → 公网信令/中继节点”中填写该 HTTPS origin 并保存。创建房间后，应用会把建房接口返回的完整 WSS 地址放入邀请串；玩家粘贴邀请串即可使用同一节点，无需单独填写 Worker 地址。
 
 在开放公共节点前，建议在 Cloudflare 侧为建房和 WebSocket 路径配置速率限制。Worker 限制一个房主加七名玩家，单个 UTF-8 JSON 帧最多 65,536 字节；桌面端会自动把超限的应用层中继消息切成带校验的分片并在接收端重组。
 
@@ -113,6 +121,10 @@ Pop-Location
 - Worker 测试运行在 Cloudflare 的本地 `workerd` 环境，不访问已部署服务。
 - Python 默认测试使用模拟响应，不访问 DeepSeek。
 - GitHub 的真实 DeepSeek 冒烟工作流只能通过 `workflow_dispatch` 手工执行，并要求 `DEEPSEEK_API_KEY` Secret；普通 push/PR CI 不读取该 Secret。
+
+普通 `pnpm test` 中的 `RoomSession.live.test.ts` 默认跳过，因为它需要一个已启动的 Worker。CI 会启动本地 `workerd` 并设置 `COC_ROOM_LIVE_RELAY_URL`，让两个真实 `RoomSession` 通过 WebSocket 强制中继，验证聊天、骰子、模组切换、大型 UTF-8 揭示、离线事件和重连补发；这两个会话仍使用内存仓库，不是 SQLite 桌面 E2E。
+
+Windows job 还会启动发布构建的真实 WebView2：直连模式使用浏览器 `RTCPeerConnection` / DataChannel，中继模式使用本地 Worker，二者都逐字校验大型中文与 emoji 载荷。存储模式则验证 SQLite 幂等写入和重读、Markdown/无脚本自包含 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。网络诊断在一个桌面进程的同一 WebView 中创建双端，并不等同于两个独立安装客户端之间的完整 E2E；NSIS 阶段另行验证静默安装、主进程启动和卸载。
 
 ## 6. Windows x64 NSIS 构建
 

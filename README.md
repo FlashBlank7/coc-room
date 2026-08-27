@@ -32,7 +32,7 @@
                  Python JSONL sidecar ── DeepSeek API
 ```
 
-房主与每位玩家形成星形连接，不建立玩家间全连接。Worker 的 Durable Object 只保存房间元数据及令牌摘要，不保存聊天、事件、信令正文或中继正文；在线成员状态存在可休眠的 WebSocket attachment 中。更完整的数据流和边界见 [架构说明](docs/architecture.md)。
+房主与每位玩家形成星形连接，不建立玩家间全连接。Worker 的 Durable Object 不创建应用数据表或 KV 记录；房间 ID、角色和令牌关系由凭据无状态验证，在线成员状态只存在于可休眠的 WebSocket attachment 中。聊天、事件、信令正文和中继正文均不持久化。更完整的数据流和边界见 [架构说明](docs/architecture.md)。
 
 ## 环境要求
 
@@ -80,13 +80,15 @@ pnpm dev:tauri
 
 应用内“设置”保存的中继地址会成为后续运行时配置。完整开发、测试、Worker 自部署、sidecar 和 NSIS 打包命令见 [开发指南](docs/development.md)。
 
+当前项目没有公共 Worker。公网使用时，先按开发指南部署自己的 Worker，并用仓库自带的 relay smoke 验收 HTTPS 源地址；房主随后在“设置 → 公网信令/中继节点”中填入该源地址并保存。创建房间后，完整的 WSS 房间地址会写进邀请串，玩家直接粘贴邀请串即可加入，不需要另外配置该 Worker。
+
 导入 `.cocmod.json` 后，模组会自动在右侧“模组工作台”的“资料浏览”模式打开。已经保存在资料库中的模组可点击左侧卡片的“打开”，再从分类栏进入“地点”或“NPC”；浏览器预览刷新后会清空内存数据，Tauri 桌面版才会持久化到 SQLite。
 
 ## 隐私与安全边界
 
 - WebRTC DataChannel 使用 DTLS 加密；WSS 能保护客户端到 Worker 的传输。
 - 首版**没有应用层端到端加密**。连接退回 WebSocket 中继时，Cloudflare 和 Worker 运营者理论上能够读取转发中的正文，请勿通过不受信任的公共节点传输敏感内容。
-- Worker 不建立聊天历史或模组正文存储；它仍会持久化最小房间元数据和令牌的 SHA-256 摘要。
+- Worker 不建立聊天历史或模组正文存储，也不持久化房间元数据或令牌摘要。随机房主令牌通过带域分隔的 SHA-256 派生玩家加入令牌和房间 ID，使 Durable Object 能在不查询服务端房间记录的情况下验证房间、角色和预留的房主 peer ID；未认证 socket 的 15 秒截止 alarm 与在线 WebSocket attachment 不构成可恢复的房间历史。
 - 聊天、角色变化、骰子和已揭示内容保存在每个参与者自己的 SQLite 中。完整模组只应保存在房主本地。
 - DeepSeek API Key 由 Tauri 写入 Windows Credential Manager，只通过 sidecar 的 stdin JSONL 传递；不要把 Key 写入仓库、`.env`、命令行参数、日志或 GitHub Actions 文件。
 - 发送给 DeepSeek 的模组原文会离开本机，并受 DeepSeek 服务条款与数据政策约束。离线模拟解析不会联网。
