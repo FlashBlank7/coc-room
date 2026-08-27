@@ -245,6 +245,7 @@ export function CharactersView({ session }: { session?: RoomSession }) {
               {!own && (
                 <Button
                   variant="secondary"
+                  disabled={!session}
                   onClick={() => {
                     setDraft(createCharacter(currentRoom.localPeerId, session?.participant.displayName ?? "调查员"));
                     setDirty(true);
@@ -261,7 +262,9 @@ export function CharactersView({ session }: { session?: RoomSession }) {
             {!canEdit && (
               <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-400">
                 <LockKeyhole className="h-4 w-4 shrink-0" />
-                只有角色所有者与主持人可以修改这张角色卡。
+                {session
+                  ? "只有角色所有者与主持人可以修改这张角色卡。"
+                  : "本地记录为只读；重新连接房间后才能新建或修改角色卡。"}
               </div>
             )}
 
