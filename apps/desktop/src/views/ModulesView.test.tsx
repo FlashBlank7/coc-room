@@ -23,7 +23,8 @@ describe("ModulesView browser import", () => {
     Object.defineProperty(file, "text", { value: async () => content });
     fireEvent.change(input, { target: { files: [file] } });
 
-    expect(await screen.findByText("导入测试模组")).toBeTruthy();
+    expect((await screen.findAllByText(modulePackage.metadata.title)).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("tab", { name: "资料浏览" }).getAttribute("aria-selected")).toBe("true");
     expect(useAppStore.getState().modules).toHaveLength(1);
     expect(useAppStore.getState().modules[0]?.moduleId).toBe(modulePackage.moduleId);
   });

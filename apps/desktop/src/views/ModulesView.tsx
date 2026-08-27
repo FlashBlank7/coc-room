@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { BookOpen, Download, Eye, FileInput, FlaskConical, Play, Save, Trash2, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { BookOpen, Code2, Download, Eye, FileInput, FlaskConical, LayoutList, Play, Save, Trash2, Upload } from "lucide-react";
 import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
@@ -10,6 +10,7 @@ import { useAppStore } from "../store/app-store";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
+import { ModuleEntityBrowser } from "../components/module/ModuleEntityBrowser";
 
 export function ModulesView({ session }: { session?: RoomSession }) {
   const modules = useAppStore((state) => state.modules);
@@ -20,6 +21,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const [sourceText, setSourceText] = useState("");
   const [sourcePath, setSourcePath] = useState<string>();
   const [draft, setDraft] = useState("");
+  const [draftSourceText, setDraftSourceText] = useState("");
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [selectedModuleId, setSelectedModuleId] = useState<string>();
+  const [workspaceMode, setWorkspaceMode] = useState<"browse" | "json">("browse");
   const [progress, setProgress] = useState<ParserProgress[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -28,6 +33,22 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const parsedDraft = useMemo(() => {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
   }, [draft]);
+
+  const openModule = useCallback(async (modulePackage: ModulePackageV1) => {
+    const repository = await getRepository();
+    const stored = (await repository.listModules()).find((item) => item.package.moduleId === modulePackage.moduleId);
+    setSelectedModuleId(modulePackage.moduleId);
+    setDraft(JSON.stringify(modulePackage, null, 2));
+    setDraftSourceText(stored?.sourceText ?? "");
+    setDraftDirty(false);
+    setWorkspaceMode("browse");
+    setError(undefined);
+  }, []);
+
+  useEffect(() => {
+    if (selectedModuleId || draft.trim() || modules.length === 0) return;
+    void openModule(modules[0]!);
+  }, [draft, modules, openModule, selectedModuleId]);
 
   const chooseSource = async () => {
     if (!window.__TAURI_INTERNALS__) return setError("文件选择需要桌面应用；浏览器预览可直接粘贴文字");
@@ -62,6 +83,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       if (!result) throw new Error("解析器没有返回结构化模组");
       setWarnings(result.warnings ?? []);
       setDraft(JSON.stringify(result.module, null, 2));
+      setDraftSourceText(result.normalizedText ?? sourceText);
+      setDraftDirty(true);
+      setSelectedModuleId(result.module.moduleId);
+      setWorkspaceMode("browse");
       if (result.normalizedText && !sourceText) setSourceText(result.normalizedText);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -73,9 +98,12 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       const candidate = modulePackageSchema.parse(JSON.parse(draft));
       const modulePackage = nextModuleRevision(candidate, modules);
       const repository = await getRepository();
-      await repository.saveModule({ package: modulePackage, sourceText });
+      await repository.saveModule({ package: modulePackage, sourceText: draftSourceText });
       setModules((await repository.listModules()).map((item) => item.package));
       setDraft(JSON.stringify(modulePackage, null, 2));
+      setDraftDirty(false);
+      setSelectedModuleId(modulePackage.moduleId);
+      setWorkspaceMode("browse");
       setError(undefined);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
@@ -86,7 +114,17 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     try {
       const repository = await getRepository();
       await repository.deleteModule(moduleId);
-      setModules((await repository.listModules()).map((item) => item.package));
+      const storedRemaining = await repository.listModules();
+      const remaining = storedRemaining.map((item) => item.package);
+      setModules(remaining);
+      if (selectedModuleId === moduleId) {
+        const next = storedRemaining[0];
+        setSelectedModuleId(next?.package.moduleId);
+        setDraft(next ? JSON.stringify(next.package, null, 2) : "");
+        setDraftSourceText(next?.sourceText ?? "");
+        setDraftDirty(false);
+        setWorkspaceMode("browse");
+      }
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -101,6 +139,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       await repository.saveModule({ package: modulePackage, sourceText: "" });
       setModules((await repository.listModules()).map((item) => item.package));
       setDraft(JSON.stringify(modulePackage, null, 2));
+      setDraftSourceText("");
+      setDraftDirty(false);
+      setSelectedModuleId(modulePackage.moduleId);
+      setWorkspaceMode("browse");
       setError(undefined);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
@@ -213,11 +255,16 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               </div>
               {modules.length === 0 && <p className="text-sm text-zinc-500">资料库为空。</p>}
               {modules.map((modulePackage) => (
-                <div key={modulePackage.moduleId} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+                <div
+                  key={modulePackage.moduleId}
+                  className={`rounded-lg border bg-zinc-900 p-3 ${selectedModuleId === modulePackage.moduleId ? "border-brass/60" : "border-zinc-800"}`}
+                >
                   <div className="font-medium text-ink">{modulePackage.metadata.title}</div>
                   <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
                   <div className="mt-3 flex gap-1">
-                    <Button variant="secondary" className="h-8 px-2" onClick={() => setDraft(JSON.stringify(modulePackage, null, 2))}>编辑</Button>
+                    <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
+                      <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
+                    </Button>
                     <Button variant="ghost" className="h-8 px-2" onClick={() => void exportPackage(modulePackage)}><Download className="h-4 w-4" /></Button>
                     {currentRoom?.localRole === "host" && <Button variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
                     <Button variant="ghost" className="ml-auto h-8 px-2 text-red-400" onClick={() => void remove(modulePackage.moduleId)}><Trash2 className="h-4 w-4" /></Button>
@@ -256,10 +303,67 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               ))}
             </Panel>
           </div>
-          <Panel className="flex min-h-[700px] flex-col gap-3">
-            <div className="flex items-center justify-between"><div><h2 className="font-semibold">结构化模组编辑器</h2><p className="text-xs text-zinc-500">AI 输出必须在这里确认后保存。</p></div><Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success}><Save className="mr-2 h-4 w-4" />确认保存</Button></div>
-            <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="解析结果会出现在这里，也可以粘贴 ModulePackageV1 JSON。" className="min-h-0 flex-1 font-mono text-xs leading-5" spellCheck={false} />
-            {draft && !parsedDraft?.success && <div className="max-h-28 overflow-auto rounded bg-red-950/40 p-2 text-xs text-red-300">结构不合法：{parsedDraft ? parsedDraft.error.issues.slice(0, 5).map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("；") : "不是有效 JSON"}</div>}
+          <Panel className="flex min-h-[700px] flex-col gap-4 xl:h-[calc(100vh-10rem)]">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 pb-3">
+              <div>
+                <h2 className="font-semibold">模组工作台</h2>
+                <p className="text-xs text-zinc-500">先浏览 AI 抽取结果；需要修正时再切换 JSON 编辑。</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex rounded-md border border-zinc-800 bg-zinc-950 p-1" role="tablist" aria-label="模组工作台模式">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={workspaceMode === "browse"}
+                    disabled={!parsedDraft?.success}
+                    onClick={() => setWorkspaceMode("browse")}
+                    className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition disabled:opacity-30 ${workspaceMode === "browse" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
+                  >
+                    <LayoutList className="h-3.5 w-3.5" />资料浏览
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={workspaceMode === "json"}
+                    onClick={() => setWorkspaceMode("json")}
+                    className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs transition ${workspaceMode === "json" ? "bg-zinc-800 text-brass" : "text-zinc-500 hover:text-zinc-200"}`}
+                  >
+                    <Code2 className="h-3.5 w-3.5" />JSON 编辑
+                  </button>
+                </div>
+                <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || !draftDirty}>
+                  <Save className="mr-2 h-4 w-4" />{draftDirty ? "保存更改" : "已保存"}
+                </Button>
+              </div>
+            </div>
+
+            {!draft && (
+              <div className="grid min-h-96 flex-1 place-items-center rounded-xl border border-dashed border-zinc-800 text-center text-sm text-zinc-500">
+                <div><BookOpen className="mx-auto mb-3 h-8 w-8 text-zinc-700" /><p>导入、解析或打开一个模组后，这里会显示人物、地点与线索。</p></div>
+              </div>
+            )}
+
+            {draft && workspaceMode === "browse" && parsedDraft?.success && (
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                <ModuleEntityBrowser key={`${parsedDraft.data.moduleId}-${parsedDraft.data.revision}`} modulePackage={parsedDraft.data} />
+              </div>
+            )}
+
+            {draft && workspaceMode === "json" && (
+              <Textarea
+                value={draft}
+                onChange={(event) => { setDraft(event.target.value); setDraftDirty(true); }}
+                placeholder="解析结果会出现在这里，也可以粘贴 ModulePackageV1 JSON。"
+                className="min-h-0 flex-1 font-mono text-xs leading-5"
+                spellCheck={false}
+              />
+            )}
+
+            {draft && !parsedDraft?.success && (
+              <div className="max-h-28 overflow-auto rounded bg-red-950/40 p-2 text-xs text-red-300">
+                结构不合法：{parsedDraft ? parsedDraft.error.issues.slice(0, 5).map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("；") : "不是有效 JSON"}
+              </div>
+            )}
           </Panel>
         </div>
         {error && <div className="rounded-md border border-red-900 bg-red-950/40 p-3 text-sm text-red-300">{error}</div>}
