@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ModulePackageV1 } from "@coc-room/protocol";
+import type { ModulePackageV1, RoomEventV1 } from "@coc-room/protocol";
 import { getRepository, type RoomRecord } from "../data/repository";
 import type { RoomSession } from "../network/RoomSession";
 import { useAppStore } from "../store/app-store";
@@ -10,7 +10,7 @@ import { ModulesView } from "./ModulesView";
 
 afterEach(() => {
   cleanup();
-  useAppStore.setState({ modules: [], currentRoom: undefined });
+  useAppStore.setState({ modules: [], currentRoom: undefined, events: [] });
   vi.restoreAllMocks();
 });
 
@@ -188,6 +188,12 @@ describe("ModulesView room publishing controls", () => {
       revision: modulePackage.revision,
       title: modulePackage.metadata.title,
     }));
+    await screen.findByLabelText(`${modulePackage.metadata.title}模组内容浏览`);
+    expect(screen.queryByLabelText("公开线索：可公开线索")).toBeNull();
+    expect(screen.getByText(/不是房间正在使用的精确版本/)).not.toBeNull();
+
+    useAppStore.getState().setEvents([createModuleSwitchedEvent(modulePackage)]);
+    await screen.findByLabelText("房间内容公开");
 
     submit.mockClear();
     fireEvent.click(screen.getByLabelText("公开线索：可公开线索"));
@@ -212,12 +218,17 @@ describe("ModulesView room publishing controls", () => {
     }));
   });
 
-  it("disables an empty revealText and never falls back to the keeper description", () => {
+  it("disables an empty revealText and never falls back to the keeper description", async () => {
     const modulePackage = createModulePackageWithPublicContent();
     const submit = vi.fn(async () => undefined);
     const session = { isHost: true, submit } as unknown as RoomSession;
-    useAppStore.setState({ modules: [modulePackage], currentRoom: createRoom("host") });
+    useAppStore.setState({
+      modules: [modulePackage],
+      currentRoom: createRoom("host"),
+      events: [createModuleSwitchedEvent(modulePackage)],
+    });
     render(<ModulesView session={session} />);
+    await screen.findByLabelText("房间内容公开");
 
     const button = screen.getByLabelText("公开线索：未公开线索") as HTMLButtonElement;
     expect(button.disabled).toBe(true);
@@ -306,6 +317,11 @@ function createModulePackageWithEntities(): ModulePackageV1 {
 function createModulePackageWithPublicContent(): ModulePackageV1 {
   return {
     ...createModulePackage(),
+    moduleId: "module_public_content_01",
+    metadata: {
+      ...createModulePackage().metadata,
+      title: "公开内容测试模组",
+    },
     clues: [
       {
         id: "clue-private",
@@ -334,6 +350,23 @@ function createModulePackageWithPublicContent(): ModulePackageV1 {
         sourceRefs: [],
       },
     ],
+  };
+}
+
+function createModuleSwitchedEvent(modulePackage: ModulePackageV1): RoomEventV1 {
+  return {
+    protocolVersion: 1,
+    roomId: "room-module-test",
+    eventId: "00000000-0000-4000-8000-000000000001",
+    sequence: 1,
+    sender: { peerId: "host-peer", displayName: "守秘人", role: "host" },
+    occurredAt: "2026-08-27T00:00:00.000Z",
+    type: "module.switched",
+    payload: {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      title: modulePackage.metadata.title,
+    },
   };
 }
 

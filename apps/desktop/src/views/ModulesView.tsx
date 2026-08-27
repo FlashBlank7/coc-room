@@ -15,6 +15,7 @@ import { ModuleEntityBrowser } from "../components/module/ModuleEntityBrowser";
 export function ModulesView({ session }: { session?: RoomSession }) {
   const modules = useAppStore((state) => state.modules);
   const setModules = useAppStore((state) => state.setModules);
+  const events = useAppStore((state) => state.events);
   const model = useAppStore((state) => state.model);
   const currentRoom = useAppStore((state) => state.currentRoom);
   const [sourceName, setSourceName] = useState("新模组.md");
@@ -36,6 +37,17 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const parsedDraft = useMemo(() => {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
   }, [draft]);
+  const activeRoomModule = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type === "module.switched") return event.payload;
+    }
+    return undefined;
+  }, [events]);
+  const isActiveRoomModule = useCallback((modulePackage: ModulePackageV1) => (
+    activeRoomModule?.moduleId === modulePackage.moduleId
+      && activeRoomModule.revision === modulePackage.revision
+  ), [activeRoomModule]);
 
   const rememberHistory = useCallback((moduleId: string, history: StoredModule[]) => {
     setModuleHistories((current) => ({ ...current, [moduleId]: history }));
@@ -342,6 +354,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
               {modules.map((modulePackage) => {
                 const history = moduleHistories[modulePackage.moduleId]
                   ?? [{ package: modulePackage, sourceText: "" }];
+                const activeLatest = isActiveRoomModule(modulePackage);
                 return (
                   <div
                     key={modulePackage.moduleId}
@@ -351,7 +364,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="font-medium text-ink">{modulePackage.metadata.title}</div>
-                      <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-brass">最新 v{modulePackage.revision}</span>
+                      <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                        {activeLatest && <span className="rounded bg-emerald-950 px-1.5 py-0.5 text-[10px] text-emerald-300">房间使用中</span>}
+                        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-brass">最新 v{modulePackage.revision}</span>
+                      </div>
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
                     <div className="mt-3 flex gap-1">
@@ -359,7 +375,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                         <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
                       </Button>
                       <Button aria-label={`导出${modulePackage.metadata.title} v${modulePackage.revision}`} variant="ghost" className="h-8 px-2" onClick={() => void exportPackage(modulePackage)}><Download className="h-4 w-4" /></Button>
-                      {canManageRoomModule && <Button aria-label={`切换房间模组：${modulePackage.metadata.title}`} variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
+                      {canManageRoomModule && !activeLatest && <Button aria-label={`切换房间模组：${modulePackage.metadata.title}`} variant="ghost" className="h-8 px-2 text-xs" onClick={() => void switchModule(modulePackage)}><Play className="mr-1 h-3.5 w-3.5" />设为房间模组</Button>}
                       <Button aria-label={`删除整个模组：${modulePackage.metadata.title}`} variant="ghost" className="ml-auto h-8 px-2 text-red-400" onClick={() => void removeModule(modulePackage.moduleId)}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                     <details aria-label={`${modulePackage.metadata.title}修订历史`} className="mt-3 border-t border-zinc-800 pt-2">
@@ -370,13 +386,15 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                         {history.map((stored) => {
                           const revision = stored.package.revision;
                           const selected = selectedModuleId === modulePackage.moduleId && selectedRevision === revision;
+                          const active = isActiveRoomModule(stored.package);
                           return (
                             <div key={revision} className={`flex items-center gap-1 rounded border px-2 py-1.5 ${selected ? "border-brass/40 bg-brass/5" : "border-zinc-800 bg-zinc-950"}`}>
                               <div className="min-w-0 flex-1">
-                                <div className="text-xs text-zinc-300">v{revision}{revision === modulePackage.revision ? " · 最新" : ""}</div>
+                                <div className="text-xs text-zinc-300">v{revision}{revision === modulePackage.revision ? " · 最新" : ""}{active ? " · 房间使用中" : ""}</div>
                                 <div className="truncate text-[10px] text-zinc-600">{stored.package.metadata.updatedAt}</div>
                               </div>
                               <Button aria-label={`打开${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5" onClick={() => void openModule(stored.package)}><BookOpen className="h-3.5 w-3.5" /></Button>
+                              {canManageRoomModule && !active && <Button aria-label={`切换房间模组版本：${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5" onClick={() => void switchModule(stored.package)}><Play className="h-3.5 w-3.5" /></Button>}
                               <Button aria-label={`导出${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5" onClick={() => void exportPackage(stored.package)}><Download className="h-3.5 w-3.5" /></Button>
                               <Button aria-label={`删除${stored.package.metadata.title} v${revision}`} variant="ghost" className="h-7 px-1.5 text-red-400" onClick={() => void removeRevision(stored.package)}><Trash2 className="h-3.5 w-3.5" /></Button>
                             </div>
@@ -384,38 +402,6 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                         })}
                       </div>
                     </details>
-                    {canManageRoomModule && (modulePackage.clues.length > 0 || modulePackage.handouts.length > 0) && (
-                      <details className="mt-3 border-t border-zinc-800 pt-2">
-                        <summary className="cursor-pointer text-xs text-zinc-400">选择公开内容</summary>
-                        <div className="mt-2 grid max-h-52 gap-1 overflow-y-auto">
-                          {modulePackage.clues.map((clue) => (
-                            <button
-                              key={clue.id}
-                              type="button"
-                              aria-label={`公开线索：${clue.name}`}
-                              disabled={!clue.revealText.trim()}
-                              className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
-                              title={clue.revealText ? "只公开玩家可见文本" : "公开标题；此线索尚无玩家可见正文"}
-                              onClick={() => void revealContent(modulePackage, { id: clue.id, title: clue.name, body: clue.revealText, type: "clue" })}
-                            >
-                              <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />线索：{clue.name}
-                            </button>
-                          ))}
-                          {modulePackage.handouts.map((handout) => (
-                            <button
-                              key={handout.id}
-                              type="button"
-                              aria-label={`公开手记：${handout.title}`}
-                              disabled={!handout.content.trim()}
-                              className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
-                              onClick={() => void revealContent(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
-                            >
-                              <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />手记：{handout.title}
-                            </button>
-                          ))}
-                        </div>
-                      </details>
-                    )}
                   </div>
                 );
               })}
@@ -468,6 +454,15 @@ export function ModulesView({ session }: { session?: RoomSession }) {
             {draft && workspaceMode === "browse" && parsedDraft?.success && (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <ModuleEntityBrowser key={`${parsedDraft.data.moduleId}-${parsedDraft.data.revision}`} modulePackage={parsedDraft.data} />
+                {canManageRoomModule && (parsedDraft.data.clues.length > 0 || parsedDraft.data.handouts.length > 0) && (
+                  isActiveRoomModule(parsedDraft.data) ? (
+                    <RoomContentPublishing modulePackage={parsedDraft.data} onReveal={revealContent} />
+                  ) : (
+                    <div className="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/20 p-3 text-xs text-amber-200">
+                      当前打开的 v{parsedDraft.data.revision} 不是房间正在使用的精确版本。先在左侧将它设为房间模组，才能公开线索或手记。
+                    </div>
+                  )
+                )}
               </div>
             )}
 
@@ -491,6 +486,56 @@ export function ModulesView({ session }: { session?: RoomSession }) {
         {error && <div className="rounded-md border border-red-900 bg-red-950/40 p-3 text-sm text-red-300">{error}</div>}
       </div>
     </div>
+  );
+}
+
+function RoomContentPublishing({
+  modulePackage,
+  onReveal,
+}: {
+  modulePackage: ModulePackageV1;
+  onReveal: (
+    modulePackage: ModulePackageV1,
+    content: { id: string; title: string; body: string; type: "clue" | "handout" },
+  ) => Promise<void>;
+}) {
+  return (
+    <section aria-label="房间内容公开" className="mt-4 rounded-xl border border-emerald-900/50 bg-emerald-950/15 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-emerald-200">向房间公开内容</h3>
+          <p className="mt-1 text-xs text-zinc-500">当前房间正在使用此模组的 v{modulePackage.revision}；公开事件无法撤回。</p>
+        </div>
+        <span className="rounded bg-emerald-950 px-2 py-1 text-[10px] text-emerald-300">精确版本已匹配</span>
+      </div>
+      <div className="mt-3 grid max-h-52 gap-1 overflow-y-auto">
+        {modulePackage.clues.map((clue) => (
+          <button
+            key={clue.id}
+            type="button"
+            aria-label={`公开线索：${clue.name}`}
+            disabled={!clue.revealText.trim()}
+            className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
+            title={clue.revealText ? "只公开玩家可见文本" : "此线索尚无玩家可见正文"}
+            onClick={() => void onReveal(modulePackage, { id: clue.id, title: clue.name, body: clue.revealText, type: "clue" })}
+          >
+            <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />线索：{clue.name}
+          </button>
+        ))}
+        {modulePackage.handouts.map((handout) => (
+          <button
+            key={handout.id}
+            type="button"
+            aria-label={`公开手记：${handout.title}`}
+            disabled={!handout.content.trim()}
+            className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
+            onClick={() => void onReveal(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
+          >
+            <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />手记：{handout.title}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

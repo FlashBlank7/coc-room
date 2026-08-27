@@ -141,6 +141,7 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
           query={normalizedQuery}
           sourceNames={sourceNames}
           entityNames={entityNames}
+          onSelectCategory={setCategory}
         />
       </div>
     </section>
@@ -153,12 +154,14 @@ function CategoryContent({
   query,
   sourceNames,
   entityNames,
+  onSelectCategory,
 }: {
   category: Category;
   modulePackage: ModulePackageV1;
   query: string;
   sourceNames: ReadonlyMap<string, string>;
   entityNames: ReadonlyMap<string, string>;
+  onSelectCategory: (category: Category) => void;
 }) {
   if (category === "overview") {
     const overviewMatches = matchesQuery(query, [
@@ -168,7 +171,13 @@ function CategoryContent({
       modulePackage.sourceDocuments,
     ]);
     if (!overviewMatches) return <EmptyResult query={query} />;
-    return <OverviewCards modulePackage={modulePackage} entityNames={entityNames} />;
+    return (
+      <OverviewCards
+        modulePackage={modulePackage}
+        entityNames={entityNames}
+        onSelectCategory={onSelectCategory}
+      />
+    );
   }
 
   if (category === "scenes") {
@@ -246,9 +255,11 @@ function CategoryContent({
 function OverviewCards({
   modulePackage,
   entityNames,
+  onSelectCategory,
 }: {
   modulePackage: ModulePackageV1;
   entityNames: ReadonlyMap<string, string>;
+  onSelectCategory: (category: Category) => void;
 }) {
   const parserProvenance = getModuleParserProvenance(modulePackage);
   const stats = [
@@ -260,6 +271,20 @@ function OverviewCards({
     ["检定", modulePackage.suggestedChecks.length],
     ["关系", modulePackage.relations.length],
   ] as const;
+  const directories = [
+    {
+      category: "locations" as const,
+      label: "地点",
+      icon: MapPin,
+      items: modulePackage.locations.map((location) => ({ id: location.id, name: location.name })),
+    },
+    {
+      category: "npcs" as const,
+      label: "NPC",
+      icon: UserRound,
+      items: modulePackage.npcs.map((npc) => ({ id: npc.id, name: npc.name })),
+    },
+  ];
 
   return (
     <>
@@ -293,6 +318,48 @@ function OverviewCards({
           <MetadataRow label="建立时间" value={formatDate(modulePackage.metadata.createdAt)} />
           <MetadataRow label="更新时间" value={formatDate(modulePackage.metadata.updatedAt)} />
         </dl>
+      </article>
+
+      <article aria-label="人物与地点速览" className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
+        <SectionHeading icon={<MapPin className="h-4 w-4" />} title="人物与地点速览" />
+        <p className="mt-2 text-xs text-zinc-500">导入成功后会直接列在这里；点击名称可进入完整资料卡。</p>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          {directories.map(({ category, label, icon: Icon, items }) => (
+            <section key={category} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                  <Icon className="h-4 w-4 text-brass" aria-hidden="true" />
+                  {label} <span className="text-xs font-normal text-zinc-500">{items.length}</span>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-brass hover:text-amber-200"
+                  aria-label={`浏览全部${label}`}
+                  onClick={() => onSelectCategory(category)}
+                >
+                  查看全部
+                </button>
+              </div>
+              {items.length === 0 ? (
+                <p className="mt-3 text-xs text-zinc-600">尚未抽取到{label}。</p>
+              ) : (
+                <div className="mt-3 flex max-h-36 flex-wrap content-start gap-1.5 overflow-y-auto pr-1">
+                  {items.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      title={item.id}
+                      className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-left text-xs text-zinc-300 transition hover:border-brass/50 hover:text-amber-200"
+                      onClick={() => onSelectCategory(category)}
+                    >
+                      {item.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
       </article>
 
       <article aria-label="解析来源" className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">

@@ -13,7 +13,12 @@ describe("ModuleEntityBrowser", () => {
     render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
 
     expect(screen.getByText("见世之蝶")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: /NPC/ }));
+    const directory = screen.getByLabelText("人物与地点速览");
+    expect(within(directory).getByRole("button", { name: "映夜太夫" })).toBeTruthy();
+    expect(within(directory).getByRole("button", { name: "扬屋（映夜的处所）" })).toBeTruthy();
+
+    fireEvent.click(within(directory).getByRole("button", { name: "映夜太夫" }));
+    expect(screen.getByRole("tab", { name: /NPC/ }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("heading", { name: "映夜太夫" })).toBeTruthy();
     expect(screen.getByText("花魁（委托人）")).toBeTruthy();
     expect(screen.getByText("为姐姐蝴蝶复仇")).toBeTruthy();
