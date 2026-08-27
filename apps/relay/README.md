@@ -10,6 +10,13 @@ Online peer metadata lives only in hibernatable WebSocket attachments and disapp
 
 The source contains no payload logging, and Wrangler observability is disabled by default.
 
+Cloudflare's aggregate Worker metrics (request count, invocation errors and CPU
+time) remain available without retaining invocation logs. For production,
+monitor those aggregate metrics and probe `GET /health`; leave Workers Logs
+disabled unless the operator has made an explicit retention and privacy review.
+The application never calls `console.*`, and neither tokens nor message bodies
+are included in application-generated telemetry.
+
 This is not end-to-end encryption. Cloudflare and the operator can technically inspect frames while they are being relayed. Do not put tokens in URLs or logs.
 
 ## Run locally
@@ -47,6 +54,11 @@ The response contains secrets and uses `Cache-Control: no-store`:
 
 `websocketUrl` is the complete room URL, not a base URL. A production HTTPS request returns a corresponding `wss://` URL. Connect to it and send the `join` frame below after the socket opens.
 
+Plain HTTP and `ws://` are accepted only for loopback development hosts
+(`localhost`, `*.localhost`, `127.0.0.0/8`, and `[::1]`). Public requests over
+plain HTTP receive `426 HTTPS_REQUIRED`; a deployed client must use the HTTPS
+origin and the returned WSS URL.
+
 The first WebSocket text frame must be a `join` message. An upgraded socket has
 15 seconds to authenticate; its deadline is stored in the hibernatable socket
 attachment, and the same Durable Object alarm scheduler closes it if the
@@ -77,6 +89,11 @@ The first server message is `ready`; later messages are `presence`, `signal`, `r
 
 Only UTF-8 JSON text frames are accepted. A frame is at most 65,536 bytes. A routed message may need slightly smaller chunks because the server adds its envelope. The room permits one host and seven players. Literal `ping` frames receive `pong` without waking a hibernated object.
 
+Room creation accepts only `application/json` and reads at most 1,024 bytes, so
+an unauthenticated oversized request is rejected before JSON parsing. The
+Worker also rejects a non-upgrade room request before it creates or wakes a
+Durable Object.
+
 ## Test and deploy
 
 ```powershell
@@ -102,7 +119,34 @@ To self-host:
 2. Change `name` in `wrangler.jsonc` if the default Worker name is unavailable.
 3. Run `pnpm --filter @coc-room/relay deploy`.
 4. Configure the desktop client's relay base URL to the deployed `https://<worker>.<subdomain>.workers.dev` origin.
+5. Run the HTTPS smoke command above against that exact origin before publishing it.
 
-The `v1` Wrangler migration creates `RelayRoom` with the SQLite storage backend required by its Durable Object class, although the application creates no storage rows. Keep that migration entry when renaming the Worker. If the Durable Object class itself is renamed later, add a new Wrangler rename migration rather than editing the deployed `v1` tag.
+The retained `v1` migration provisions `RelayRoom` with the SQLite backend
+required for new Durable Object namespaces. Cloudflare now also supports
+declarative Durable Object `exports`, but the legacy migration flow remains
+supported and switching an existing Worker to `exports` is irreversible. Keep
+the `v1` entry for the easiest reproducible self-deployment. If the class is
+renamed later, add a new tagged migration rather than editing deployed history.
+The application creates no rows in the SQLite namespace.
 
-For a public deployment, add Cloudflare rate limiting to `POST /v1/rooms` and the WebSocket route. The application deliberately has no account system and no server-side transcript recovery.
+Before publishing a shared node, add deployment-specific limits to both
+`POST /v1/rooms` and `GET /v1/rooms/*/ws`. Cloudflare's Worker Rate Limiting
+binding (Wrangler 4.36 or newer) is suitable for `workers.dev`; a reasonable
+starting point is 20 room creations and 240 WebSocket upgrades per source per
+minute. Operators using a custom domain may instead use WAF rate-limiting
+rules. Use generous thresholds because several legitimate players may share a
+NAT, and remember that Cloudflare's counters are permissive, eventually
+consistent and local to a Cloudflare location.
+
+HTTP rate limiting covers creation and the WebSocket handshake only; the outer
+Worker is not invoked for each later WebSocket frame. Authenticated rooms still
+cap membership at one host and seven players and every message at 64 KiB. The
+application deliberately has no account system and no server-side transcript
+recovery.
+
+Current platform references:
+
+- [Durable Object WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
+- [Durable Object class lifecycle and legacy migration guidance](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)
+- [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+- [Workers metrics and analytics](https://developers.cloudflare.com/workers/observability/metrics-and-analytics/)

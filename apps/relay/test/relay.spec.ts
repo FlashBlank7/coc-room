@@ -7,6 +7,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AUTHENTICATION_GRACE_PERIOD_MS,
+  MAX_CREATE_ROOM_BODY_BYTES,
   MAX_FRAME_BYTES,
   MAX_PENDING_SOCKETS,
 } from "../src/constants";
@@ -37,6 +38,7 @@ describe("relay Worker", () => {
     expect(room.hostToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(room.hostToken).not.toBe(room.joinToken);
     expect(room.websocketUrl).toContain(`/v1/rooms/${room.roomId}/ws`);
+    expect(room.websocketUrl).toMatch(/^wss:\/\//u);
 
     const parsedJoinToken = parseJoinToken(room.joinToken);
     expect(parsedJoinToken).toMatchObject({ hostPeerId: room.hostPeerId });
@@ -66,6 +68,59 @@ describe("relay Worker", () => {
         error: "INVALID_CREATE_REQUEST",
       });
     }
+  });
+
+  it("requires bounded JSON create requests and secure public origins", async () => {
+    const insecure = await exports.default.fetch("http://relay.test/health");
+    expect(insecure.status).toBe(426);
+    expect(insecure.headers.get("Upgrade")).toBe("TLS/1.2");
+    await expect(insecure.json()).resolves.toMatchObject({
+      error: "HTTPS_REQUIRED",
+    });
+
+    const localHealth = await exports.default.fetch(
+      "http://127.0.0.1:8787/health",
+    );
+    expect(localHealth.status).toBe(200);
+
+    const wrongContentType = await exports.default.fetch(
+      "https://relay.test/v1/rooms",
+      {
+        method: "POST",
+        body: JSON.stringify({ hostPeerId: "content-type-host" }),
+      },
+    );
+    expect(wrongContentType.status).toBe(415);
+    await expect(wrongContentType.json()).resolves.toMatchObject({
+      error: "UNSUPPORTED_MEDIA_TYPE",
+    });
+
+    const oversized = await exports.default.fetch(
+      "https://relay.test/v1/rooms",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hostPeerId: "oversized-host",
+          padding: "x".repeat(MAX_CREATE_ROOM_BODY_BYTES),
+        }),
+      },
+    );
+    expect(oversized.status).toBe(413);
+    await expect(oversized.json()).resolves.toMatchObject({
+      error: "CREATE_REQUEST_TOO_LARGE",
+    });
+  });
+
+  it("rejects non-WebSocket room requests before dispatching to the object", async () => {
+    const room = await createRoom("upgrade-host");
+    const response = await exports.default.fetch(
+      websocketRequestUrl(room.websocketUrl),
+    );
+    expect(response.status).toBe(426);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "WEBSOCKET_REQUIRED",
+    });
   });
 
   it("removes a legacy room metadata table when an object is rehydrated", async () => {
