@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import hashlib
+
+import pytest
+from pydantic import ValidationError
+
+from coc_module_parser.models import (
+    ModuleMetadataV1,
+    ModulePackageV1,
+    SceneV1,
+    SourceDocumentV1,
+    apply_manual_corrections,
+    migrate_module_package,
+)
+
+
+def package() -> ModulePackageV1:
+    text = "test"
+    return ModulePackageV1(
+        module_id="module:test",
+        metadata=ModuleMetadataV1(title="Test"),
+        source=SourceDocumentV1(
+            name="test.md",
+            sha256=hashlib.sha256(text.encode()).hexdigest(),
+            char_count=len(text),
+        ),
+    )
+
+
+def test_module_package_rejects_unknown_reference() -> None:
+    with pytest.raises(ValidationError, match="unknown ids"):
+        ModulePackageV1(
+            **package().model_dump(exclude={"scenes"}),
+            scenes=[SceneV1(id="scene:test", title="Test", npc_ids=["npc:missing"])],
+        )
+
+
+def test_migrates_pre_v1_camel_case_shape() -> None:
+    old = package().model_dump(mode="json")
+    old.pop("metadata")
+    old["title"] = "Legacy title"
+    old["author"] = "Legacy author"
+    old["schemaVersion"] = "0.1"
+    old["moduleId"] = old.pop("module_id")
+    old["source"]["charCount"] = old["source"].pop("char_count")
+    old.pop("schema_version")
+
+    migrated = migrate_module_package(old)
+
+    assert migrated.schema_version == "1.0"
+    assert migrated.metadata.title == "Legacy title"
+    assert migrated.metadata.author == "Legacy author"
+
+
+def test_manual_corrections_replace_lists_and_revalidate() -> None:
+    corrected = apply_manual_corrections(
+        package(),
+        {"metadata": {"title": "Edited"}, "extensions": {"org.coc-room.notes": {"x": 1}}},
+    )
+    assert corrected.metadata.title == "Edited"
+    assert corrected.extensions["org.coc-room.notes"] == {"x": 1}
+
+
+def test_extensions_require_namespace() -> None:
+    with pytest.raises(ValidationError, match="namespace"):
+        apply_manual_corrections(package(), {"extensions": {"bgm": {}}})

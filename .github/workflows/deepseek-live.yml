@@ -1,0 +1,84 @@
+name: DeepSeek live smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: DeepSeek model identifier
+        required: true
+        default: deepseek-v4-flash
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    name: One-chunk live extraction
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/module-parser
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: services/module-parser/uv.lock
+      - run: uv sync --locked --extra dev --python 3.12
+      - name: Require repository secret
+        shell: bash
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [[ -z "$DEEPSEEK_API_KEY" ]]; then
+            echo "::error::Set the repository secret DEEPSEEK_API_KEY before running this workflow."
+            exit 1
+          fi
+      - name: Run one-call extraction
+        shell: bash
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_MODEL: ${{ inputs.model }}
+        run: |
+          uv run python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          request = {
+              "id": "github-live-smoke",
+              "action": "parse_module",
+              "source_text": "# 雾中车站\n## 月台\n地点：旧月台\nNPC：林医生\n线索：一张日期异常的车票\n检定：侦查",
+              "source_name": "github-live-smoke.md",
+              "model": os.environ["DEEPSEEK_MODEL"],
+              "api_key": os.environ["DEEPSEEK_API_KEY"],
+              "max_retries": 0,
+              "max_output_tokens": 4000,
+          }
+          process = subprocess.run(
+              [sys.executable, "-m", "coc_module_parser"],
+              input=json.dumps(request, ensure_ascii=False) + "\n",
+              text=True,
+              capture_output=True,
+              check=False,
+          )
+          if process.returncode != 0:
+              raise SystemExit(f"sidecar exited with code {process.returncode}")
+          events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+          errors = [event for event in events if event.get("type") == "error"]
+          if errors:
+              error = errors[-1].get("error", {})
+              raise SystemExit(f"live extraction failed: {error.get('code', 'UNKNOWN')} - {error.get('message', 'unknown error')}")
+          results = [event for event in events if event.get("type") == "result"]
+          if len(results) != 1 or results[0].get("parseStatus") != "ready_for_review":
+              raise SystemExit("live extraction did not produce one ready_for_review result")
+          calls = results[0].get("usage", {}).get("calls")
+          print(f"DeepSeek live extraction succeeded with {calls} API call(s).")
+          PY

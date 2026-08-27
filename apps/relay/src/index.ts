@@ -1,0 +1,151 @@
+import {
+  CORS_HEADERS,
+  JSON_HEADERS,
+  MAX_FRAME_BYTES,
+  MAX_ROOM_PEERS,
+  PEER_ID_PATTERN,
+  PROTOCOL_VERSION,
+  ROOM_ID_PATTERN,
+} from "./constants";
+import { RelayRoom } from "./room";
+import { randomToken } from "./security";
+import type { CreateRoomRequest, CreateRoomResponse, Env } from "./types";
+
+export { RelayRoom };
+export type * from "./types";
+
+const ROOM_WEBSOCKET_PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]+)\/ws$/u;
+const INTERNAL_CREATE_URL = "https://relay.internal/__internal/create";
+const CREATE_ATTEMPTS = 3;
+
+const worker = {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      return jsonResponse(200, {
+        ok: true,
+        service: "coc-room-relay",
+        protocolVersion: PROTOCOL_VERSION,
+        maxPeers: MAX_ROOM_PEERS,
+        maxFrameBytes: MAX_FRAME_BYTES,
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/rooms") {
+      return createRoom(request, env);
+    }
+
+    const match = ROOM_WEBSOCKET_PATH.exec(url.pathname);
+    const roomId = match?.[1];
+    if (request.method === "GET" && roomId !== undefined) {
+      if (!ROOM_ID_PATTERN.test(roomId)) {
+        return jsonResponse(400, {
+          error: "INVALID_ROOM_ID",
+          message: "The room identifier is malformed.",
+        });
+      }
+
+      const id = env.ROOMS.idFromName(roomId);
+      return env.ROOMS.get(id).fetch(request);
+    }
+
+    return jsonResponse(404, {
+      error: "NOT_FOUND",
+      message: "The requested relay endpoint does not exist.",
+    });
+  },
+} satisfies ExportedHandler<Env>;
+
+export default worker;
+
+async function createRoom(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse(400, {
+      error: "INVALID_CREATE_REQUEST",
+      message: "The create request must include a valid hostPeerId.",
+    });
+  }
+
+  if (!isCreateRoomRequest(body)) {
+    return jsonResponse(400, {
+      error: "INVALID_CREATE_REQUEST",
+      message: "The create request must include a valid hostPeerId.",
+    });
+  }
+
+  for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
+    const roomId = randomToken(16);
+    const hostToken = randomToken(32);
+    const joinToken = randomToken(32);
+    const id = env.ROOMS.idFromName(roomId);
+    const stub = env.ROOMS.get(id);
+    const internalResponse = await stub.fetch(
+      new Request(INTERNAL_CREATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          hostPeerId: body.hostPeerId,
+          hostToken,
+          joinToken,
+        }),
+      }),
+    );
+
+    if (internalResponse.status === 409) {
+      continue;
+    }
+    if (!internalResponse.ok) {
+      return jsonResponse(502, {
+        error: "ROOM_CREATE_FAILED",
+        message: "The room coordinator rejected the create request.",
+      });
+    }
+
+    const websocketUrl = new URL(
+      `/v1/rooms/${encodeURIComponent(roomId)}/ws`,
+      request.url,
+    );
+    websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+
+    const response: CreateRoomResponse = {
+      protocolVersion: PROTOCOL_VERSION,
+      roomId,
+      hostPeerId: body.hostPeerId,
+      hostToken,
+      joinToken,
+      websocketUrl: websocketUrl.toString(),
+    };
+    return jsonResponse(201, response);
+  }
+
+  return jsonResponse(503, {
+    error: "ROOM_ID_EXHAUSTED",
+    message: "Could not allocate a unique room identifier.",
+  });
+}
+
+function isCreateRoomRequest(value: unknown): value is CreateRoomRequest {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "hostPeerId" in value &&
+    typeof value.hostPeerId === "string" &&
+    PEER_ID_PATTERN.test(value.hostPeerId)
+  );
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...JSON_HEADERS, ...CORS_HEADERS },
+  });
+}

@@ -1,0 +1,88 @@
+import { relayPeerIdSchema, relayRoomIdSchema } from "@coc-room/protocol";
+
+export interface RoomInvitationV1 {
+  version: 1;
+  roomId: string;
+  token: string;
+  hostPeerId: string;
+  relayUrl: string;
+}
+
+const PREFIX = "coc-room:v1:";
+
+function toBase64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function fromBase64Url(value: string): string {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+}
+
+export function encodeInvitation(invitation: RoomInvitationV1): string {
+  return `${PREFIX}${toBase64Url(JSON.stringify(validateInvitation(invitation)))}`;
+}
+
+export function decodeInvitation(value: string): RoomInvitationV1 {
+  const input = value.trim();
+  if (!input.startsWith(PREFIX)) {
+    throw new Error("邀请串格式不正确");
+  }
+  if (input.length > 8_192) throw new Error("邀请串过长");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fromBase64Url(input.slice(PREFIX.length)));
+  } catch {
+    throw new Error("邀请串无法解析");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as Record<string, unknown>).version !== 1 ||
+    typeof (parsed as Record<string, unknown>).roomId !== "string" ||
+    typeof (parsed as Record<string, unknown>).token !== "string" ||
+    typeof (parsed as Record<string, unknown>).hostPeerId !== "string" ||
+    typeof (parsed as Record<string, unknown>).relayUrl !== "string"
+  ) {
+    throw new Error("邀请串缺少必要字段");
+  }
+  return validateInvitation(parsed as RoomInvitationV1);
+}
+
+export function randomToken(byteLength = 24): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function validateInvitation(invitation: RoomInvitationV1): RoomInvitationV1 {
+  if (!relayRoomIdSchema.safeParse(invitation.roomId).success) {
+    throw new Error("邀请串中的房间 ID 无效");
+  }
+  if (!relayPeerIdSchema.safeParse(invitation.hostPeerId).success) {
+    throw new Error("邀请串中的房主 ID 无效");
+  }
+  if (invitation.token.length < 20 || invitation.token.length > 128) {
+    throw new Error("邀请串中的入房令牌无效");
+  }
+  if (invitation.relayUrl.length > 2_048) throw new Error("邀请串中的中继地址过长");
+
+  let url: URL;
+  try {
+    url = new URL(invitation.relayUrl);
+  } catch {
+    throw new Error("邀请串中的中继地址无效");
+  }
+  const localHost = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "wss:" && !(url.protocol === "ws:" && localHost)) {
+    throw new Error("公网邀请必须使用 WSS 中继（仅本机允许 WS）");
+  }
+  if (url.username || url.password) throw new Error("中继地址不得包含 URL 凭据");
+  return invitation;
+}

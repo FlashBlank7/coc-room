@@ -1,0 +1,28 @@
+{
+  "name": "@coc-room/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ephemeral WebRTC signaling and WebSocket relay for CoC Room",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "vitest run --maxWorkers=1 --no-isolate",
+    "test:watch": "vitest --maxWorkers=1 --no-isolate",
+    "types": "wrangler types src/worker-configuration.d.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.1",
+    "@cloudflare/workers-types": "^5.20260827.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.3.1",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.0"
+  }
+}
