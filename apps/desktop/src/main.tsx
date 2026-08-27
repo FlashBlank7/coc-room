@@ -21,6 +21,7 @@ import {
   type ParserError,
   type ParserResult,
 } from "./lib/module-parser";
+import { createStorageSmokeMarker } from "./lib/storage-smoke";
 import "./styles.css";
 
 type AutomatedSmokeMode = NetworkDiagnosticMode | "storage";
@@ -106,7 +107,7 @@ async function runStorageSmoke(): Promise<Record<string, unknown>> {
   const runId = crypto.randomUUID();
   const roomId = `storage-smoke-${runId}`;
   const hostPeerId = `storage-host-${runId}`;
-  const marker = `storage_smoke_marker_${runId.replaceAll("-", "")}`;
+  const marker = createStorageSmokeMarker(runId);
   const now = new Date().toISOString();
   const room: RoomRecord = {
     id: roomId,
