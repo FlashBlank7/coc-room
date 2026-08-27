@@ -101,14 +101,7 @@ jobs:
           New-Item -ItemType Directory -Force apps/desktop/src-tauri/binaries | Out-Null
           Copy-Item services/module-parser/dist/coc-module-parser-x86_64-pc-windows-msvc.exe apps/desktop/src-tauri/binaries/module-parser-x86_64-pc-windows-msvc.exe -Force
       - name: Smoke-test frozen sidecar
-        shell: pwsh
-        run: |
-          $binary = "apps/desktop/src-tauri/binaries/module-parser-x86_64-pc-windows-msvc.exe"
-          $request = @{ id = "ci-frozen-smoke"; action = "parse_module"; source_text = "# Smoke`nLocation: Archive"; source_name = "smoke.md"; model = "deterministic-v1"; mock = $true } | ConvertTo-Json -Compress
-          $output = $request | & $binary
-          if ($LASTEXITCODE -ne 0) { throw "Frozen sidecar exited with $LASTEXITCODE" }
-          $messages = @($output | ForEach-Object { $_ | ConvertFrom-Json })
-          if (-not ($messages | Where-Object { $_.type -eq "result" })) { throw "Frozen sidecar produced no result" }
+        run: pnpm smoke:sidecar
       - name: Check and test Rust bridge
         shell: pwsh
         run: |

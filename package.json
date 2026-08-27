@@ -15,6 +15,7 @@
     "dev:desktop": "pnpm --filter @coc-room/protocol build && pnpm --parallel --filter @coc-room/protocol --filter @coc-room/desktop dev",
     "dev:relay": "pnpm --filter @coc-room/relay dev",
     "prepare:windows": "powershell -ExecutionPolicy Bypass -File scripts/prepare-windows.ps1",
+    "smoke:sidecar": "node services/module-parser/scripts/smoke-frozen.mjs",
     "dev:tauri": "pnpm prepare:windows && pnpm --filter @coc-room/desktop tauri dev",
     "build:windows": "pnpm prepare:windows && pnpm --filter @coc-room/desktop tauri build --target x86_64-pc-windows-msvc"
   }
