@@ -107,6 +107,17 @@ export function App() {
       setSession(next);
     } catch (error) {
       next.stop();
+      // A failed replacement connection must not leave the previous room
+      // looking active while its session has already been stopped. Keep all
+      // persisted rooms available for recovery in the lobby.
+      try {
+        useAppStore.getState().setRooms(await repository.listRooms());
+      } catch {
+        // Preserve the original connection error if refreshing records fails.
+      }
+      useAppStore.getState().leaveRoom();
+      setIsViewingLocalRecord(false);
+      setSession(undefined);
       const message = error instanceof Error ? error.message : String(error);
       useAppStore.getState().setConnectionError(message);
       throw error;

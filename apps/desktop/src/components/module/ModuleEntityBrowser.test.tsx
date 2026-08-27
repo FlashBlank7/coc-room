@@ -28,6 +28,19 @@ describe("ModuleEntityBrowser", () => {
     expect(screen.getByText(/也是她被绑架后的现场/)).toBeTruthy();
   });
 
+  it("focuses the exact NPC or location card selected from the overview", () => {
+    render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
+    const directory = screen.getByRole("article", { name: /速览/ });
+
+    fireEvent.click(within(directory).getByTitle("npc:eiya"));
+    expect(screen.getByRole("tab", { name: /NPC/ }).getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement?.getAttribute("id")).toBe("npc:eiya");
+
+    fireEvent.click(screen.getAllByRole("tab")[0]!);
+    fireEvent.click(screen.getByTitle("location:ageya"));
+    expect(document.activeElement?.getAttribute("id")).toBe("location:ageya");
+  });
+
   it("searches the active category across body text, IDs, and source excerpts", () => {
     render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
     fireEvent.click(screen.getByRole("tab", { name: /NPC/ }));

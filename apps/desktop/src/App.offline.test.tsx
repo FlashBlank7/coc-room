@@ -2,6 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { encodeInvitation } from "./lib/invitation";
 import type { LocalRepository, RoomRecord } from "./data/repository";
 import type { RoomEventV1 } from "@coc-room/protocol";
 import { useAppStore } from "./store/app-store";
@@ -9,6 +10,8 @@ import { useAppStore } from "./store/app-store";
 const mocks = vi.hoisted(() => ({
   getRepository: vi.fn(),
   roomSessionConstructor: vi.fn(),
+  roomSessionStart: vi.fn(),
+  roomSessionStop: vi.fn(),
 }));
 
 vi.mock("./data/repository", async (importOriginal) => {
@@ -20,6 +23,14 @@ vi.mock("./network/RoomSession", () => ({
   RoomSession: class MockRoomSession {
     constructor(options: unknown) {
       mocks.roomSessionConstructor(options);
+    }
+
+    start() {
+      return mocks.roomSessionStart();
+    }
+
+    stop() {
+      mocks.roomSessionStop();
     }
   },
 }));
@@ -59,6 +70,8 @@ beforeEach(() => {
   } as unknown as LocalRepository;
   mocks.getRepository.mockResolvedValue(repository);
   mocks.roomSessionConstructor.mockClear();
+  mocks.roomSessionStart.mockReset().mockResolvedValue(undefined);
+  mocks.roomSessionStop.mockClear();
   useAppStore.setState({
     activeView: "lobby",
     currentRoom: undefined,
@@ -89,5 +102,30 @@ describe("App local record mode", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "返回大厅" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "开始一次调查" })).toBeTruthy());
+  });
+});
+
+describe("App failed room replacement", () => {
+  it("clears stale active-room state while preserving saved room records", async () => {
+    const invitation = encodeInvitation({
+      version: 1,
+      roomId: "joined-room-id-12345",
+      token: "host-id-1234." + "s".repeat(43),
+      hostPeerId: "host-id-1234",
+      relayUrl: "ws://127.0.0.1:8787/v1/rooms/joined-room-id-12345/ws",
+    });
+    mocks.roomSessionStart.mockRejectedValue(new Error("relay unavailable"));
+    useAppStore.setState({ currentRoom: room, activeView: "lobby", rooms: [room] });
+    render(<App />);
+
+    fireEvent.change(screen.getAllByRole("textbox")[2]!, { target: { value: "player" } });
+    fireEvent.change(screen.getAllByRole("textbox")[3]!, { target: { value: invitation } });
+    fireEvent.click(screen.getByRole("button", { name: /解析邀请并加入/ }));
+
+    await screen.findByText("relay unavailable");
+    expect(useAppStore.getState().currentRoom).toBeUndefined();
+    expect(useAppStore.getState().activeView).toBe("lobby");
+    expect(useAppStore.getState().rooms).toContainEqual(room);
+    expect(mocks.roomSessionStop).toHaveBeenCalledOnce();
   });
 });

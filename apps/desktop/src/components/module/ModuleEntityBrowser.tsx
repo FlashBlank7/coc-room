@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ModulePackageV1, SourceReferenceV1 } from "@coc-room/protocol";
 import {
   BookOpen,
@@ -68,6 +68,7 @@ const categoryDefinitions: ReadonlyArray<{
 export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePackageV1 }) {
   const [category, setCategory] = useState<Category>("overview");
   const [query, setQuery] = useState("");
+  const [focusEntityId, setFocusEntityId] = useState<string>();
   const sourceNames = useMemo(
     () => new Map(modulePackage.sourceDocuments.map((source) => [source.id, source.name])),
     [modulePackage.sourceDocuments],
@@ -75,6 +76,25 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
   const entityNames = useMemo(() => buildEntityNames(modulePackage), [modulePackage]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
+
+  const selectCategory = (nextCategory: Category) => {
+    setCategory(nextCategory);
+    setFocusEntityId(undefined);
+  };
+
+  const selectEntity = (nextCategory: Category, entityId: string) => {
+    setCategory(nextCategory);
+    setFocusEntityId(entityId);
+  };
+
+  useEffect(() => {
+    if (!focusEntityId) return;
+    const target = document.getElementById(focusEntityId);
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setFocusEntityId(undefined);
+  }, [category, focusEntityId]);
 
   return (
     <section className="grid gap-4" aria-label={`${modulePackage.metadata.title}模组内容浏览`}>
@@ -109,7 +129,7 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
                     ? "border-brass/70 bg-brass/15 text-amber-200"
                     : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
                 )}
-                onClick={() => setCategory(definition.id)}
+                onClick={() => selectCategory(definition.id)}
               >
                 <Icon className="h-3.5 w-3.5" aria-hidden="true" />
                 {definition.label}
@@ -141,7 +161,8 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
           query={normalizedQuery}
           sourceNames={sourceNames}
           entityNames={entityNames}
-          onSelectCategory={setCategory}
+          onSelectCategory={selectCategory}
+          onSelectEntity={selectEntity}
         />
       </div>
     </section>
@@ -155,6 +176,7 @@ function CategoryContent({
   sourceNames,
   entityNames,
   onSelectCategory,
+  onSelectEntity,
 }: {
   category: Category;
   modulePackage: ModulePackageV1;
@@ -162,6 +184,7 @@ function CategoryContent({
   sourceNames: ReadonlyMap<string, string>;
   entityNames: ReadonlyMap<string, string>;
   onSelectCategory: (category: Category) => void;
+  onSelectEntity: (category: Category, entityId: string) => void;
 }) {
   if (category === "overview") {
     const overviewMatches = matchesQuery(query, [
@@ -176,6 +199,7 @@ function CategoryContent({
         modulePackage={modulePackage}
         entityNames={entityNames}
         onSelectCategory={onSelectCategory}
+        onSelectEntity={onSelectEntity}
       />
     );
   }
@@ -256,10 +280,12 @@ function OverviewCards({
   modulePackage,
   entityNames,
   onSelectCategory,
+  onSelectEntity,
 }: {
   modulePackage: ModulePackageV1;
   entityNames: ReadonlyMap<string, string>;
   onSelectCategory: (category: Category) => void;
+  onSelectEntity: (category: Category, entityId: string) => void;
 }) {
   const parserProvenance = getModuleParserProvenance(modulePackage);
   const stats = [
@@ -350,7 +376,8 @@ function OverviewCards({
                       type="button"
                       title={item.id}
                       className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-left text-xs text-zinc-300 transition hover:border-brass/50 hover:text-amber-200"
-                      onClick={() => onSelectCategory(category)}
+                      aria-controls={item.id}
+                      onClick={() => onSelectEntity(category, item.id)}
                     >
                       {item.name}
                     </button>
@@ -619,7 +646,7 @@ function EntityCard({
   children: ReactNode;
 }) {
   return (
-    <article className="grid gap-4 rounded-xl border border-zinc-800 bg-zinc-900/70 p-4">
+    <article id={id} tabIndex={-1} className="grid gap-4 rounded-xl border border-zinc-800 bg-zinc-900/70 p-4 focus:outline-none focus:ring-2 focus:ring-brass/60">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-800 pb-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
