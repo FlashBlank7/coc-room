@@ -30,6 +30,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const browserImportRef = useRef<HTMLInputElement>(null);
+  const canManageRoomModule = currentRoom?.localRole === "host" && session?.isHost === true;
   const parsedDraft = useMemo(() => {
     try { return modulePackageSchema.safeParse(JSON.parse(draft)); } catch { return undefined; }
   }, [draft]);
@@ -269,10 +270,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                       <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
                     </Button>
                     <Button variant="ghost" className="h-8 px-2" onClick={() => void exportPackage(modulePackage)}><Download className="h-4 w-4" /></Button>
-                    {currentRoom?.localRole === "host" && <Button variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
+                    {canManageRoomModule && <Button aria-label={`切换房间模组：${modulePackage.metadata.title}`} variant="ghost" className="h-8 px-2" onClick={() => void switchModule(modulePackage)}><BookOpen className="h-4 w-4" /></Button>}
                     <Button variant="ghost" className="ml-auto h-8 px-2 text-red-400" onClick={() => void remove(modulePackage.moduleId)}><Trash2 className="h-4 w-4" /></Button>
                   </div>
-                  {currentRoom?.localRole === "host" && session && (modulePackage.clues.length > 0 || modulePackage.handouts.length > 0) && (
+                  {canManageRoomModule && (modulePackage.clues.length > 0 || modulePackage.handouts.length > 0) && (
                     <details className="mt-3 border-t border-zinc-800 pt-2">
                       <summary className="cursor-pointer text-xs text-zinc-400">选择公开内容</summary>
                       <div className="mt-2 grid max-h-52 gap-1 overflow-y-auto">
@@ -280,6 +281,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                           <button
                             key={clue.id}
                             type="button"
+                            aria-label={`公开线索：${clue.name}`}
                             disabled={!clue.revealText.trim()}
                             className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
                             title={clue.revealText ? "只公开玩家可见文本" : "公开标题；此线索尚无玩家可见正文"}
@@ -292,6 +294,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                           <button
                             key={handout.id}
                             type="button"
+                            aria-label={`公开手记：${handout.title}`}
                             disabled={!handout.content.trim()}
                             className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
                             onClick={() => void revealContent(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
