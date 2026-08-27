@@ -11,6 +11,11 @@ import { App } from "./App";
 import { getRepository, type RoomRecord } from "./data/repository";
 import { runNetworkDiagnostic, type NetworkDiagnosticMode } from "./lib/network-diagnostic";
 import {
+  runProcessNetworkDiagnostic,
+  type NetworkProcessRole,
+  type NetworkSmokeRendezvous,
+} from "./lib/process-network-diagnostic";
+import {
   getModuleParserProvenance,
   parseModule,
   type ParserError,
@@ -23,6 +28,8 @@ type AutomatedSmokeMode = NetworkDiagnosticMode | "storage";
 interface NetworkSmokeConfig {
   relayUrl?: string;
   mode: AutomatedSmokeMode;
+  processRole?: NetworkProcessRole;
+  runId?: string;
 }
 
 interface StorageSmokeExportResult {
@@ -62,7 +69,16 @@ async function runAutomatedSmoke(config: NetworkSmokeConfig): Promise<void> {
   try {
     const result = config.mode === "storage"
       ? await runStorageSmoke()
-      : await runNetworkDiagnostic(requireRelayUrl(config), config.mode);
+      : config.processRole
+        ? await runProcessNetworkDiagnostic({
+          relayOrigin: requireRelayUrl(config),
+          mode: config.mode,
+          role: config.processRole,
+          runId: requireProcessRunId(config),
+          publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
+          readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
+        })
+        : await runNetworkDiagnostic(requireRelayUrl(config), config.mode);
     root.render(<SmokeStatus message={`${smokeModeLabel(config.mode)}自检通过`} />);
     await invoke("finish_network_smoke", {
       report: {
@@ -90,7 +106,7 @@ async function runStorageSmoke(): Promise<Record<string, unknown>> {
   const runId = crypto.randomUUID();
   const roomId = `storage-smoke-${runId}`;
   const hostPeerId = `storage-host-${runId}`;
-  const marker = `storage-smoke-marker-${runId}`;
+  const marker = `storage_smoke_marker_${runId.replaceAll("-", "")}`;
   const now = new Date().toISOString();
   const room: RoomRecord = {
     id: roomId,
@@ -225,6 +241,11 @@ async function runStorageSmoke(): Promise<Record<string, unknown>> {
 function requireRelayUrl(config: NetworkSmokeConfig): string {
   if (!config.relayUrl) throw new Error(`${config.mode} smoke 缺少中继 URL`);
   return config.relayUrl;
+}
+
+function requireProcessRunId(config: NetworkSmokeConfig): string {
+  if (!config.runId) throw new Error(`${config.mode} multi-process smoke 缺少运行 ID`);
+  return config.runId;
 }
 
 function smokeModeLabel(mode: AutomatedSmokeMode): string {

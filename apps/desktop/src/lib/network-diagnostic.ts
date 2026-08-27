@@ -12,7 +12,7 @@ export interface NetworkDiagnosticResult {
   payloadBytes: number;
 }
 
-interface CreatedRelayRoom {
+export interface CreatedRelayRoom {
   roomId: string;
   hostPeerId: string;
   hostToken: string;
@@ -148,7 +148,7 @@ export async function runNetworkDiagnostic(
   }
 }
 
-async function createRelayRoom(origin: string, hostPeerId: string): Promise<CreatedRelayRoom> {
+export async function createRelayRoom(origin: string, hostPeerId: string): Promise<CreatedRelayRoom> {
   const normalized = origin.replace(/\/$/u, "").replace(/^ws:/u, "http:").replace(/^wss:/u, "https:");
   const response = await fetch(`${normalized}/v1/rooms`, {
     method: "POST",

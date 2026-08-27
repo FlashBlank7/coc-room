@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    fs::OpenOptions,
-    io::Write,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -29,6 +29,7 @@ const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_SMOKE_REPORT_BYTES: usize = 64 * 1024;
+const MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES: usize = 8 * 1024;
 const MAX_STORAGE_SMOKE_EXPORT_BYTES: usize = 2 * 1024 * 1024;
 const STORAGE_SMOKE_MARKDOWN_FILE: &str = "transcript.md";
 const STORAGE_SMOKE_HTML_FILE: &str = "transcript.html";
@@ -39,6 +40,22 @@ struct NetworkSmokeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_url: Option<String>,
     mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkSmokeRendezvous {
+    protocol_version: u8,
+    run_id: String,
+    mode: String,
+    room_id: String,
+    host_peer_id: String,
+    join_token: String,
+    websocket_url: String,
 }
 
 #[derive(Serialize)]
@@ -188,6 +205,13 @@ fn network_smoke_config() -> Result<Option<NetworkSmokeConfig>, String> {
         std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref(),
         std::env::var("COC_ROOM_NETWORK_SMOKE_URL").ok().as_deref(),
         std::env::var("COC_ROOM_NETWORK_SMOKE_MODE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_ROLE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_COORDINATION")
+            .ok()
+            .as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_RUN_ID")
+            .ok()
+            .as_deref(),
     )
 }
 
@@ -195,6 +219,9 @@ fn parse_network_smoke_config(
     enabled: Option<&str>,
     relay_url: Option<&str>,
     mode: Option<&str>,
+    process_role: Option<&str>,
+    coordination_path: Option<&str>,
+    run_id: Option<&str>,
 ) -> Result<Option<NetworkSmokeConfig>, String> {
     if enabled != Some("1") {
         return Ok(None);
@@ -221,7 +248,186 @@ fn parse_network_smoke_config(
         }
         Some(relay_url)
     };
-    Ok(Some(NetworkSmokeConfig { relay_url, mode }))
+    let has_process_coordination =
+        process_role.is_some() || coordination_path.is_some() || run_id.is_some();
+    let process_role = if has_process_coordination {
+        if !matches!(mode.as_str(), "direct" | "relay") {
+            return Err(
+                "multi-process smoke is available only for direct or relay mode".to_string(),
+            );
+        }
+        let role = process_role
+            .filter(|role| matches!(*role, "host" | "player"))
+            .ok_or_else(|| "multi-process smoke role must be host or player".to_string())?;
+        let path = coordination_path
+            .map(Path::new)
+            .ok_or_else(|| "multi-process smoke coordination path is required".to_string())?;
+        validate_absolute_file_parent(path, "multi-process smoke coordination")?;
+        let run_id = run_id
+            .filter(|candidate| is_smoke_identifier(candidate))
+            .ok_or_else(|| "multi-process smoke run ID is invalid".to_string())?;
+        Some((role.to_string(), run_id.to_string()))
+    } else {
+        None
+    };
+    Ok(Some(NetworkSmokeConfig {
+        relay_url,
+        mode,
+        process_role: process_role.as_ref().map(|(role, _)| role.clone()),
+        run_id: process_role.map(|(_, run_id)| run_id),
+    }))
+}
+
+fn is_smoke_identifier(value: &str) -> bool {
+    (16..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn validate_absolute_file_parent(path: &Path, label: &str) -> Result<PathBuf, String> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(format!("{label} path must be an absolute file path"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} path has no parent"))?
+        .canonicalize()
+        .map_err(|_| format!("{label} directory does not exist"))?;
+    Ok(parent.join(
+        path.file_name()
+            .ok_or_else(|| format!("{label} path has no file name"))?,
+    ))
+}
+
+fn network_smoke_process_context(expected_role: &str) -> Result<(String, String, PathBuf), String> {
+    let config = parse_network_smoke_config(
+        std::env::var("COC_ROOM_NETWORK_SMOKE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_URL").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_MODE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_ROLE").ok().as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_COORDINATION")
+            .ok()
+            .as_deref(),
+        std::env::var("COC_ROOM_NETWORK_SMOKE_RUN_ID")
+            .ok()
+            .as_deref(),
+    )?
+    .ok_or_else(|| "network smoke mode is not enabled".to_string())?;
+    if config.process_role.as_deref() != Some(expected_role) {
+        return Err(format!(
+            "network smoke rendezvous command requires the {expected_role} role"
+        ));
+    }
+    let run_id = config
+        .run_id
+        .ok_or_else(|| "multi-process smoke run ID is missing".to_string())?;
+    let target = validate_absolute_file_parent(
+        Path::new(
+            &std::env::var("COC_ROOM_NETWORK_SMOKE_COORDINATION")
+                .map_err(|_| "multi-process smoke coordination path is required".to_string())?,
+        ),
+        "multi-process smoke coordination",
+    )?;
+    Ok((config.mode, run_id, target))
+}
+
+fn validate_network_smoke_rendezvous(
+    rendezvous: &NetworkSmokeRendezvous,
+    expected_mode: &str,
+    expected_run_id: &str,
+) -> Result<(), String> {
+    if rendezvous.protocol_version != 1
+        || rendezvous.mode != expected_mode
+        || rendezvous.run_id != expected_run_id
+    {
+        return Err("network smoke rendezvous does not match this run".to_string());
+    }
+    if !is_smoke_identifier(&rendezvous.room_id)
+        || !(8..=64).contains(&rendezvous.host_peer_id.len())
+        || !rendezvous
+            .host_peer_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("network smoke rendezvous room identity is invalid".to_string());
+    }
+    if !(20..=128).contains(&rendezvous.join_token.len())
+        || !rendezvous
+            .join_token
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+    {
+        return Err("network smoke rendezvous join token is invalid".to_string());
+    }
+    let websocket_url = rendezvous.websocket_url.as_str();
+    if websocket_url.len() > 2_048
+        || !(websocket_url.starts_with("ws://127.0.0.1:")
+            || websocket_url.starts_with("ws://localhost:")
+            || websocket_url.starts_with("wss://"))
+    {
+        return Err(
+            "network smoke rendezvous WebSocket URL must use WSS or loopback WS".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn persist_network_smoke_rendezvous(
+    target: &Path,
+    rendezvous: &NetworkSmokeRendezvous,
+    expected_mode: &str,
+    expected_run_id: &str,
+) -> Result<(), String> {
+    validate_network_smoke_rendezvous(rendezvous, expected_mode, expected_run_id)?;
+    let serialized = serde_json::to_vec(rendezvous)
+        .map_err(|_| "network smoke rendezvous could not be serialized".to_string())?;
+    if serialized.len() > MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES {
+        return Err("network smoke rendezvous exceeds the size limit".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|error| format!("cannot create network smoke rendezvous: {error}"))?;
+    file.write_all(&serialized)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("cannot persist network smoke rendezvous: {error}"))
+}
+
+fn load_network_smoke_rendezvous(
+    target: &Path,
+    expected_mode: &str,
+    expected_run_id: &str,
+) -> Result<Option<NetworkSmokeRendezvous>, String> {
+    let file = match File::open(target) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read network smoke rendezvous: {error}")),
+    };
+    let mut serialized = Vec::new();
+    std::io::Read::take(file, (MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES + 1) as u64)
+        .read_to_end(&mut serialized)
+        .map_err(|error| format!("cannot read network smoke rendezvous: {error}"))?;
+    if serialized.len() > MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES {
+        return Err("network smoke rendezvous exceeds the size limit".to_string());
+    }
+    let rendezvous: NetworkSmokeRendezvous = serde_json::from_slice(&serialized)
+        .map_err(|_| "network smoke rendezvous is invalid JSON".to_string())?;
+    validate_network_smoke_rendezvous(&rendezvous, expected_mode, expected_run_id)?;
+    Ok(Some(rendezvous))
+}
+
+#[tauri::command]
+fn publish_network_smoke_rendezvous(rendezvous: NetworkSmokeRendezvous) -> Result<(), String> {
+    let (mode, run_id, target) = network_smoke_process_context("host")?;
+    persist_network_smoke_rendezvous(&target, &rendezvous, &mode, &run_id)
+}
+
+#[tauri::command]
+fn read_network_smoke_rendezvous() -> Result<Option<NetworkSmokeRendezvous>, String> {
+    let (mode, run_id, target) = network_smoke_process_context("player")?;
+    load_network_smoke_rendezvous(&target, &mode, &run_id)
 }
 
 #[tauri::command]
@@ -682,6 +888,8 @@ pub fn run() {
             has_deepseek_key,
             delete_deepseek_key,
             network_smoke_config,
+            publish_network_smoke_rendezvous,
+            read_network_smoke_rendezvous,
             finish_network_smoke,
             write_storage_smoke_exports,
             select_module_source,
@@ -777,28 +985,125 @@ mod tests {
 
     #[test]
     fn network_smoke_configuration_is_explicit_and_restricts_plain_http() {
-        assert!(parse_network_smoke_config(None, None, None)
-            .expect("disabled smoke mode should be valid")
-            .is_none());
+        assert!(
+            parse_network_smoke_config(None, None, None, None, None, None)
+                .expect("disabled smoke mode should be valid")
+                .is_none()
+        );
         assert!(parse_network_smoke_config(
             Some("1"),
             Some("http://relay.example.test"),
-            Some("direct")
+            Some("direct"),
+            None,
+            None,
+            None,
         )
         .is_err());
 
-        let config =
-            parse_network_smoke_config(Some("1"), Some("http://127.0.0.1:8787"), Some("relay"))
-                .expect("loopback relay smoke should be accepted")
-                .expect("enabled smoke should return a configuration");
+        let config = parse_network_smoke_config(
+            Some("1"),
+            Some("http://127.0.0.1:8787"),
+            Some("relay"),
+            None,
+            None,
+            None,
+        )
+        .expect("loopback relay smoke should be accepted")
+        .expect("enabled smoke should return a configuration");
         assert_eq!(config.relay_url.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(config.mode, "relay");
 
-        let storage = parse_network_smoke_config(Some("1"), None, Some("storage"))
-            .expect("storage smoke should not require a relay URL")
-            .expect("storage smoke should return a configuration");
+        let storage =
+            parse_network_smoke_config(Some("1"), None, Some("storage"), None, None, None)
+                .expect("storage smoke should not require a relay URL")
+                .expect("storage smoke should return a configuration");
         assert!(storage.relay_url.is_none());
         assert_eq!(storage.mode, "storage");
+    }
+
+    #[test]
+    fn multi_process_network_smoke_requires_complete_isolated_coordination() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "coc-room-process-smoke-config-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("unique smoke directory should be created");
+        let coordination = directory.join("rendezvous.json");
+        let coordination_text = coordination.to_string_lossy();
+
+        assert!(parse_network_smoke_config(
+            Some("1"),
+            Some("http://127.0.0.1:8787"),
+            Some("direct"),
+            Some("host"),
+            None,
+            Some("run_1234567890abcdef"),
+        )
+        .is_err());
+        let config = parse_network_smoke_config(
+            Some("1"),
+            Some("http://127.0.0.1:8787"),
+            Some("direct"),
+            Some("host"),
+            Some(&coordination_text),
+            Some("run_1234567890abcdef"),
+        )
+        .expect("complete multi-process configuration should be accepted")
+        .expect("enabled smoke should return a configuration");
+        assert_eq!(config.process_role.as_deref(), Some("host"));
+        assert_eq!(config.run_id.as_deref(), Some("run_1234567890abcdef"));
+        assert!(parse_network_smoke_config(
+            Some("1"),
+            None,
+            Some("storage"),
+            Some("player"),
+            Some(&coordination_text),
+            Some("run_1234567890abcdef"),
+        )
+        .is_err());
+
+        std::fs::remove_dir(&directory).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn network_smoke_rendezvous_is_run_bound_size_limited_and_never_overwritten() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "coc-room-process-smoke-rendezvous-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("unique smoke directory should be created");
+        let target = directory.join("rendezvous.json");
+        let run_id = "run_1234567890abcdef";
+        let rendezvous = NetworkSmokeRendezvous {
+            protocol_version: 1,
+            run_id: run_id.to_string(),
+            mode: "relay".to_string(),
+            room_id: "room_1234567890abcdef".to_string(),
+            host_peer_id: "smoke-host-1234567890abcdef".to_string(),
+            join_token: "smoke-host-1234567890abcdef.secret_token_1234567890".to_string(),
+            websocket_url: "ws://127.0.0.1:8787/v1/rooms/test/ws".to_string(),
+        };
+
+        persist_network_smoke_rendezvous(&target, &rendezvous, "relay", run_id)
+            .expect("first rendezvous publish should create the file");
+        assert!(persist_network_smoke_rendezvous(&target, &rendezvous, "relay", run_id).is_err());
+        let loaded = load_network_smoke_rendezvous(&target, "relay", run_id)
+            .expect("matching rendezvous should be readable")
+            .expect("published rendezvous should exist");
+        assert_eq!(loaded.run_id, run_id);
+        assert_eq!(loaded.join_token, rendezvous.join_token);
+        assert!(load_network_smoke_rendezvous(&target, "relay", "other_1234567890abcd").is_err());
+
+        std::fs::remove_file(&target).expect("test rendezvous should be removed");
+        std::fs::remove_dir(&directory).expect("test directory should be removed");
     }
 
     #[test]

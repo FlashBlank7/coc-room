@@ -167,61 +167,126 @@ jobs:
             if (-not $app) { throw "Built desktop executable was not found" }
 
             foreach ($mode in @("direct", "relay", "storage")) {
-              $resultPath = Join-Path $env:RUNNER_TEMP "network-$mode.json"
               $env:COC_ROOM_NETWORK_SMOKE = "1"
               $env:COC_ROOM_NETWORK_SMOKE_URL = "http://127.0.0.1:8787"
               $env:COC_ROOM_NETWORK_SMOKE_MODE = $mode
-              $env:COC_ROOM_NETWORK_SMOKE_RESULT = $resultPath
-              $storageExportDir = $null
-              if ($mode -eq "storage") {
-                $storageExportDir = Join-Path $env:RUNNER_TEMP "storage-smoke-$([guid]::NewGuid().ToString('N'))"
-                New-Item -ItemType Directory -Path $storageExportDir | Out-Null
-                $env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR = $storageExportDir
-              } else {
+              if ($mode -ne "storage") {
                 Remove-Item Env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR -ErrorAction SilentlyContinue
+                $runId = [guid]::NewGuid().ToString("N")
+                $runDirectory = Join-Path $env:RUNNER_TEMP "network-$mode-$runId"
+                New-Item -ItemType Directory -Path $runDirectory | Out-Null
+                $coordinationPath = Join-Path $runDirectory "rendezvous.json"
+                $hostResultPath = Join-Path $runDirectory "host.json"
+                $playerResultPath = Join-Path $runDirectory "player.json"
+                $hostProcess = $null
+                $playerProcess = $null
+                try {
+                  $env:COC_ROOM_NETWORK_SMOKE_COORDINATION = $coordinationPath
+                  $env:COC_ROOM_NETWORK_SMOKE_RUN_ID = $runId
+                  $env:COC_ROOM_NETWORK_SMOKE_ROLE = "host"
+                  $env:COC_ROOM_NETWORK_SMOKE_RESULT = $hostResultPath
+                  $hostProcess = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
+
+                  foreach ($attempt in 1..120) {
+                    if (Test-Path -LiteralPath $coordinationPath -PathType Leaf) { break }
+                    if ($hostProcess.HasExited) { throw "Desktop $mode host exited before publishing rendezvous" }
+                    Start-Sleep -Milliseconds 250
+                  }
+                  if (-not (Test-Path -LiteralPath $coordinationPath -PathType Leaf)) {
+                    throw "Desktop $mode host did not publish rendezvous within 30 seconds"
+                  }
+
+                  $env:COC_ROOM_NETWORK_SMOKE_ROLE = "player"
+                  $env:COC_ROOM_NETWORK_SMOKE_RESULT = $playerResultPath
+                  $playerProcess = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
+                  if ($hostProcess.Id -eq $playerProcess.Id) { throw "Network smoke did not launch distinct processes" }
+
+                  foreach ($attempt in 1..180) {
+                    if ((Test-Path -LiteralPath $hostResultPath) -and (Test-Path -LiteralPath $playerResultPath)) { break }
+                    if ($hostProcess.HasExited -and -not (Test-Path -LiteralPath $hostResultPath)) {
+                      throw "Desktop $mode host exited before reporting"
+                    }
+                    if ($playerProcess.HasExited -and -not (Test-Path -LiteralPath $playerResultPath)) {
+                      throw "Desktop $mode player exited before reporting"
+                    }
+                    Start-Sleep -Milliseconds 500
+                  }
+                  if (-not (Test-Path -LiteralPath $hostResultPath) -or -not (Test-Path -LiteralPath $playerResultPath)) {
+                    throw "Two-process desktop $mode smoke did not report within 90 seconds"
+                  }
+
+                  foreach ($expected in @(
+                    @{ Role = "host"; Path = $hostResultPath },
+                    @{ Role = "player"; Path = $playerResultPath }
+                  )) {
+                    $report = Get-Content -LiteralPath $expected.Path -Raw | ConvertFrom-Json
+                    if (-not $report.ok) { throw "Desktop $mode $($expected.Role) failed: $($report.message)" }
+                    if ($report.details.role -ne $expected.Role -or $report.details.mode -ne $mode) {
+                      throw "Desktop $mode report role or mode does not match its process"
+                    }
+                    if ($report.details.runId -ne $runId) { throw "Desktop $mode report escaped its run ID" }
+                    if ($report.details.path -ne $mode) { throw "Desktop $mode used $($report.details.path) instead" }
+                    if ($report.details.outgoingPayloadBytes -le 65536 -or $report.details.incomingPayloadBytes -le 65536) {
+                      throw "Desktop $mode did not exchange large payloads in both directions"
+                    }
+                    if (-not $report.details.bidirectionalAcknowledgements) {
+                      throw "Desktop $mode did not verify bidirectional receipt"
+                    }
+                  }
+                } finally {
+                  if ($playerProcess -and -not $playerProcess.HasExited) { Stop-Process -Id $playerProcess.Id -Force }
+                  if ($hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force }
+                  foreach ($path in @($coordinationPath, $hostResultPath, $playerResultPath)) {
+                    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+                  }
+                  if (Test-Path -LiteralPath $runDirectory) { Remove-Item -LiteralPath $runDirectory -Force }
+                  Remove-Item Env:COC_ROOM_NETWORK_SMOKE_COORDINATION -ErrorAction SilentlyContinue
+                  Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RUN_ID -ErrorAction SilentlyContinue
+                  Remove-Item Env:COC_ROOM_NETWORK_SMOKE_ROLE -ErrorAction SilentlyContinue
+                }
+                continue
               }
+
+              $resultPath = Join-Path $env:RUNNER_TEMP "network-storage-$([guid]::NewGuid().ToString('N')).json"
+              $env:COC_ROOM_NETWORK_SMOKE_RESULT = $resultPath
+              $storageExportDir = Join-Path $env:RUNNER_TEMP "storage-smoke-$([guid]::NewGuid().ToString('N'))"
+              New-Item -ItemType Directory -Path $storageExportDir | Out-Null
+              $env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR = $storageExportDir
               $process = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
               try {
-                $attemptLimit = if ($mode -eq "storage") { 240 } else { 60 }
-                foreach ($attempt in 1..$attemptLimit) {
+                foreach ($attempt in 1..240) {
                   if (Test-Path -LiteralPath $resultPath) { break }
-                  if ($process.HasExited) { throw "Desktop $mode smoke exited before reporting" }
+                  if ($process.HasExited) { throw "Desktop storage smoke exited before reporting" }
                   Start-Sleep -Milliseconds 500
                 }
-                if (-not (Test-Path -LiteralPath $resultPath)) {
-                  throw "Desktop $mode smoke did not report within $($attemptLimit / 2) seconds"
-                }
+                if (-not (Test-Path -LiteralPath $resultPath)) { throw "Desktop storage smoke did not report within 120 seconds" }
                 $report = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-                if (-not $report.ok) { throw "Desktop $mode smoke failed: $($report.message)" }
-                if ($mode -eq "storage") {
-                  if (-not $report.details.cleanupVerified) { throw "Storage smoke did not verify room cleanup" }
-                  if ($report.details.persistedEvents -ne 1 -or $report.details.lastSeq -ne 1) {
-                    throw "Storage smoke persistence counters are invalid"
-                  }
-                  if (-not $report.details.duplicateWasIdempotent) {
-                    throw "Storage smoke did not verify duplicate-event idempotency"
-                  }
-                  if ($report.details.sidecarProvider -ne "mock" -or $report.details.sidecarTitle -ne "存储冒烟模组 🦋") {
-                    throw "Storage smoke did not verify the packaged mock sidecar"
-                  }
-                  if ($report.details.markdownFile -ne "transcript.md" -or $report.details.htmlFile -ne "transcript.html") {
-                    throw "Storage smoke returned unexpected export file names"
-                  }
-                  $markdownPath = Join-Path $storageExportDir "transcript.md"
-                  $htmlPath = Join-Path $storageExportDir "transcript.html"
-                  if (-not (Test-Path -LiteralPath $markdownPath -PathType Leaf)) { throw "Markdown export was not created" }
-                  if (-not (Test-Path -LiteralPath $htmlPath -PathType Leaf)) { throw "HTML export was not created" }
-                  $markdownBytes = [IO.File]::ReadAllBytes($markdownPath)
-                  $htmlBytes = [IO.File]::ReadAllBytes($htmlPath)
-                  if ($markdownBytes.Length -ne $report.details.markdownBytes) { throw "Markdown export size differs from report" }
-                  if ($htmlBytes.Length -ne $report.details.htmlBytes) { throw "HTML export size differs from report" }
-                  $markdown = [Text.Encoding]::UTF8.GetString($markdownBytes)
-                  $html = [Text.Encoding]::UTF8.GetString($htmlBytes)
-                  if (-not $markdown.Contains([string]$report.details.marker)) { throw "Markdown export lost the stored event" }
-                  if (-not $html.Contains([string]$report.details.marker)) { throw "HTML export lost the stored event" }
-                  if (-not $html.StartsWith("<!doctype html>") -or $html -match "(?i)<script\b") {
-                    throw "HTML export is not a script-free self-contained document"
-                  }
+                if (-not $report.ok) { throw "Desktop storage smoke failed: $($report.message)" }
+                if (-not $report.details.cleanupVerified) { throw "Storage smoke did not verify room cleanup" }
+                if ($report.details.persistedEvents -ne 1 -or $report.details.lastSeq -ne 1) {
+                  throw "Storage smoke persistence counters are invalid"
+                }
+                if (-not $report.details.duplicateWasIdempotent) { throw "Storage smoke did not verify duplicate-event idempotency" }
+                if ($report.details.sidecarProvider -ne "mock" -or $report.details.sidecarTitle -ne "存储冒烟模组 🦋") {
+                  throw "Storage smoke did not verify the packaged mock sidecar"
+                }
+                if ($report.details.markdownFile -ne "transcript.md" -or $report.details.htmlFile -ne "transcript.html") {
+                  throw "Storage smoke returned unexpected export file names"
+                }
+                $markdownPath = Join-Path $storageExportDir "transcript.md"
+                $htmlPath = Join-Path $storageExportDir "transcript.html"
+                if (-not (Test-Path -LiteralPath $markdownPath -PathType Leaf)) { throw "Markdown export was not created" }
+                if (-not (Test-Path -LiteralPath $htmlPath -PathType Leaf)) { throw "HTML export was not created" }
+                $markdownBytes = [IO.File]::ReadAllBytes($markdownPath)
+                $htmlBytes = [IO.File]::ReadAllBytes($htmlPath)
+                if ($markdownBytes.Length -ne $report.details.markdownBytes) { throw "Markdown export size differs from report" }
+                if ($htmlBytes.Length -ne $report.details.htmlBytes) { throw "HTML export size differs from report" }
+                $markdown = [Text.Encoding]::UTF8.GetString($markdownBytes)
+                $html = [Text.Encoding]::UTF8.GetString($htmlBytes)
+                if (-not $markdown.Contains([string]$report.details.marker)) { throw "Markdown export lost the stored event" }
+                if (-not $html.Contains([string]$report.details.marker)) { throw "HTML export lost the stored event" }
+                if (-not $html.StartsWith("<!doctype html>") -or $html -match "(?i)<script\b") {
+                  throw "HTML export is not a script-free self-contained document"
                 }
               } finally {
                 if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
@@ -233,6 +298,9 @@ jobs:
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_MODE -ErrorAction SilentlyContinue
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RESULT -ErrorAction SilentlyContinue
             Remove-Item Env:COC_ROOM_NETWORK_SMOKE_EXPORT_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_COORDINATION -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_RUN_ID -ErrorAction SilentlyContinue
+            Remove-Item Env:COC_ROOM_NETWORK_SMOKE_ROLE -ErrorAction SilentlyContinue
             if (-not $relay.HasExited) { Stop-Process -Id $relay.Id -Force }
           }
       - name: Install and launch NSIS smoke test
