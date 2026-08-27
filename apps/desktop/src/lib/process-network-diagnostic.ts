@@ -158,20 +158,20 @@ export async function runProcessNetworkDiagnostic(
       "跨进程 Unicode 载荷或双向确认未在期限内送达",
       20_000,
     );
+    const verifiedPath = currentPath();
+    if (verifiedPath !== options.mode) {
+      throw new Error(`跨进程连接路径不符：期望 ${options.mode}，实际 ${verifiedPath}`);
+    }
     // Keep both reliable transports alive after the symmetric acknowledgements.
     // Otherwise the faster process could exit while its final ack is still buffered.
     await new Promise((resolve) => globalThis.setTimeout(resolve, POST_ACK_DRAIN_MS));
     if (errors.length > 0) throw new Error(errors.join("\n"));
-    const finalPath = currentPath();
-    if (finalPath !== options.mode) {
-      throw new Error(`跨进程连接路径不符：期望 ${options.mode}，实际 ${finalPath}`);
-    }
 
     return {
       mode: options.mode,
       role: options.role,
       runId: options.runId,
-      path: finalPath,
+      path: verifiedPath,
       outgoingPayloadBytes: serializedBytes(outgoingPayload),
       incomingPayloadBytes: serializedBytes(incomingPayload),
       bidirectionalAcknowledgements: true,
