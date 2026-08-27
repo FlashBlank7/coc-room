@@ -13,6 +13,7 @@
     "check": "tsc --noEmit",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "smoke": "node scripts/smoke.mjs",
     "test": "vitest run --maxWorkers=1 --no-isolate",
     "test:watch": "vitest --maxWorkers=1 --no-isolate",
     "types": "wrangler types src/worker-configuration.d.ts"

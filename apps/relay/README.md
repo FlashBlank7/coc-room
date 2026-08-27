@@ -78,6 +78,13 @@ Only UTF-8 JSON text frames are accepted. A frame is at most 65,536 bytes. A rou
 pnpm --filter @coc-room/relay check
 pnpm --filter @coc-room/relay test
 pnpm --filter @coc-room/relay build
+pnpm --filter @coc-room/relay smoke
+```
+
+`smoke` 默认连接本机 `http://127.0.0.1:8787`，会创建一个临时房间，以真实 WebSocket 分别加入房主和玩家，并验证双向中继。验收部署后的节点时传入 HTTPS 根地址：
+
+```powershell
+pnpm --filter @coc-room/relay smoke -- https://your-worker.your-subdomain.workers.dev
 ```
 
 Tests use Cloudflare's Vitest plugin and the local `workerd` runtime. WebSocket tests run with one worker and shared storage because isolated per-file storage does not support Durable Object WebSockets.
