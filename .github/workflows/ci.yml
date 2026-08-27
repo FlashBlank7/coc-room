@@ -236,8 +236,8 @@ jobs:
                     $expectedPath = if ($mode -like "session-*") { $mode -replace "^session-", "" } else { $mode }
                     if ($report.details.path -ne $expectedPath) { throw "Desktop $mode used $($report.details.path) instead" }
                     if ($mode -like "session-*") {
-                      if ($report.details.events.Count -ne 3) { throw "Desktop $mode did not converge on three RoomSession events" }
-                      if (-not $report.details.duplicateWasIdempotent -or -not $report.details.reconnectReplayVerified -or -not $report.details.cleanupVerified) {
+                      if ($report.details.events.Count -ne 4) { throw "Desktop $mode did not converge on four RoomSession events" }
+                      if (-not $report.details.duplicateWasIdempotent -or -not $report.details.duplicateCommandReturned -or -not $report.details.reconnectReplayVerified -or -not $report.details.cleanupVerified) {
                         throw "Desktop $mode did not verify idempotency, replay, and cleanup"
                       }
                     } else {
@@ -259,13 +259,27 @@ jobs:
                 } finally {
                   if ($playerProcess -and -not $playerProcess.HasExited) { Stop-Process -Id $playerProcess.Id -Force }
                   if ($hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force }
+                  Start-Sleep -Milliseconds 250
                   foreach ($path in @($coordinationPath, $hostResultPath, $playerResultPath)) {
                     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
                   }
                   if ($mode -like "session-*") {
                     $databaseRoot = Join-Path $env:APPDATA "org.coc-room.desktop"
-                    Get-ChildItem -LiteralPath $databaseRoot -Filter "$runId-*.db" -File -ErrorAction SilentlyContinue |
-                      Remove-Item -Force -ErrorAction SilentlyContinue
+                    $databasePaths = @(
+                      (Join-Path $databaseRoot "$runId-host.db"),
+                      (Join-Path $databaseRoot "$runId-host.db-wal"),
+                      (Join-Path $databaseRoot "$runId-host.db-shm"),
+                      (Join-Path $databaseRoot "$runId-player.db"),
+                      (Join-Path $databaseRoot "$runId-player.db-wal"),
+                      (Join-Path $databaseRoot "$runId-player.db-shm")
+                    )
+                    foreach ($databasePath in $databasePaths) {
+                      if (Test-Path -LiteralPath $databasePath) { Remove-Item -LiteralPath $databasePath -Force -ErrorAction Stop }
+                    }
+                    $remainingDatabases = @($databasePaths | Where-Object { Test-Path -LiteralPath $_ })
+                    if ($remainingDatabases.Count -ne 0) {
+                      throw "RoomSession smoke left database artifacts: $($remainingDatabases -join ', ')"
+                    }
                   }
                   if (Test-Path -LiteralPath $runDirectory) { Remove-Item -LiteralPath $runDirectory -Force }
                   Remove-Item Env:COC_ROOM_NETWORK_SMOKE_COORDINATION -ErrorAction SilentlyContinue

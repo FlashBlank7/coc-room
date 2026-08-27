@@ -281,6 +281,9 @@ fn parse_network_smoke_config(
     } else {
         None
     };
+    if matches!(mode.as_str(), "session-direct" | "session-relay") && process_role.is_none() {
+        return Err("session smoke requires complete multi-process coordination".to_string());
+    }
     Ok(Some(NetworkSmokeConfig {
         relay_url,
         mode,
@@ -396,14 +399,36 @@ fn persist_network_smoke_rendezvous(
     if serialized.len() > MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES {
         return Err("network smoke rendezvous exceeds the size limit".to_string());
     }
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "network smoke rendezvous path has no valid file name".to_string())?;
+    let staging = target.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "network smoke rendezvous clock is invalid".to_string())?
+            .as_nanos()
+    ));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(target)
-        .map_err(|error| format!("cannot create network smoke rendezvous: {error}"))?;
-    file.write_all(&serialized)
+        .open(&staging)
+        .map_err(|error| format!("cannot create network smoke rendezvous staging file: {error}"))?;
+    let write_result = file
+        .write_all(&serialized)
         .and_then(|()| file.sync_all())
-        .map_err(|error| format!("cannot persist network smoke rendezvous: {error}"))
+        .map_err(|error| format!("cannot persist network smoke rendezvous: {error}"));
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
+    }
+    let link_result = std::fs::hard_link(&staging, target)
+        .map_err(|error| format!("cannot publish network smoke rendezvous atomically: {error}"));
+    let _ = std::fs::remove_file(&staging);
+    link_result
 }
 
 fn load_network_smoke_rendezvous(
@@ -1056,6 +1081,15 @@ mod tests {
                 .expect("storage smoke should return a configuration");
         assert!(storage.relay_url.is_none());
         assert_eq!(storage.mode, "storage");
+        assert!(parse_network_smoke_config(
+            Some("1"),
+            Some("http://127.0.0.1:8787"),
+            Some("session-relay"),
+            None,
+            None,
+            None,
+        )
+        .is_err());
     }
 
     #[test]

@@ -27,6 +27,7 @@ export interface ProcessRoomSessionDiagnosticResult {
   path: Exclude<ConnectionPath, "connecting" | "offline">;
   events: RoomEventV1[];
   duplicateWasIdempotent: true;
+  duplicateCommandReturned: true;
   reconnectReplayVerified: true;
   cleanupVerified: true;
   durationMs: number;
@@ -50,19 +51,29 @@ export async function runProcessRoomSessionDiagnostic(
   const expectedPath = options.mode === "session-direct" ? "direct" : "relay";
   const chatMessage = `session-chat-${options.runId}`;
   const offlineMessage = `session-replay-${options.runId}`;
+  const acknowledgementMessage = `session-ack-${options.runId}`;
   const chatCommandId = globalThis.crypto.randomUUID();
   let session: RoomSession | undefined;
   let events: RoomEventV1[] = [];
   let counterpartPresent = false;
   let sawCounterpart = false;
   let path: ConnectionPath = "connecting";
+  const duplicateEventIds: string[] = [];
   let reconnectPresent = false;
   let offlineEventCommitted = false;
   const errors: string[] = [];
   const counterpartPeerId = options.role === "host" ? participants.player.peerId : participants.host.peerId;
+  const originalSaveEvent = options.repository.saveEvent;
+  const saveEvent = originalSaveEvent.bind(options.repository);
+  options.repository.saveEvent = async (event) => {
+    const saved = await saveEvent(event);
+    if (!saved) duplicateEventIds.push(event.eventId);
+    return saved;
+  };
 
   const attach = (nextSession: RoomSession): void => {
     session = nextSession;
+    path = "connecting";
     nextSession.onError = (message) => errors.push(message);
     nextSession.onEvents = (nextEvents) => { events = nextEvents; };
     nextSession.onPathChange = (peerId, nextPath) => {
@@ -100,8 +111,13 @@ export async function runProcessRoomSessionDiagnostic(
     if (options.role === "player") {
       await session!.submit("chat.send", { message: chatMessage, format: "plain" }, chatCommandId);
       await waitUntil(() => events.length >= 2, errors, "RoomSession chat and dice events did not converge");
+      await waitUntil(() => path === expectedPath, errors, `initial RoomSession path was not ${expectedPath}`);
       await session!.submit("chat.send", { message: chatMessage, format: "plain" }, chatCommandId);
-      await delay(750);
+      await waitUntil(
+        () => duplicateEventIds.includes(events[0]!.eventId),
+        errors,
+        "duplicate RoomSession command did not return its existing event",
+      );
       const duplicateWasIdempotent = await options.repository.saveEvent(events[0]!);
       if (duplicateWasIdempotent) throw new Error("SQLite accepted a duplicate RoomSession event");
       session!.stop();
@@ -122,7 +138,15 @@ export async function runProcessRoomSessionDiagnostic(
       if (!hasExpectedEvents(events, chatMessage, offlineMessage)) {
         throw new Error("reconnected SQLite event log did not contain the expected chat, dice, and replay events");
       }
-      return result(options, expectedPath, events, startedAt);
+      await waitUntil(() => path === expectedPath, errors, `reconnected RoomSession path was not ${expectedPath}`);
+      await session!.submit("chat.send", { message: acknowledgementMessage, format: "plain" });
+      await waitUntil(() => events.length >= 4, errors, "RoomSession replay acknowledgment did not converge");
+      if (!hasExpectedEvents(events, chatMessage, offlineMessage, acknowledgementMessage)) {
+        throw new Error("reconnected SQLite event log did not contain the expected acknowledgment");
+      }
+      await waitUntil(() => path === expectedPath, errors, `final RoomSession path was not ${expectedPath}`);
+      const finalPath = verifiedPath(path, expectedPath);
+      return result(options, finalPath, events, startedAt, duplicateEventIds.includes(events[0]!.eventId));
     }
 
     await waitUntil(
@@ -148,11 +172,15 @@ export async function runProcessRoomSessionDiagnostic(
     offlineEventCommitted = true;
     await waitUntil(() => events.length >= 3, errors, "host did not persist the offline replay event");
     await waitUntil(() => reconnectPresent, errors, "player did not reconnect for replay verification");
-    if (!offlineEventCommitted || !hasExpectedEvents(events, chatMessage, offlineMessage)) {
+    await waitUntil(() => events.length >= 4, errors, "player did not acknowledge the replayed event");
+    if (!offlineEventCommitted || !hasExpectedEvents(events, chatMessage, offlineMessage, acknowledgementMessage)) {
       throw new Error("host event log was incomplete after reconnect");
     }
-    return result(options, expectedPath, events, startedAt);
+    await waitUntil(() => path === expectedPath, errors, `final RoomSession path was not ${expectedPath}`);
+    const finalPath = verifiedPath(path, expectedPath);
+    return result(options, finalPath, events, startedAt, true);
   } finally {
+    options.repository.saveEvent = originalSaveEvent;
     session?.stop();
     await options.repository.deleteRoom(room.id);
     if ((await options.repository.listRooms()).some((candidate) => candidate.id === room.id)
@@ -167,10 +195,12 @@ function result(
   expectedPath: Exclude<ConnectionPath, "connecting" | "offline">,
   events: RoomEventV1[],
   startedAt: number,
+  duplicateCommandReturned: boolean,
 ): ProcessRoomSessionDiagnosticResult {
-  if (options.role === "player" && events.length !== 3) {
-    throw new Error(`reconnected RoomSession log has ${events.length} events instead of 3`);
+  if (events.length !== 4) {
+    throw new Error(`RoomSession log has ${events.length} events instead of 4`);
   }
+  if (!duplicateCommandReturned) throw new Error("duplicate command delivery was not observed");
   return {
     mode: options.mode,
     role: options.role,
@@ -178,17 +208,32 @@ function result(
     path: expectedPath,
     events,
     duplicateWasIdempotent: true,
+    duplicateCommandReturned: true,
     reconnectReplayVerified: true,
     cleanupVerified: true,
     durationMs: Math.round(performance.now() - startedAt),
   };
 }
 
-function hasExpectedEvents(events: RoomEventV1[], chatMessage: string, offlineMessage: string): boolean {
+function verifiedPath(
+  actual: ConnectionPath,
+  expected: Exclude<ConnectionPath, "connecting" | "offline">,
+): Exclude<ConnectionPath, "connecting" | "offline"> {
+  if (actual !== expected) throw new Error(`final RoomSession path was ${actual}, expected ${expected}`);
+  return actual;
+}
+
+function hasExpectedEvents(
+  events: RoomEventV1[],
+  chatMessage: string,
+  offlineMessage: string,
+  acknowledgementMessage?: string,
+): boolean {
   const first = events[0];
   const second = events[1];
   const third = events[2];
-  return events.length >= 3
+  const fourth = events[3];
+  const firstThreeMatch = events.length >= 3
     && first?.sequence === 1
     && first.type === "chat.message"
     && first.payload.message === chatMessage
@@ -197,6 +242,11 @@ function hasExpectedEvents(events: RoomEventV1[], chatMessage: string, offlineMe
     && third?.sequence === 3
     && third.type === "chat.message"
     && third.payload.message === offlineMessage;
+  return firstThreeMatch && (acknowledgementMessage === undefined || (
+    fourth?.sequence === 4
+    && fourth.type === "chat.message"
+    && fourth.payload.message === acknowledgementMessage
+  ));
 }
 
 function processParticipants(runId: string): { host: ParticipantV1; player: ParticipantV1 } {
