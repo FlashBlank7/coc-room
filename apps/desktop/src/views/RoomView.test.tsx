@@ -95,6 +95,87 @@ describe("RoomView", () => {
     expect(payload).not.toHaveProperty("requiredDifficulty");
   });
 
+  it("validates dice locally and never sends percentile-only options with a normal dice expression", async () => {
+    const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
+    const session = { submit } as unknown as RoomSession;
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("奖励骰"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("目标值（可选）"), { target: { value: "60" } });
+    fireEvent.change(screen.getByLabelText("骰式"), { target: { value: "2d6+1" } });
+
+    expect((screen.getByLabelText("奖励骰") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("惩罚骰") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("目标值（可选）") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "掷骰并记录" }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("dice.roll", {
+      expression: "2d6+1",
+      reason: "",
+      bonusDice: 0,
+      penaltyDice: 0,
+    }));
+
+    submit.mockClear();
+    fireEvent.change(screen.getByLabelText("骰式"), { target: { value: "不是骰式" } });
+    fireEvent.click(screen.getByRole("button", { name: "掷骰并记录" }));
+
+    await waitFor(() => expect(screen.getAllByText(/骰式无效/).length).toBeGreaterThan(0));
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("does not submit chat while a Chinese input method is composing", async () => {
+    const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
+    const session = { submit } as unknown as RoomSession;
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    const input = screen.getByPlaceholderText("说点什么……");
+    fireEvent.change(input, { target: { value: "调查" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(submit).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("chat.send", {
+      message: "调查",
+      format: "plain",
+    }));
+  });
+
+  it("shows percentile candidates and translated CoC check results in the room log", () => {
+    useAppStore.setState({
+      events: [{
+        ...event,
+        type: "dice.result",
+        payload: {
+          reason: "侦查庭院",
+          result: {
+            kind: "percentile",
+            expression: "1d100",
+            bonusDice: 1,
+            penaltyDice: 0,
+            unitsDie: 5,
+            tensDice: [7, 2],
+            candidates: [75, 25],
+            total: 25,
+            check: {
+              roll: 25,
+              target: 60,
+              requiredDifficulty: "hard",
+              outcome: "hard",
+              success: true,
+              thresholds: { regular: 60, hard: 30, extreme: 12 },
+            },
+          },
+        },
+      }],
+    });
+
+    render(<RoomView readOnly onLeave={() => undefined} />);
+
+    expect(screen.getByText("1 个奖励骰 · 候选 75、25")).toBeTruthy();
+    expect(screen.getByText("困难成功 · 目标 60 · 困难难度成功")).toBeTruthy();
+  });
+
   it("pauses player commands while the host is absent but keeps records exportable", () => {
     useAppStore.setState({ participants: [player, host], paths: { [room.hostPeerId]: "offline" } });
     const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
