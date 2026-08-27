@@ -124,10 +124,14 @@ jobs:
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "NSIS install exited with $($install.ExitCode)" }
 
-          $app = Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -Recurse |
-            Where-Object { $_.Name -notmatch "uninstall" } |
+          $appNames = @("coc-room.exe", "密斯卡托尼克终端.exe")
+          $app = Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -File -Recurse |
+            Where-Object { $appNames -contains $_.Name } |
             Select-Object -First 1
-          if (-not $app) { throw "Installed desktop executable was not found" }
+          if (-not $app) {
+            $installedExecutables = (Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -File -Recurse).Name -join ", "
+            throw "Installed desktop executable was not found; found: $installedExecutables"
+          }
 
           $process = Start-Process -FilePath $app.FullName -WindowStyle Hidden -PassThru
           Start-Sleep -Seconds 10
