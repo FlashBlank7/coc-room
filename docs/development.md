@@ -70,7 +70,7 @@ pnpm dev:tauri
 
 `VITE_RELAY_URL` 必须是可接受 `POST /v1/rooms` 的 HTTP(S) 源地址，不是某个房间的 `/v1/rooms/<id>/ws` 地址。生产 HTTPS origin 会由建房接口生成相应的 `wss://` 房间地址。应用内设置可覆盖构建时默认值。
 
-在开放公共节点前，建议在 Cloudflare 侧为建房和 WebSocket 路径配置速率限制。Worker 限制一个房主加七名玩家，单个 UTF-8 JSON 帧最多 65,536 字节；客户端同步块需为服务端封装保留余量。
+在开放公共节点前，建议在 Cloudflare 侧为建房和 WebSocket 路径配置速率限制。Worker 限制一个房主加七名玩家，单个 UTF-8 JSON 帧最多 65,536 字节；桌面端会自动把超限的应用层中继消息切成带校验的分片并在接收端重组。
 
 ## 4. 模组解析器
 
@@ -125,4 +125,4 @@ pnpm build:windows
 
 NSIS 安装包输出到 `apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`；不同 Tauri/Cargo 环境也可能省略 target triple 这一层，可在 `apps/desktop/src-tauri/target/release/bundle/nsis/` 查找。首版没有商业代码签名，Windows SmartScreen 可能提示未知发布者。
 
-CI 的 Windows job 会优先使用手工运行时的 `relay_url` 输入，其次使用仓库变量 `PUBLIC_RELAY_URL`，都未设置时才回退到 `http://127.0.0.1:8787`。它会构建 NSIS，在临时目录静默安装，精确启动桌面主程序后卸载。发布前应设置生产 HTTPS origin，并先运行 `pnpm --filter @coc-room/relay smoke -- https://...` 验收节点。
+CI 的 Windows job 会优先使用手工运行时的 `relay_url` 输入，其次使用仓库变量 `PUBLIC_RELAY_URL`，都未设置时才回退到 `http://127.0.0.1:8787`。它会构建 NSIS，在临时目录静默安装，精确启动桌面主程序后卸载。发布前应设置生产 HTTPS origin，并先运行 `pnpm --filter @coc-room/relay smoke https://...` 验收节点。

@@ -22,6 +22,7 @@ services/module-parser/build/
 services/module-parser/dist/
 apps/desktop/src-tauri/binaries/*
 !apps/desktop/src-tauri/binaries/.gitkeep
+apps/desktop/src-tauri/gen/schemas/
 apps/desktop/src-tauri/icons/android/
 apps/desktop/src-tauri/icons/ios/
 apps/desktop/src-tauri/icons/icon.icns

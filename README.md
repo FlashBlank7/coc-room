@@ -9,8 +9,8 @@
 - 2–8 人房间，无账号，以房间 ID 和随机令牌加入
 - 房主权威事件序列、事件幂等落库、断线后分块补发
 - 文字聊天、CoC 7 版角色卡、普通骰式、`d100` 奖惩骰与成功等级
-- 本机 SQLite 记录，导出 Markdown 或自包含 HTML
-- 模组资料库与 `ModulePackageV1`，解析结果先审阅再保存/启用
+- 本机 SQLite 记录、离线记录查看，导出 Markdown 或自包含 HTML
+- 模组资料库与 `ModulePackageV1`，可按场景、地点、NPC、线索、手记、检定和关系浏览；解析结果先审阅再保存/启用
 - Python/LangGraph sidecar 调用 DeepSeek Responses API 做 JSON Schema 结构化抽取
 - 粘贴文本及 `.txt`、`.md`、`.docx`、安全单文档 `.zip` 输入
 - Cloudflare Durable Objects 信令与临时中继，可自行部署
@@ -79,6 +79,8 @@ pnpm dev:tauri
 ```
 
 应用内“设置”保存的中继地址会成为后续运行时配置。完整开发、测试、Worker 自部署、sidecar 和 NSIS 打包命令见 [开发指南](docs/development.md)。
+
+导入 `.cocmod.json` 后，模组会自动在右侧“模组工作台”的“资料浏览”模式打开。已经保存在资料库中的模组可点击左侧卡片的“打开”，再从分类栏进入“地点”或“NPC”；浏览器预览刷新后会清空内存数据，Tauri 桌面版才会持久化到 SQLite。
 
 ## 隐私与安全边界
 

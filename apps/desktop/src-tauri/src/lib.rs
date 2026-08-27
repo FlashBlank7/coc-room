@@ -483,11 +483,14 @@ pub fn run() {
             run_module_parser
         ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
+            #[cfg(debug_assertions)]
+            {
                 app.get_webview_window("main")
                     .expect("main window")
                     .open_devtools();
             }
+            #[cfg(not(debug_assertions))]
+            let _ = app;
             Ok(())
         })
         .run(tauri::generate_context!())
