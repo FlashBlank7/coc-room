@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   AUTHENTICATION_GRACE_PERIOD_MS,
+  EMPTY_ROOM_TTL_MS,
   JSON_HEADERS,
   MAX_FRAME_BYTES,
   MAX_PENDING_SOCKETS,
@@ -9,6 +10,7 @@ import {
   PEER_ID_PATTERN,
   PROTOCOL_VERSION,
   ROOM_ID_PATTERN,
+  UNCLAIMED_ROOM_TTL_MS,
 } from "./constants";
 import {
   canRoute,
@@ -47,12 +49,21 @@ export class RelayRoom extends DurableObject<Env> {
         host_peer_id TEXT NOT NULL,
         host_token_hash TEXT NOT NULL,
         join_token_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        host_joined_at TEXT,
+        empty_expires_at INTEGER
       ) STRICT
     `);
+    const lifecycleColumnsAdded = this.ensureLifecycleColumns();
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong"),
     );
+    this.ctx.blockConcurrencyWhile(async () => {
+      if (lifecycleColumnsAdded) {
+        this.reconcileLegacyLifecycle(Date.now());
+      }
+      await this.scheduleNextAlarm();
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -72,6 +83,9 @@ export class RelayRoom extends DurableObject<Env> {
       });
     }
 
+    const now = Date.now();
+    this.closeExpiredPendingSockets(now);
+    await this.expireRoomIfEligible(now);
     if (this.metadata() === undefined) {
       return jsonResponse(404, {
         error: "ROOM_NOT_FOUND",
@@ -79,7 +93,6 @@ export class RelayRoom extends DurableObject<Env> {
       });
     }
 
-    this.closeExpiredPendingSockets(Date.now());
     const pendingCount = this.openSockets().filter(
       (socket) => !readAttachment(socket).authenticated,
     ).length;
@@ -101,7 +114,7 @@ export class RelayRoom extends DurableObject<Env> {
 
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
-    await this.scheduleNextAuthenticationAlarm();
+    await this.scheduleNextAlarm();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -111,7 +124,7 @@ export class RelayRoom extends DurableObject<Env> {
     frame: string | ArrayBuffer,
   ): Promise<void> {
     const expiredSockets = this.closeExpiredPendingSockets(Date.now());
-    await this.scheduleNextAuthenticationAlarm();
+    await this.scheduleNextAlarm();
     if (expiredSockets.has(socket)) {
       return;
     }
@@ -204,8 +217,9 @@ export class RelayRoom extends DurableObject<Env> {
         return;
 
       case "leave":
-        this.remove(socket, attachment);
+        await this.remove(socket, attachment);
         safeClose(socket, 1000, "Client left");
+        await this.scheduleNextAlarm();
         return;
     }
   }
@@ -220,29 +234,34 @@ export class RelayRoom extends DurableObject<Env> {
     void wasClean;
     const attachment = readAttachment(socket);
     if (attachment.authenticated) {
-      this.remove(socket, attachment);
+      await this.remove(socket, attachment);
     }
 
     safeClose(socket, code, "Connection closed");
-    await this.scheduleNextAuthenticationAlarm();
+    await this.scheduleNextAlarm();
   }
 
   async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
     void error;
     const attachment = readAttachment(socket);
     if (attachment.authenticated) {
-      this.remove(socket, attachment);
+      await this.remove(socket, attachment);
     }
     safeClose(socket, 1011, "WebSocket error");
-    await this.scheduleNextAuthenticationAlarm();
+    await this.scheduleNextAlarm();
   }
 
   async alarm(): Promise<void> {
-    this.closeExpiredPendingSockets(Date.now());
-    await this.scheduleNextAuthenticationAlarm();
+    const now = Date.now();
+    this.closeExpiredPendingSockets(now);
+    if (await this.expireRoomIfEligible(now)) {
+      return;
+    }
+    await this.scheduleNextAlarm();
   }
 
   private async createRoom(request: Request): Promise<Response> {
+    await this.expireRoomIfEligible(Date.now());
     if (this.metadata() !== undefined) {
       return jsonResponse(409, {
         error: "ROOM_EXISTS",
@@ -300,6 +319,7 @@ export class RelayRoom extends DurableObject<Env> {
       joinTokenHash,
       new Date().toISOString(),
     );
+    await this.scheduleNextAlarm();
 
     return jsonResponse(201, { ok: true });
   }
@@ -437,7 +457,18 @@ export class RelayRoom extends DurableObject<Env> {
       joinedAt: Date.now(),
     };
     socket.serializeAttachment(joined);
-    await this.scheduleNextAuthenticationAlarm();
+    this.sql.exec(
+      `UPDATE room_metadata
+       SET empty_expires_at = NULL,
+           host_joined_at = CASE
+             WHEN ? = 'host' THEN COALESCE(host_joined_at, ?)
+             ELSE host_joined_at
+           END
+       WHERE singleton = 1`,
+      message.role,
+      new Date(joined.joinedAt).toISOString(),
+    );
+    await this.scheduleNextAlarm();
 
     const existingPeers = peers.map(({ attachment }) => publicPeer(attachment));
     this.send(socket, {
@@ -535,7 +566,10 @@ export class RelayRoom extends DurableObject<Env> {
     safeSend(target.socket, serialized);
   }
 
-  private remove(socket: WebSocket, peer: PeerAttachment): void {
+  private async remove(
+    socket: WebSocket,
+    peer: PeerAttachment,
+  ): Promise<void> {
     this.markPending(socket);
     this.broadcast(
       {
@@ -546,6 +580,14 @@ export class RelayRoom extends DurableObject<Env> {
       },
       socket,
     );
+    if (this.peerSockets().length === 0) {
+      this.sql.exec(
+        `UPDATE room_metadata
+         SET empty_expires_at = ?
+         WHERE singleton = 1 AND host_joined_at IS NOT NULL`,
+        Date.now() + EMPTY_ROOM_TTL_MS,
+      );
+    }
   }
 
   private markPending(socket: WebSocket): void {
@@ -572,7 +614,7 @@ export class RelayRoom extends DurableObject<Env> {
     return expired;
   }
 
-  private async scheduleNextAuthenticationAlarm(): Promise<void> {
+  private async scheduleNextAlarm(): Promise<void> {
     let nextDeadline: number | undefined;
     for (const socket of this.openSockets()) {
       const attachment = readAttachment(socket);
@@ -582,6 +624,17 @@ export class RelayRoom extends DurableObject<Env> {
           attachment.authenticationDeadlineAt < nextDeadline)
       ) {
         nextDeadline = attachment.authenticationDeadlineAt;
+      }
+    }
+
+    const metadata = this.metadata();
+    if (metadata !== undefined && this.openSockets().length === 0) {
+      const roomDeadline = roomExpiryDeadline(metadata);
+      if (
+        roomDeadline !== undefined &&
+        (nextDeadline === undefined || roomDeadline < nextDeadline)
+      ) {
+        nextDeadline = roomDeadline;
       }
     }
 
@@ -601,11 +654,64 @@ export class RelayRoom extends DurableObject<Env> {
   private metadata(): StoredRoomMetadata | undefined {
     return this.sql
       .exec<StoredRoomMetadata>(
-        `SELECT room_id, host_peer_id, host_token_hash, join_token_hash, created_at
+        `SELECT room_id, host_peer_id, host_token_hash, join_token_hash,
+                created_at, host_joined_at, empty_expires_at
          FROM room_metadata
          WHERE singleton = 1`,
       )
       .toArray()[0];
+  }
+
+  private ensureLifecycleColumns(): boolean {
+    const columns = new Set(
+      this.sql
+        .exec<Record<string, SqlStorageValue> & { name: string }>(
+          "PRAGMA table_info(room_metadata)",
+        )
+        .toArray()
+        .map(({ name }) => name),
+    );
+    let changed = false;
+    if (!columns.has("host_joined_at")) {
+      this.sql.exec("ALTER TABLE room_metadata ADD COLUMN host_joined_at TEXT");
+      changed = true;
+    }
+    if (!columns.has("empty_expires_at")) {
+      this.sql.exec(
+        "ALTER TABLE room_metadata ADD COLUMN empty_expires_at INTEGER",
+      );
+      changed = true;
+    }
+    return changed;
+  }
+
+  private reconcileLegacyLifecycle(now: number): void {
+    if (this.metadata() === undefined) {
+      return;
+    }
+    const hasOpenSocket = this.openSockets().length > 0;
+    this.sql.exec(
+      `UPDATE room_metadata
+       SET host_joined_at = COALESCE(host_joined_at, created_at),
+           empty_expires_at = ?
+       WHERE singleton = 1`,
+      hasOpenSocket ? null : now + EMPTY_ROOM_TTL_MS,
+    );
+  }
+
+  private async expireRoomIfEligible(now: number): Promise<boolean> {
+    const metadata = this.metadata();
+    if (metadata === undefined || this.openSockets().length > 0) {
+      return false;
+    }
+    const deadline = roomExpiryDeadline(metadata);
+    if (deadline === undefined || deadline > now) {
+      return false;
+    }
+
+    this.sql.exec("DELETE FROM room_metadata WHERE singleton = 1");
+    await this.ctx.storage.deleteAlarm();
+    return true;
   }
 
   private openSockets(): WebSocket[] {
@@ -689,6 +795,18 @@ function readAttachment(socket: WebSocket): SocketAttachment {
     authenticated: false,
     authenticationDeadlineAt: 0,
   };
+}
+
+function roomExpiryDeadline(
+  metadata: StoredRoomMetadata,
+): number | undefined {
+  if (metadata.host_joined_at === null) {
+    const createdAt = Date.parse(metadata.created_at);
+    return Number.isFinite(createdAt)
+      ? createdAt + UNCLAIMED_ROOM_TTL_MS
+      : 0;
+  }
+  return metadata.empty_expires_at ?? undefined;
 }
 
 function safeSend(socket: WebSocket, serialized: string): void {

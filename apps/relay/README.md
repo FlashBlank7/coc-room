@@ -4,7 +4,9 @@ Cloudflare Worker + SQLite-backed Durable Object for CoC Room's WebRTC signaling
 
 ## Privacy and persistence
 
-The Durable Object persists only one `room_metadata` row containing the room ID, the reserved host peer ID, creation time, and SHA-256 digests of the host and join tokens. It never creates a chat, event, signal, or relay-payload table. Online peer metadata lives in hibernatable WebSocket attachments and disappears when each socket closes. The source contains no payload logging, and Wrangler observability is disabled by default.
+The Durable Object persists only one `room_metadata` row containing the room ID, the reserved host peer ID, lifecycle timestamps, and SHA-256 digests of the host and join tokens. It never creates a chat, event, signal, or relay-payload table. Online peer metadata lives in hibernatable WebSocket attachments and disappears when each socket closes. The source contains no payload logging, and Wrangler observability is disabled by default.
+
+Room metadata is also ephemeral. A newly created room is removed if its host does not claim it within 15 minutes. After the host has joined at least once, the metadata is removed 24 hours after the last authenticated peer disconnects. A reconnect during that grace period cancels the empty-room deadline. Durable Object alarms persist both deadlines across hibernation and always re-check that no WebSocket is open before deleting the row, so a stale alarm cannot interrupt an active room.
 
 This is not end-to-end encryption. Cloudflare and the operator can technically inspect frames while they are being relayed. Do not put tokens in URLs or logs.
 
@@ -45,9 +47,10 @@ The response contains secrets and uses `Cache-Control: no-store`:
 
 The first WebSocket text frame must be a `join` message. An upgraded socket has
 15 seconds to authenticate; its deadline is stored in the hibernatable socket
-attachment, and the Durable Object alarm closes it if the deadline expires.
-Stale pending sockets are also swept whenever a connection or message arrives,
-so they cannot permanently consume the pending-connection allowance.
+attachment, and the same Durable Object alarm scheduler closes it if the
+deadline expires. Stale pending sockets are also swept whenever a connection or
+message arrives, so they cannot permanently consume the pending-connection
+allowance.
 
 ```json
 {

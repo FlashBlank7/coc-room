@@ -7,8 +7,10 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AUTHENTICATION_GRACE_PERIOD_MS,
+  EMPTY_ROOM_TTL_MS,
   MAX_FRAME_BYTES,
   MAX_PENDING_SOCKETS,
+  UNCLAIMED_ROOM_TTL_MS,
 } from "../src/constants";
 import type { CreateRoomResponse, ServerMessage } from "../src/types";
 
@@ -55,7 +57,10 @@ describe("relay Worker", () => {
 
       const applicationTables = state.storage.sql
         .exec<Record<string, SqlStorageValue> & { name: string }>(
-          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'table'
+             AND name NOT LIKE 'sqlite_%'
+             AND name NOT LIKE '_cf_%'`,
         )
         .toArray()
         .map(({ name }) => name);
@@ -123,6 +128,132 @@ describe("relay Worker", () => {
       "host",
     );
     expect(host.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("expires a room whose host never joins, including after hibernation", async () => {
+    const room = await createRoom("unclaimed-host");
+    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE room_metadata SET created_at = ? WHERE singleton = 1",
+        new Date(Date.now() - UNCLAIMED_ROOM_TTL_MS - 1).toISOString(),
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await evictDurableObject(stub);
+
+    await expect(runDurableObjectAlarm(stub)).resolves.toBe(true);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const { count } = state.storage.sql
+        .exec<Record<string, SqlStorageValue> & { count: number }>(
+          "SELECT COUNT(*) AS count FROM room_metadata",
+        )
+        .one();
+      expect(count).toBe(0);
+      await expect(state.storage.getAlarm()).resolves.toBeNull();
+    });
+
+    const response = await exports.default.fetch(
+      websocketRequestUrl(room.websocketUrl),
+      { headers: { Upgrade: "websocket" } },
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("keeps a live room when a stale lifecycle alarm fires", async () => {
+    const room = await createRoom("active-host");
+    const host = await join(
+      room.websocketUrl,
+      room.hostToken,
+      room.hostPeerId,
+      "host",
+    );
+    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
+        Date.now() - 1,
+      );
+      await instance.alarm();
+    });
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const { count } = state.storage.sql
+        .exec<Record<string, SqlStorageValue> & { count: number }>(
+          "SELECT COUNT(*) AS count FROM room_metadata",
+        )
+        .one();
+      expect(count).toBe(1);
+      state.storage.sql.exec(
+        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
+        Date.now() - 1,
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await evictDurableObject(stub);
+
+    // Rehydration sees the live hibernatable socket and cancels the stale alarm.
+    await expect(runDurableObjectAlarm(stub)).resolves.toBe(false);
+
+    const presence = nextMessage(
+      host,
+      (message) => message.kind === "presence" && message.action === "joined",
+    );
+    await join(room.websocketUrl, room.joinToken, "active-player", "player");
+    await expect(presence).resolves.toMatchObject({
+      peer: { peerId: "active-player" },
+    });
+  });
+
+  it("destroys a claimed room after every peer has been offline for its grace period", async () => {
+    const room = await createRoom("offline-host");
+    const host = await join(
+      room.websocketUrl,
+      room.hostToken,
+      room.hostPeerId,
+      "host",
+    );
+    const closed = nextClose(host);
+    host.send(JSON.stringify({ kind: "leave" }));
+    await expect(closed).resolves.toEqual({ code: 1000 });
+
+    const stub = env.ROOMS.get(env.ROOMS.idFromName(room.roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const metadata = state.storage.sql
+        .exec<
+          Record<string, SqlStorageValue> & {
+            host_joined_at: string | null;
+            empty_expires_at: number | null;
+          }
+        >(
+          "SELECT host_joined_at, empty_expires_at FROM room_metadata WHERE singleton = 1",
+        )
+        .one();
+      expect(metadata.host_joined_at).not.toBeNull();
+      expect(metadata.empty_expires_at).not.toBeNull();
+      expect(metadata.empty_expires_at as number).toBeGreaterThan(
+        Date.now() + EMPTY_ROOM_TTL_MS - 5_000,
+      );
+
+      state.storage.sql.exec(
+        "UPDATE room_metadata SET empty_expires_at = ? WHERE singleton = 1",
+        Date.now() - 1,
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await evictDurableObject(stub);
+
+    await expect(runDurableObjectAlarm(stub)).resolves.toBe(true);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const { count } = state.storage.sql
+        .exec<Record<string, SqlStorageValue> & { count: number }>(
+          "SELECT COUNT(*) AS count FROM room_metadata",
+        )
+        .one();
+      expect(count).toBe(0);
+    });
   });
 
   it("routes signaling and relay frames only between host and players", async () => {
