@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Copy, Download, Send, Dices, LogOut } from "lucide-react";
 import {
+  deriveRoomWorldState,
   exportEventsToHtml,
   exportEventsToMarkdown,
   parseDiceExpression,
   type CheckDifficulty,
   type CheckOutcome,
+  type ModulePackageV1,
   type RoomEventV1,
 } from "@coc-room/protocol";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -15,6 +17,16 @@ import { encodeInvitation } from "../lib/invitation";
 import { isRoomHostAvailable } from "../lib/room-availability";
 import { downloadTextInBrowser } from "../lib/browser-download";
 import { useAppStore } from "../store/app-store";
+import { getRepository } from "../data/repository";
+import {
+  KeeperSceneControls,
+} from "../components/room/KeeperSceneControls";
+import {
+  RoomWorldStage,
+  type PublishedRoomLocation,
+  type PublishedRoomNpc,
+  type RoomStageCharacter,
+} from "../components/room/RoomWorldStage";
 import { Button } from "../components/ui/Button";
 import { Field, Input } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
@@ -39,7 +51,35 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
   const [difficulty, setDifficulty] = useState<CheckDifficulty>("regular");
   const [bonus, setBonus] = useState(0);
   const [penalty, setPenalty] = useState(0);
+  const [keeperModule, setKeeperModule] = useState<ModulePackageV1>();
+  const [keeperModuleLoading, setKeeperModuleLoading] = useState(false);
+  const [keeperModuleError, setKeeperModuleError] = useState<string>();
+  const [keeperSelectedLocationId, setKeeperSelectedLocationId] = useState<string>();
+  const [pendingWorldAction, setPendingWorldAction] = useState<{
+    commandId: string;
+    label: string;
+  }>();
   const diceInput = useMemo(() => inspectDiceInput(dice), [dice]);
+  const world = useMemo(() => deriveRoomWorldState(events), [events]);
+  const activeKeeperModule = keeperModule !== undefined
+    && world.activeModule !== undefined
+    && keeperModule.moduleId === world.activeModule.moduleId
+    && keeperModule.revision === world.activeModule.revision
+    ? keeperModule
+    : undefined;
+  const stageCharacters = useMemo(() => new Map(
+    [...world.latestCharacters].map(([characterId, character]) => [characterId, {
+      id: character.id,
+      ownerPeerId: character.ownerPeerId,
+      name: character.name,
+      occupation: character.occupation,
+      derived: {
+        hitPoints: character.derived.hitPoints,
+        maxHitPoints: character.derived.maxHitPoints,
+        sanity: character.derived.sanity,
+      },
+    }] as const),
+  ), [world.latestCharacters]);
 
   const invitation = useMemo(() => {
     if (readOnly) return {};
@@ -58,10 +98,79 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
     }
   }, [readOnly, room]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setKeeperModule(undefined);
+    setKeeperModuleError(undefined);
+
+    if (
+      readOnly || room?.localRole !== "host" || session?.isHost !== true ||
+      world.activeModule === undefined
+    ) {
+      setKeeperModuleLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    setKeeperModuleLoading(true);
+    const { moduleId, revision } = world.activeModule;
+    void (async () => {
+      try {
+        const repository = await getRepository();
+        const stored = await repository.getModule(moduleId, revision);
+        if (cancelled) return;
+        if (stored === undefined) {
+          setKeeperModuleError(`本机模组库中找不到活动版本 ${moduleId} v${revision}。请恢复这个精确修订后再发布场景。`);
+          return;
+        }
+        setKeeperModule(stored.package);
+      } catch (cause) {
+        if (!cancelled) {
+          setKeeperModuleError(cause instanceof Error ? cause.message : String(cause));
+        }
+      } finally {
+        if (!cancelled) setKeeperModuleLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [readOnly, room?.localRole, session, world.activeModule?.moduleId, world.activeModule?.revision]);
+
+  useEffect(() => {
+    setKeeperSelectedLocationId(undefined);
+    setPendingWorldAction(undefined);
+  }, [world.activeModule?.moduleId, world.activeModule?.revision]);
+
+  useEffect(() => {
+    if (
+      pendingWorldAction !== undefined &&
+      events.some((event) => event.causedByCommandId === pendingWorldAction.commandId)
+    ) {
+      setPendingWorldAction(undefined);
+    }
+  }, [events, pendingWorldAction]);
+
+  useEffect(() => {
+    if (pendingWorldAction === undefined) return;
+    const timeout = window.setTimeout(() => {
+      setPendingWorldAction((current) => current?.commandId === pendingWorldAction.commandId ? undefined : current);
+      setConnectionError(`等待房主确认“${pendingWorldAction.label}”超时；请检查连接后重试。`);
+    }, 15_000);
+    return () => window.clearTimeout(timeout);
+  }, [pendingWorldAction, setConnectionError]);
+
   if (!room) return <EmptyRoom />;
 
   const roomPaused = !readOnly && !isRoomHostAvailable(room, participants, paths[room.hostPeerId]);
   const commandsDisabled = !session || roomPaused;
+  const commandsDisabledReason = roomPaused
+    ? "房主离线，房间已暂停"
+    : !session
+      ? "房间会话尚未连接"
+      : undefined;
+  const worldCommandsDisabled = commandsDisabled || pendingWorldAction !== undefined;
+  const worldCommandsDisabledReason = pendingWorldAction !== undefined
+    ? `正在等待房主确认：${pendingWorldAction.label}`
+    : commandsDisabledReason;
 
   const sendChat = async () => {
     const value = message.trim();
@@ -116,8 +225,93 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
     }
   };
 
+  const enterLocation = async (character: RoomStageCharacter, location: PublishedRoomLocation) => {
+    if (worldCommandsDisabled || !session || world.activeModule === undefined) return;
+    const commandId = globalThis.crypto.randomUUID();
+    setPendingWorldAction({ commandId, label: `${character.name}进入${location.name}` });
+    try {
+      await session.submit("location.enter", {
+        moduleId: world.activeModule.moduleId,
+        revision: world.activeModule.revision,
+        locationId: location.id,
+        locationName: location.name,
+        characterId: character.id,
+        characterName: character.name,
+      }, commandId);
+      setConnectionError(undefined);
+    } catch (cause) {
+      setPendingWorldAction((current) => current?.commandId === commandId ? undefined : current);
+      setConnectionError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const publishLocation = async (location: PublishedRoomLocation) => {
+    if (
+      worldCommandsDisabled || !session || !session.isHost || room.localRole !== "host" ||
+      world.activeModule === undefined || activeKeeperModule === undefined
+    ) return;
+    const sourceLocation = activeKeeperModule.locations.find((candidate) => candidate.id === location.id);
+    if (
+      sourceLocation === undefined ||
+      sourceLocation.name !== location.name ||
+      (sourceLocation.playerDescription?.trim() ?? "") !== location.description ||
+      location.description.length === 0
+    ) {
+      setConnectionError("地点公开稿与当前活动模组的精确修订不一致，请重新打开场景控制。");
+      return;
+    }
+    const commandId = globalThis.crypto.randomUUID();
+    setPendingWorldAction({ commandId, label: `公开地点 ${location.name}` });
+    try {
+      await session.submit("location.publish", {
+        moduleId: world.activeModule.moduleId,
+        revision: world.activeModule.revision,
+        location,
+      }, commandId);
+      setConnectionError(undefined);
+    } catch (cause) {
+      setPendingWorldAction((current) => current?.commandId === commandId ? undefined : current);
+      setConnectionError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const publishNpc = async (location: PublishedRoomLocation, npc: PublishedRoomNpc) => {
+    if (
+      worldCommandsDisabled || !session || !session.isHost || room.localRole !== "host" ||
+      world.activeModule === undefined || activeKeeperModule === undefined
+    ) return;
+    const sourceLocation = activeKeeperModule.locations.find((candidate) => candidate.id === location.id);
+    const sourceNpc = activeKeeperModule.npcs.find((candidate) => candidate.id === npc.id);
+    const publishedLocation = world.locations.get(location.id);
+    if (
+      sourceLocation === undefined || sourceLocation.name !== location.name ||
+      publishedLocation?.name !== location.name ||
+      sourceNpc === undefined || sourceNpc.name !== npc.name ||
+      (sourceNpc.playerDescription?.trim() ?? "") !== npc.description ||
+      npc.description.length === 0
+    ) {
+      setConnectionError("NPC 公开稿与当前活动模组的精确修订不一致，请重新打开场景控制。");
+      return;
+    }
+    const commandId = globalThis.crypto.randomUUID();
+    setPendingWorldAction({ commandId, label: `${npc.name}出现在${location.name}` });
+    try {
+      await session.submit("npc.publish", {
+        moduleId: world.activeModule.moduleId,
+        revision: world.activeModule.revision,
+        locationId: location.id,
+        locationName: location.name,
+        npc,
+      }, commandId);
+      setConnectionError(undefined);
+    } catch (cause) {
+      setPendingWorldAction((current) => current?.commandId === commandId ? undefined : current);
+      setConnectionError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return (
-    <div className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)_270px]">
+    <div className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)_340px]">
       <section className="flex min-h-0 flex-col border-r border-zinc-800">
         <header className="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
           <div><h1 className="font-serif text-xl text-ink">{room.name}</h1><p className="text-xs text-zinc-500">事件 #{events.at(-1)?.sequence ?? 0} · {readOnly ? "本地记录（只读）" : room.localRole === "host" ? "房主权威源" : roomPaused ? "房主离线 · 房间已暂停" : "已同步副本"}</p></div>
@@ -133,6 +327,20 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
           </div>
         )}
         {connectionError && <div className="border-b border-amber-900 bg-amber-950/30 px-5 py-2 text-xs text-amber-300">{connectionError}</div>}
+        <RoomWorldStage
+          locations={world.locations}
+          npcsByLocation={world.npcsByLocation}
+          latestCharacters={stageCharacters}
+          currentLocationByCharacterId={world.currentLocationByCharacterId}
+          locationContent={world.locationContent}
+          localPeerId={room.localPeerId}
+          selectedLocationId={room.localRole === "host" ? keeperSelectedLocationId : undefined}
+          readOnly={readOnly}
+          disabled={worldCommandsDisabled}
+          disabledReason={worldCommandsDisabledReason}
+          onSelectLocation={room.localRole === "host" ? setKeeperSelectedLocationId : undefined}
+          onEnterLocation={readOnly ? undefined : (character, location) => void enterLocation(character, location)}
+        />
         <div className="event-scroll flex-1 overflow-y-auto p-5">
           {events.length === 0 && <div className="grid h-full place-items-center text-sm text-zinc-600">{readOnly ? "本机暂无已同步记录" : "等待第一条调查记录……"}</div>}
           <div className="mx-auto grid max-w-3xl gap-3">
@@ -165,7 +373,7 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
         )}
       </section>
 
-      <aside className="overflow-y-auto p-4">
+      <aside className="flex flex-col overflow-y-auto p-4">
         {invitation.value && <Panel className="mb-4 p-4"><h2 className="text-sm font-semibold">邀请朋友</h2><p className="my-2 break-all font-mono text-[10px] text-zinc-500">{invitation.value}</p><Button variant="secondary" className="w-full" onClick={() => void navigator.clipboard.writeText(invitation.value!)}><Copy className="mr-2 h-4 w-4" />复制邀请串</Button></Panel>}
         {invitation.error && <Panel className="mb-4 border-amber-900 p-4"><h2 className="text-sm font-semibold text-amber-300">邀请不可用</h2><p className="mt-2 text-xs leading-5 text-amber-200/80">{invitation.error}</p></Panel>}
         {readOnly ? (
@@ -191,7 +399,35 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
             })}</div>
           </Panel>
         )}
-        {!readOnly && <Panel className="grid gap-3 p-4">
+        {!readOnly && room.localRole === "host" && session?.isHost === true && (
+          <div className="order-2 mb-4">
+            {keeperModuleLoading ? (
+              <Panel className="p-4 text-sm text-zinc-500">正在读取活动模组的精确修订……</Panel>
+            ) : activeKeeperModule ? (
+              <KeeperSceneControls
+                modulePackage={activeKeeperModule}
+                publishedLocations={world.locations}
+                npcsByLocation={world.npcsByLocation}
+                selectedLocationId={keeperSelectedLocationId}
+                disabled={worldCommandsDisabled}
+                disabledReason={worldCommandsDisabledReason}
+                onSelectLocation={setKeeperSelectedLocationId}
+                onPublishLocation={(location) => void publishLocation(location)}
+                onPublishNpc={(location, npc) => void publishNpc(location, npc)}
+              />
+            ) : (
+              <Panel className="border-amber-900/60 p-4">
+                <h2 className="text-sm font-semibold text-amber-200">守秘人场景控制</h2>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">
+                  {keeperModuleError ?? (world.activeModule
+                    ? "活动模组尚未准备好。"
+                    : "先在模组库中选择一个修订并设为房间模组，即可公开地点和 NPC。")}
+                </p>
+              </Panel>
+            )}
+          </div>
+        )}
+        {!readOnly && <Panel className="order-1 mb-4 grid gap-3 p-4">
           <div className="flex items-center gap-2"><Dices className="h-4 w-4 text-brass" /><h2 className="text-sm font-semibold">骰子与检定</h2></div>
           <Field label="骰式" hint={diceInput.error ?? "支持 d100、2d6、1d8+2；奖惩骰与成功检定仅适用于 1d100"}>
             <Input
@@ -292,6 +528,9 @@ function EventCard({ event }: { event: RoomEventV1 }) {
     case "character.updated": body = <p>更新角色卡：<b>{event.payload.character.name}</b></p>; break;
     case "module.switched": body = <p>切换模组：<b>{event.payload.title}</b></p>; break;
     case "content.revealed": body = <div><b>{event.payload.title}</b><p className="mt-2 whitespace-pre-wrap text-zinc-300">{event.payload.body}</p></div>; break;
+    case "location.published": body = <div><b>公开地点：{event.payload.location.name}</b><p className="mt-2 whitespace-pre-wrap text-zinc-300">{event.payload.location.description}</p></div>; break;
+    case "location.entered": body = <p><b>{event.payload.characterName}</b> 进入了 {event.payload.locationName}</p>; break;
+    case "npc.published": body = <div><b>{event.payload.npc.name}</b> 出现在 {event.payload.locationName}<p className="mt-2 whitespace-pre-wrap text-zinc-300">{event.payload.npc.description}</p></div>; break;
   }
   return <article className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-4"><header className="mb-2 flex gap-2 text-xs text-zinc-500"><span>#{event.sequence}</span><span className="text-zinc-300">{event.sender.displayName}</span><time>{new Date(event.occurredAt).toLocaleTimeString()}</time></header><div className="text-sm leading-6 text-ink">{body}</div></article>;
 }

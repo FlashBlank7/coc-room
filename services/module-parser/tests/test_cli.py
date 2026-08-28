@@ -3,7 +3,18 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
+from coc_module_parser import cli as cli_module
 from coc_module_parser.cli import run_stream
+from coc_module_parser.models import (
+    LocationV1,
+    ModuleMetadataV1,
+    ModulePackageV1,
+    NPCV1,
+    ParseResultV1,
+    SourceDocumentV1,
+)
 
 
 def events(stream: io.StringIO) -> list[dict]:
@@ -59,6 +70,63 @@ def test_flat_desktop_contract_and_progress_order() -> None:
         "summarize",
         "summarize",
     ]
+
+
+def test_sidecar_result_emits_player_descriptions_in_canonical_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = ModulePackageV1(
+        module_id="module:public-copy",
+        metadata=ModuleMetadataV1(title="Public copy"),
+        source=SourceDocumentV1(
+            name="public-copy.md", sha256="a" * 64, char_count=6
+        ),
+        locations=[
+            LocationV1(
+                id="location:hall",
+                name="Hall",
+                description="Keeper-only trapdoor details.",
+                player_description="Faded portraits line a cold stone hall.",
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:host",
+                name="Host",
+                description="Keeper-only cult allegiance.",
+                player_description="A pale host waits beside the fireplace.",
+            )
+        ],
+    )
+
+    class StubParser:
+        def parse(self, config: object, *, reporter: object) -> ParseResultV1:
+            del config, reporter
+            return ParseResultV1(
+                status="ready_for_review",
+                module=package,
+                extraction_attempts=1,
+            )
+
+    monkeypatch.setattr(cli_module, "ModuleParser", StubParser)
+    output = io.StringIO()
+    run_stream(
+        io.StringIO(
+            json.dumps({"id": "public-copy", "source_text": "# Test", "mock": True})
+            + "\n"
+        ),
+        output,
+    )
+    module = events(output)[-1]["module"]
+
+    assert module["locations"][0]["description"] == "Keeper-only trapdoor details."
+    assert module["locations"][0]["playerDescription"] == (
+        "Faded portraits line a cold stone hall."
+    )
+    assert module["npcs"][0]["description"] == "Keeper-only cult allegiance."
+    assert module["npcs"][0]["playerDescription"] == (
+        "A pale host waits beside the fireplace."
+    )
 
 
 def test_errors_never_echo_api_key() -> None:

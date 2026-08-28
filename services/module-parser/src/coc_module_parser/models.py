@@ -69,6 +69,14 @@ class LocationV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     name: str = Field(min_length=1, max_length=300)
     description: str = Field(default="", max_length=30_000)
+    player_description: str | None = Field(
+        default=None,
+        max_length=20_000,
+        description=(
+            "Conservative spoiler-free first-impression text containing only facts an "
+            "investigator can immediately perceive. Null when no safe wording is supported."
+        ),
+    )
     features: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(
         default_factory=list,
@@ -76,6 +84,13 @@ class LocationV1(StrictModel):
         description="Alternative names for this same place stated in the source.",
     )
     source_refs: list[SourceRefV1] = Field(default_factory=list)
+
+    @field_validator("player_description")
+    @classmethod
+    def normalize_player_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
 
     @field_validator("aliases")
     @classmethod
@@ -104,6 +119,14 @@ class NPCV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     name: str = Field(min_length=1, max_length=300)
     description: str = Field(default="", max_length=30_000)
+    player_description: str | None = Field(
+        default=None,
+        max_length=20_000,
+        description=(
+            "Conservative spoiler-free first-impression text containing only immediately "
+            "perceptible appearance or behavior. Null when no safe wording is supported."
+        ),
+    )
     role: str = Field(default="", max_length=1_000)
     motivations: list[str] = Field(default_factory=list, max_length=100)
     traits: list[str] = Field(default_factory=list, max_length=100)
@@ -112,6 +135,13 @@ class NPCV1(StrictModel):
         description="Only CoC statistics explicitly printed in the source; never infer values.",
     )
     source_refs: list[SourceRefV1] = Field(default_factory=list)
+
+    @field_validator("player_description")
+    @classmethod
+    def normalize_player_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
 
     @field_validator("traits")
     @classmethod
@@ -411,6 +441,7 @@ _MIGRATION_KEY_ALIASES = {
     "handoutIds": "handout_ids",
     "suggestedCheckIds": "suggested_check_ids",
     "handoutText": "handout_text",
+    "playerDescription": "player_description",
     "isCore": "is_core",
     "hitPoints": "hit_points",
     "sceneId": "scene_id",

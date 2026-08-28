@@ -32,8 +32,8 @@ from .text import TextChunk, stable_id
 
 
 # Bump whenever the base extraction instructions change; this invalidates old cache entries.
-DEEPSEEK_EXTRACTION_PROMPT_VERSION = "deepseek-fragment-v4-lossless-entities"
-CODEX_EXTRACTION_PROMPT_VERSION = "codex-cli-fragment-v3-strict-isolated"
+DEEPSEEK_EXTRACTION_PROMPT_VERSION = "deepseek-fragment-v5-player-visible-descriptions"
+CODEX_EXTRACTION_PROMPT_VERSION = "codex-cli-fragment-v4-player-visible-descriptions"
 
 DEEPSEEK_EXTRACTION_INSTRUCTIONS = (
     "Extract only facts explicitly present in this Call of Cthulhu module chunk. "
@@ -43,8 +43,16 @@ DEEPSEEK_EXTRACTION_INSTRUCTIONS = (
     "a verbatim excerpt from that exact range; omit a reference if you cannot quote it. "
     "Use existing IDs or visible names "
     "for cross-references; unresolved references may be omitted. Do not create chapters; "
-    "chapter grouping is a manual editor action. Keeper-only information belongs in "
-    "keeper_notes. Preserve explicit location aliases. For NPCs, put stated personality "
+    "chapter grouping is a manual editor action. General keeper-only guidance belongs in "
+    "keeper_notes. Preserve explicit location aliases. Keep the complete entity-specific "
+    "keeper-facing location and NPC information in description. Set player_description only "
+    "to a conservative, spoiler-free first impression based on facts an investigator can "
+    "immediately perceive on first encounter, such as visible appearance, condition, "
+    "atmosphere, or overt behavior. Never include hidden identities, motives, allegiances, "
+    "secrets, concealed features, clue solutions, future events, or game mechanics. Do not "
+    "infer or embellish; use null when the source does not support safe perceptible wording. "
+    "The result is only a draft for keeper review and must never be treated as automatically "
+    "approved for players. For NPCs, put stated personality "
     "or physical features in traits and copy explicit CoC characteristics, skills, hit "
     "points, and sanity into character without inventing missing stats. Mark is_core only "
     "when the source makes the clue essential to progression. Extract complete player-facing "
@@ -626,7 +634,7 @@ class CodexCliExtractor:
 class DeterministicMockExtractor:
     model: str = "deterministic-v1"
     name: str = "deterministic-mock"
-    extraction_prompt_version: str = "deterministic-mock-v2-handouts"
+    extraction_prompt_version: str = "deterministic-mock-v3-player-visible-descriptions"
     cacheable: bool = True
 
     @staticmethod

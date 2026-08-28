@@ -482,7 +482,10 @@ function LocationCard({
 }) {
   return (
     <EntityCard id={location.id} title={location.name} keeper>
-      <RichText>{location.description}</RichText>
+      <SecretBlock label="守秘人地点说明">
+        <RichText>{location.description}</RichText>
+      </SecretBlock>
+      <PlayerVisibleBlock text={location.playerDescription} empty="尚未填写地点的玩家可见说明；填写并保存新修订后才能发布。" />
       {location.aliases.length > 0 && <TagList label="别名" values={location.aliases} />}
       <SourceReferences references={location.sourceRefs} sourceNames={sourceNames} />
     </EntityCard>
@@ -492,7 +495,10 @@ function LocationCard({
 function NpcCard({ npc, sourceNames }: { npc: ModuleNpc; sourceNames: ReadonlyMap<string, string> }) {
   return (
     <EntityCard id={npc.id} title={npc.name} subtitle={npc.role} keeper>
-      <RichText>{npc.description}</RichText>
+      <SecretBlock label="守秘人 NPC 说明">
+        <RichText>{npc.description}</RichText>
+      </SecretBlock>
+      <PlayerVisibleBlock text={npc.playerDescription} empty="尚未填写 NPC 的玩家可见说明；填写并保存新修订后才能发布。" />
       {npc.motivation && <DetailBlock label="动机" text={npc.motivation} secret />}
       {npc.traits.length > 0 && <TagList label="特征" values={npc.traits} />}
       {npc.character && (
@@ -509,6 +515,18 @@ function NpcCard({ npc, sourceNames }: { npc: ModuleNpc; sourceNames: ReadonlyMa
       )}
       <SourceReferences references={npc.sourceRefs} sourceNames={sourceNames} />
     </EntityCard>
+  );
+}
+
+function PlayerVisibleBlock({ text, empty }: { text?: string; empty: string }) {
+  return (
+    <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3">
+      <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-emerald-300">
+        <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+        玩家可见快照
+      </div>
+      {text?.trim() ? <RichText>{text}</RichText> : <p className="text-xs leading-5 text-zinc-500">{empty}</p>}
+    </div>
   );
 }
 

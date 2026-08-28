@@ -223,8 +223,14 @@ describe("ModulesView room publishing controls", () => {
     expect(screen.queryByLabelText("公开线索：可公开线索")).toBeNull();
     expect(screen.getByText(/不是房间正在使用的精确版本/)).not.toBeNull();
 
-    useAppStore.getState().setEvents([createModuleSwitchedEvent(modulePackage)]);
+    useAppStore.getState().setEvents([
+      createModuleSwitchedEvent(modulePackage),
+      createLocationPublishedEvent(modulePackage),
+    ]);
     await screen.findByLabelText("房间内容公开");
+    fireEvent.change(screen.getByLabelText("公开内容关联地点"), {
+      target: { value: "location-public" },
+    });
 
     submit.mockClear();
     fireEvent.click(screen.getByLabelText("公开线索：可公开线索"));
@@ -235,6 +241,7 @@ describe("ModulesView room publishing controls", () => {
       contentType: "clue",
       title: "可公开线索",
       body: "玩家可见的线索正文",
+      locationId: "location-public",
     }));
 
     submit.mockClear();
@@ -246,6 +253,7 @@ describe("ModulesView room publishing controls", () => {
       contentType: "handout",
       title: "玩家手记",
       body: "玩家可见的手记正文",
+      locationId: "location-public",
     }));
   });
 
@@ -353,6 +361,14 @@ function createModulePackageWithPublicContent(): ModulePackageV1 {
       ...createModulePackage().metadata,
       title: "公开内容测试模组",
     },
+    locations: [{
+      id: "location-public",
+      name: "公开书房",
+      description: "KP 私密地点说明",
+      playerDescription: "一间安静的旧书房。",
+      aliases: [],
+      sourceRefs: [],
+    }],
     clues: [
       {
         id: "clue-private",
@@ -397,6 +413,27 @@ function createModuleSwitchedEvent(modulePackage: ModulePackageV1): RoomEventV1 
       moduleId: modulePackage.moduleId,
       revision: modulePackage.revision,
       title: modulePackage.metadata.title,
+    },
+  };
+}
+
+function createLocationPublishedEvent(modulePackage: ModulePackageV1): RoomEventV1 {
+  return {
+    protocolVersion: 1,
+    roomId: "room-module-test",
+    eventId: "00000000-0000-4000-8000-000000000002",
+    sequence: 2,
+    sender: { peerId: "host-peer", displayName: "守秘人", role: "host" },
+    occurredAt: "2026-08-27T00:01:00.000Z",
+    type: "location.published",
+    payload: {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      location: {
+        id: "location-public",
+        name: "公开书房",
+        description: "一间安静的旧书房。",
+      },
     },
   };
 }

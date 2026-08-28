@@ -15,6 +15,24 @@ export const participantSchema = z
 const eventIdSchema = z.string().uuid();
 const commandIdSchema = z.string().uuid();
 
+/** A deliberately minimal location snapshot that is safe to send to players. */
+export const playerVisibleLocationSchema = z
+  .object({
+    id: entityIdSchema,
+    name: z.string().min(1).max(240),
+    description: z.string().max(20_000),
+  })
+  .strict();
+
+/** A deliberately minimal NPC snapshot that cannot carry keeper-only fields. */
+export const playerVisibleNpcSchema = z
+  .object({
+    id: entityIdSchema,
+    name: z.string().min(1).max(240),
+    description: z.string().max(20_000),
+  })
+  .strict();
+
 const eventBase = z.object({
   protocolVersion: z.literal(1),
   roomId: roomIdSchema,
@@ -96,6 +114,51 @@ export const contentRevealedEventSchema = eventBase
         contentType: z.enum(["clue", "handout", "text"]),
         title: z.string().min(1).max(240),
         body: z.string().max(50_000),
+        locationId: entityIdSchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const locationPublishedEventSchema = eventBase
+  .extend({
+    type: z.literal("location.published"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        location: playerVisibleLocationSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const locationEnteredEventSchema = eventBase
+  .extend({
+    type: z.literal("location.entered"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        locationId: entityIdSchema,
+        locationName: z.string().min(1).max(240),
+        characterId: entityIdSchema,
+        characterName: z.string().min(1).max(240),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const npcPublishedEventSchema = eventBase
+  .extend({
+    type: z.literal("npc.published"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        locationId: entityIdSchema,
+        locationName: z.string().min(1).max(240),
+        npc: playerVisibleNpcSchema,
       })
       .strict(),
   })
@@ -108,6 +171,9 @@ export const roomEventSchema = z.discriminatedUnion("type", [
   characterUpdatedEventSchema,
   moduleSwitchedEventSchema,
   contentRevealedEventSchema,
+  locationPublishedEventSchema,
+  locationEnteredEventSchema,
+  npcPublishedEventSchema,
 ]);
 
 const commandBase = z.object({
@@ -197,6 +263,51 @@ export const revealContentCommandSchema = commandBase
         contentType: z.enum(["clue", "handout", "text"]),
         title: z.string().min(1).max(240),
         body: z.string().max(50_000),
+        locationId: entityIdSchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const publishLocationCommandSchema = commandBase
+  .extend({
+    type: z.literal("location.publish"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        location: playerVisibleLocationSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const enterLocationCommandSchema = commandBase
+  .extend({
+    type: z.literal("location.enter"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        locationId: entityIdSchema,
+        locationName: z.string().min(1).max(240),
+        characterId: entityIdSchema,
+        characterName: z.string().min(1).max(240),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const publishNpcCommandSchema = commandBase
+  .extend({
+    type: z.literal("npc.publish"),
+    payload: z
+      .object({
+        moduleId: entityIdSchema,
+        revision: z.number().int().positive(),
+        locationId: entityIdSchema,
+        locationName: z.string().min(1).max(240),
+        npc: playerVisibleNpcSchema,
       })
       .strict(),
   })
@@ -208,6 +319,9 @@ export const roomCommandSchema = z.discriminatedUnion("type", [
   updateCharacterCommandSchema,
   switchModuleCommandSchema,
   revealContentCommandSchema,
+  publishLocationCommandSchema,
+  enterLocationCommandSchema,
+  publishNpcCommandSchema,
 ]);
 
 export type ParticipantV1 = z.infer<typeof participantSchema>;
@@ -215,6 +329,12 @@ export type RoomEventV1 = z.infer<typeof roomEventSchema>;
 export type RoomCommandV1 = z.infer<typeof roomCommandSchema>;
 export type RoomEventTypeV1 = RoomEventV1["type"];
 export type RoomCommandTypeV1 = RoomCommandV1["type"];
+export type PlayerVisibleLocationV1 = z.infer<typeof playerVisibleLocationSchema>;
+export type PlayerVisibleNpcV1 = z.infer<typeof playerVisibleNpcSchema>;
+export type LocationPublishedPayloadV1 = z.infer<typeof locationPublishedEventSchema>["payload"];
+export type LocationEnteredPayloadV1 = z.infer<typeof locationEnteredEventSchema>["payload"];
+export type NpcPublishedPayloadV1 = z.infer<typeof npcPublishedEventSchema>["payload"];
+export type ContentRevealedPayloadV1 = z.infer<typeof contentRevealedEventSchema>["payload"];
 
 type SequencedFields = "protocolVersion" | "roomId" | "eventId" | "sequence" | "occurredAt";
 export type RoomEventDraftV1 = RoomEventV1 extends infer Event

@@ -122,6 +122,12 @@ The compiled LangGraph is linear at the document level:
 
 The extraction Schema preserves location aliases, NPC traits and explicit CoC character
 statistics, core-clue flags, and independent player-facing handouts with scene links.
+Locations and NPCs may also contain `playerDescription`, generated conservatively from
+only immediately perceptible first-encounter facts. It must exclude hidden identities,
+motives, allegiances, concealed features, clue solutions, future events, and mechanics;
+when safe wording is not supported it is omitted. This text is always a draft for keeper
+review and is never published to a room automatically.
+
 Every one of these entities carries verified source references. Chapters are deliberately
 not part of the fragment Schema: chapter grouping is created manually in the editor, so
 the parser always returns an empty chapter list instead of inventing a structure.

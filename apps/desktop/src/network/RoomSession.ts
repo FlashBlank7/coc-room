@@ -34,6 +34,7 @@ export interface RoomSessionTransport {
 }
 
 export type RoomSessionTransportFactory = (options: RoomTransportOptions) => RoomSessionTransport;
+type CommandOfType<Type extends RoomCommandV1["type"]> = Extract<RoomCommandV1, { type: Type }>;
 
 export interface RoomSessionOptions {
   room: RoomRecord;
@@ -150,9 +151,9 @@ export class RoomSession {
     this.syncCollectors.clear();
   }
 
-  async submit(
-    type: RoomCommandV1["type"],
-    payload: RoomCommandV1["payload"],
+  async submit<Type extends RoomCommandV1["type"]>(
+    type: Type,
+    payload: CommandOfType<Type>["payload"],
     commandId = globalThis.crypto.randomUUID(),
   ): Promise<void> {
     if (!this.isHostAvailable) {

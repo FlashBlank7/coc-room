@@ -22,10 +22,12 @@ describe("ModuleEntityBrowser", () => {
     expect(screen.getByRole("heading", { name: "映夜太夫" })).toBeTruthy();
     expect(screen.getByText("花魁（委托人）")).toBeTruthy();
     expect(screen.getByText("为姐姐蝴蝶复仇")).toBeTruthy();
+    expect(screen.getByText("一位举止温雅、神情忧虑的花魁。")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: /地点/ }));
     expect(screen.getByRole("heading", { name: "扬屋（映夜的处所）" })).toBeTruthy();
     expect(screen.getByText(/也是她被绑架后的现场/)).toBeTruthy();
+    expect(screen.getByText("铺着草榻的雅致会客之所。")).toBeTruthy();
   });
 
   it("focuses the exact NPC or location card selected from the overview", () => {
@@ -171,6 +173,7 @@ function createModulePackage(): ModulePackageV1 {
         id: "location:ageya",
         name: "扬屋（映夜的处所）",
         description: "映夜太夫所在的扬屋，也是她被绑架后的现场。",
+        playerDescription: "铺着草榻的雅致会客之所。",
         sourceRefs: [sourceRef],
         aliases: ["扬屋"],
       },
@@ -180,6 +183,7 @@ function createModulePackage(): ModulePackageV1 {
         id: "npc:eiya",
         name: "映夜太夫",
         description: "温婉典雅的花魁。",
+        playerDescription: "一位举止温雅、神情忧虑的花魁。",
         sourceRefs: [sourceRef],
         role: "花魁（委托人）",
         motivation: "为姐姐蝴蝶复仇",

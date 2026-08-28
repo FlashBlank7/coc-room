@@ -53,7 +53,7 @@ const room: RoomRecord = {
 const savedEvent: RoomEventV1 = {
   protocolVersion: 1,
   roomId: room.id,
-  eventId: "saved-event",
+  eventId: "00000000-0000-4000-8000-000000000001",
   sequence: 1,
   sender: { peerId: "host-peer", displayName: "守秘人", role: "host" },
   type: "system.notice",

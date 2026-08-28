@@ -18,6 +18,8 @@ describe("StructuredModuleEditor", () => {
     expect(current.locations[0]?.sourceRefs).toEqual([{ sourceId: "source-1", start: 1, end: 5 }]);
 
     fireEvent.click(screen.getByRole("button", { name: "编辑地点（1）" }));
+    fireEvent.change(screen.getByLabelText("地点 location-1 玩家可见说明"), { target: { value: "玩家只会看到这段地点介绍" } });
+    expect(current.locations[0]?.playerDescription).toBe("玩家只会看到这段地点介绍");
     fireEvent.click(screen.getByRole("button", { name: "添加地点" }));
     expect(current.locations).toHaveLength(2);
     expect(current.locations[0]?.id).toBe("location-1");
@@ -28,6 +30,11 @@ describe("StructuredModuleEditor", () => {
     expect(current.scenes[0]?.locationIds).toEqual([]);
     expect(current.relations).toEqual([]);
     expect(modulePackageSchema.safeParse(current).success).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑NPC（1）" }));
+    fireEvent.change(screen.getByLabelText("NPC npc-1 玩家可见说明"), { target: { value: "衣着考究的陌生人" } });
+    expect(current.npcs[0]?.playerDescription).toBe("衣着考究的陌生人");
+    expect(current.npcs[0]?.motivation).toBe("隐藏真相");
   });
 
   it("adds a chapter without introducing fields outside the schema", () => {
@@ -84,7 +91,7 @@ function createPackage(): ModulePackageV1 {
     chapters: [],
     scenes: [{ id: "scene-1", name: "场景", description: "", sourceRefs: [], synopsis: "", locationIds: ["location-1"], npcIds: [], clueIds: [], handoutIds: [], suggestedCheckIds: [], keeperNotes: "" }],
     locations: [{ id: "location-1", name: "地点", description: "", aliases: [], sourceRefs: [{ sourceId: "source-1", start: 1, end: 5 }] }],
-    npcs: [],
+    npcs: [{ id: "npc-1", name: "陌生人", description: "KP 私密说明", role: "嫌疑人", motivation: "隐藏真相", traits: ["谨慎"], sourceRefs: [] }],
     clues: [],
     handouts: [],
     suggestedChecks: [],

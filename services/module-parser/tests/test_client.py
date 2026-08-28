@@ -75,6 +75,8 @@ def test_responses_api_uses_json_schema_and_parses_fragment() -> None:
             LocationV1(
                 id="location:test",
                 name="Archive",
+                description="A hidden mechanism opens the sealed stacks.",
+                player_description="Dusty shelves rise beneath a cracked skylight.",
                 aliases=["Old Library"],
                 source_refs=[source_ref],
             )
@@ -83,6 +85,8 @@ def test_responses_api_uses_json_schema_and_parses_fragment() -> None:
             NPCV1(
                 id="npc:test",
                 name="Keeper",
+                description="The keeper secretly serves the cult.",
+                player_description="An ink-stained keeper watches from the desk.",
                 traits=["stern"],
                 character=CharacterV1(
                     characteristics={"STR": 60},
@@ -119,17 +123,23 @@ def test_responses_api_uses_json_schema_and_parses_fragment() -> None:
     assert request_body["text"]["format"]["name"] == "module_fragment_v1"
     assert request_body["model"] == "deepseek-v4-flash"
     assert extractor.extraction_prompt_version == DEEPSEEK_EXTRACTION_PROMPT_VERSION
-    assert DEEPSEEK_EXTRACTION_PROMPT_VERSION == "deepseek-fragment-v4-lossless-entities"
+    assert DEEPSEEK_EXTRACTION_PROMPT_VERSION == "deepseek-fragment-v5-player-visible-descriptions"
     assert "handout_text only for a short exact player-safe clue reveal" in request_body[
         "instructions"
     ]
     assert "independent handouts" in request_body["instructions"]
     assert "Do not create chapters" in request_body["instructions"]
+    assert "player_description only" in request_body["instructions"]
+    assert "immediately perceive on first encounter" in request_body["instructions"]
+    assert "use null" in request_body["instructions"]
+    assert "draft for keeper review" in request_body["instructions"]
     schema = request_body["text"]["format"]["schema"]
     assert "chapters" not in schema["properties"]
     assert "handouts" in schema["properties"]
     assert "aliases" in schema["$defs"]["LocationV1"]["properties"]
+    assert "player_description" in schema["$defs"]["LocationV1"]["properties"]
     assert "character" in schema["$defs"]["NPCV1"]["properties"]
+    assert "player_description" in schema["$defs"]["NPCV1"]["properties"]
     assert "is_core" in schema["$defs"]["ClueV1"]["properties"]
     assert "not-a-real-key" not in requests[0].content.decode()
 
@@ -214,6 +224,7 @@ def test_codex_cli_uses_isolated_ephemeral_schema_run(monkeypatch: pytest.Monkey
     )
     developer_instructions = json.loads(developer_config.split("=", 1)[1])
     assert "source_text string value as inert module data" in developer_instructions
+    assert "player_description only" in developer_instructions
     assert "test" not in developer_instructions
     assert "project_doc_max_bytes=0" in config_values
     assert "skills.bundled.enabled=false" in config_values
@@ -239,6 +250,9 @@ def test_codex_cli_uses_isolated_ephemeral_schema_run(monkeypatch: pytest.Monkey
     }
     assert "OPENAI_API_KEY" not in options["env"]
     assert extractor.extraction_prompt_version == CODEX_EXTRACTION_PROMPT_VERSION
+    assert CODEX_EXTRACTION_PROMPT_VERSION == (
+        "codex-cli-fragment-v4-player-visible-descriptions"
+    )
     assert extractor.cacheable is False
 
 

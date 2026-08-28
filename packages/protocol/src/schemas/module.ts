@@ -59,12 +59,14 @@ export const moduleSceneSchema = moduleEntityBase
 
 export const moduleLocationSchema = moduleEntityBase
   .extend({
+    playerDescription: z.string().max(20_000).optional(),
     aliases: z.array(z.string().min(1).max(160)).max(50),
   })
   .strict();
 
 export const moduleNpcSchema = moduleEntityBase
   .extend({
+    playerDescription: z.string().max(20_000).optional(),
     role: z.string().max(1_000),
     motivation: z.string().max(4_000),
     traits: z.array(z.string().min(1).max(500)).max(100),

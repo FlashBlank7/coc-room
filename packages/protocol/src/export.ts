@@ -180,8 +180,36 @@ function eventToMarkdown(event: RoomEventV1): string[] {
         markdownMetadata(event),
         "",
         `**${escapeMarkdown(event.payload.title)}**`,
+        ...(event.payload.locationId === undefined
+          ? []
+          : [`地点 ID：\`${escapeMarkdown(event.payload.locationId)}\``]),
         "",
         ...escapeMarkdownBlock(event.payload.body),
+      ];
+    case "location.published":
+      return [
+        markdownHeading(event, "公开地点"),
+        markdownMetadata(event),
+        "",
+        `**${escapeMarkdown(event.payload.location.name)}**`,
+        "",
+        ...escapeMarkdownBlock(event.payload.location.description),
+      ];
+    case "location.entered":
+      return [
+        markdownHeading(event, "进入地点"),
+        markdownMetadata(event),
+        "",
+        `**${escapeMarkdown(event.payload.characterName)}**进入了**${escapeMarkdown(event.payload.locationName)}**。`,
+      ];
+    case "npc.published":
+      return [
+        markdownHeading(event, "NPC 登场"),
+        markdownMetadata(event),
+        "",
+        `**${escapeMarkdown(event.payload.npc.name)}** · ${escapeMarkdown(event.payload.locationName)}`,
+        "",
+        ...escapeMarkdownBlock(event.payload.npc.description),
       ];
   }
 }
@@ -274,7 +302,16 @@ function eventToHtml(event: RoomEventV1): string {
       body = `<p class="body">切换至 <strong>${escapeHtml(event.payload.title)}</strong>（修订 ${event.payload.revision}，ID：${escapeHtml(event.payload.moduleId)}）</p>`;
       break;
     case "content.revealed":
-      body = `<div class="revealed"><strong>${escapeHtml(event.payload.title)}</strong><p class="body">${escapeHtml(event.payload.body)}</p></div>`;
+      body = `<div class="revealed"><strong>${escapeHtml(event.payload.title)}</strong>${event.payload.locationId === undefined ? "" : `<p class="type">地点 ID：${escapeHtml(event.payload.locationId)}</p>`}<p class="body">${escapeHtml(event.payload.body)}</p></div>`;
+      break;
+    case "location.published":
+      body = `<div class="revealed"><strong>${escapeHtml(event.payload.location.name)}</strong><p class="body">${escapeHtml(event.payload.location.description)}</p></div>`;
+      break;
+    case "location.entered":
+      body = `<p class="body"><strong>${escapeHtml(event.payload.characterName)}</strong>进入了<strong>${escapeHtml(event.payload.locationName)}</strong>。</p>`;
+      break;
+    case "npc.published":
+      body = `<div class="revealed"><strong>${escapeHtml(event.payload.npc.name)}</strong><span class="type"> · ${escapeHtml(event.payload.locationName)}</span><p class="body">${escapeHtml(event.payload.npc.description)}</p></div>`;
       break;
   }
   return `    <article class="event event-${escapeHtml(event.type.replace(".", "-"))}">${header}${body}</article>`;

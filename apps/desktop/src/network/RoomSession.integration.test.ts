@@ -1,8 +1,10 @@
 import type {
+  Coc7Character,
   ModulePackageV1,
   ParticipantV1,
   RoomEventV1,
 } from "@coc-room/protocol";
+import { deriveRoomWorldState } from "@coc-room/protocol";
 import { describe, expect, it } from "vitest";
 
 import { MemoryRepository, type RoomRecord } from "../data/repository";
@@ -341,6 +343,109 @@ describe("RoomSession two-client integration", () => {
     host.stop();
     await network.settle();
   });
+
+  it("keeps immersive room projections in sync without leaking keeper module fields", async () => {
+    const network = new PairedMemoryTransportNetwork();
+    const hostRepository = new MemoryRepository();
+    const playerRepository = new MemoryRepository();
+    const host = createSession("host", hostRepository, network.transportFactory);
+    const player = createSession("player", playerRepository, network.transportFactory);
+    const errors: string[] = [];
+    host.onError = (message) => errors.push(`host: ${message}`);
+    player.onError = (message) => errors.push(`player: ${message}`);
+
+    await host.start();
+    await player.start();
+    await network.settle();
+
+    const modulePackage = keeperModule();
+    const location = modulePackage.locations[0];
+    const npc = modulePackage.npcs[0];
+    if (!location || !npc) throw new Error("immersive fixture requires a location and NPC");
+    const character = investigatorCharacter();
+
+    await host.submit("module.switch", {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      title: modulePackage.metadata.title,
+    });
+    await network.settle();
+    await player.submit("character.update", { character });
+    await network.settle();
+    await host.submit("location.publish", {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      location: {
+        id: location.id,
+        name: location.name,
+        description: location.playerDescription ?? "",
+      },
+    });
+    await network.settle();
+    await player.submit("location.enter", {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      locationId: location.id,
+      locationName: location.name,
+      characterId: character.id,
+      characterName: character.name,
+    });
+    await network.settle();
+    await host.submit("npc.publish", {
+      moduleId: modulePackage.moduleId,
+      revision: modulePackage.revision,
+      locationId: location.id,
+      locationName: location.name,
+      npc: {
+        id: npc.id,
+        name: npc.name,
+        description: npc.playerDescription ?? "",
+      },
+    });
+    await network.settle();
+
+    const hostEvents = await hostRepository.listEvents(ROOM_ID);
+    const playerEvents = await playerRepository.listEvents(ROOM_ID);
+    expect(playerEvents).toEqual(hostEvents);
+    expect(playerEvents.map((event) => event.type)).toEqual([
+      "module.switched",
+      "character.updated",
+      "location.published",
+      "location.entered",
+      "npc.published",
+    ]);
+
+    const hostWorld = deriveRoomWorldState(hostEvents);
+    const playerWorld = deriveRoomWorldState(playerEvents);
+    expect(playerWorld).toEqual(hostWorld);
+    expect(playerWorld.locations.get(location.id)).toEqual({
+      id: location.id,
+      name: location.name,
+      description: location.playerDescription,
+    });
+    expect(playerWorld.currentLocationByCharacterId.get(character.id)).toBe(location.id);
+    expect(playerWorld.latestCharacters.get(character.id)).toEqual(character);
+    expect(playerWorld.npcsByLocation.get(location.id)?.get(npc.id)).toEqual({
+      id: npc.id,
+      name: npc.name,
+      description: npc.playerDescription,
+    });
+
+    const serializedPlayerEvents = JSON.stringify(playerEvents);
+    expect(serializedPlayerEvents).toContain(location.playerDescription);
+    expect(serializedPlayerEvents).toContain(npc.playerDescription);
+    expect(serializedPlayerEvents).not.toContain(location.description);
+    expect(serializedPlayerEvents).not.toContain(npc.description);
+    expect(serializedPlayerEvents).not.toContain(npc.role);
+    expect(serializedPlayerEvents).not.toContain(npc.motivation);
+    expect(serializedPlayerEvents).not.toContain("keeper-only location layout");
+    expect(serializedPlayerEvents).not.toContain("keeper-only NPC allegiance");
+    expect(errors).toEqual([]);
+
+    player.stop();
+    host.stop();
+    await network.settle();
+  });
 });
 
 function createSession(
@@ -397,8 +502,28 @@ function keeperModule(): ModulePackageV1 {
     ],
     chapters: [],
     scenes: [],
-    locations: [],
-    npcs: [],
+    locations: [
+      {
+        id: "location.moth-library",
+        name: "The shuttered library",
+        description: "KEEPER LOCATION SECRET: a concealed trapdoor reveals the keeper-only location layout.",
+        playerDescription: "Dust hangs in the moonlight between rows of locked cabinets.",
+        aliases: ["Library"],
+        sourceRefs: [],
+      },
+    ],
+    npcs: [
+      {
+        id: "npc.moth-curator",
+        name: "The curator",
+        description: "KEEPER NPC SECRET: she serves the moth queen and hides her keeper-only NPC allegiance.",
+        playerDescription: "A tired curator watches the investigators from behind a brass lamp.",
+        role: "Secret cult lieutenant",
+        motivation: "Deliver the investigators to the moth queen.",
+        traits: ["Knows the hidden ritual", "Will betray the patron"],
+        sourceRefs: [],
+      },
+    ],
     clues: [],
     handouts: [],
     suggestedChecks: [],
@@ -418,6 +543,66 @@ function keeperModule(): ModulePackageV1 {
       },
     ],
     relations: [],
+    extensions: {},
+  };
+}
+
+function investigatorCharacter(): Coc7Character {
+  return {
+    schemaVersion: 1,
+    id: "character.integration.reporter",
+    ownerPeerId: PLAYER_PEER_ID,
+    name: "Morgan Hale",
+    playerName: PLAYER.displayName,
+    occupation: "Reporter",
+    age: 31,
+    residence: "Boston",
+    birthplace: "Providence",
+    characteristics: {
+      str: 45,
+      con: 55,
+      siz: 50,
+      dex: 65,
+      app: 60,
+      int: 75,
+      pow: 60,
+      edu: 70,
+      luck: 50,
+    },
+    derived: {
+      hitPoints: 10,
+      maxHitPoints: 10,
+      magicPoints: 12,
+      maxMagicPoints: 12,
+      sanity: 60,
+      maxSanity: 99,
+      movementRate: 8,
+      build: 0,
+      damageBonus: "0",
+    },
+    skills: [],
+    status: {
+      temporaryInsanity: false,
+      indefiniteInsanity: false,
+      majorWound: false,
+      dying: false,
+      unconscious: false,
+    },
+    inventory: [],
+    background: {
+      personalDescription: "Ink-stained cuffs and an observant stare.",
+      ideologyAndBeliefs: "The public deserves the truth.",
+      significantPeople: "Editor Rowan",
+      meaningfulLocations: "The city newsroom",
+      treasuredPossessions: "A battered notebook",
+      traits: "Persistent",
+      injuriesAndScars: "",
+      phobiasAndManias: "",
+      arcaneTomesSpellsAndArtifacts: "",
+      encountersWithStrangeEntities: "",
+    },
+    notes: "",
+    updatedAt: "2026-08-28T00:00:00.000Z",
     extensions: {},
   };
 }

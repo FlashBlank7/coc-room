@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RoomEventV1 } from "@coc-room/protocol";
-import type { RoomRecord } from "../data/repository";
+import type { Coc7Character, ModulePackageV1, RoomEventV1 } from "@coc-room/protocol";
+import { getRepository, type RoomRecord } from "../data/repository";
 import type { RoomSession } from "../network/RoomSession";
 import { useAppStore } from "../store/app-store";
 import { RoomView } from "./RoomView";
@@ -27,7 +27,7 @@ const player = { peerId: room.localPeerId, displayName: "调查员", role: "play
 const event: RoomEventV1 = {
   protocolVersion: 1,
   roomId: room.id,
-  eventId: "event-1",
+  eventId: "00000000-0000-4000-8000-000000000001",
   sequence: 1,
   sender: { peerId: "host-peer", displayName: "守秘人", role: "host" },
   type: "chat.message",
@@ -141,6 +141,155 @@ describe("RoomView", () => {
     }));
   });
 
+  it("projects public room-world events and lets a player enter with their own character", async () => {
+    const character = createCharacter("character-lin", room.localPeerId, "林若岚");
+    useAppStore.setState({
+      events: [
+        {
+          ...event,
+          eventId: "00000000-0000-4000-8000-000000000011",
+          sequence: 1,
+          type: "module.switched",
+          payload: { moduleId: "module-butterfly", revision: 3, title: "见世之蝶" },
+        },
+        {
+          ...event,
+          eventId: "00000000-0000-4000-8000-000000000012",
+          sequence: 2,
+          sender: player,
+          type: "character.updated",
+          payload: { character },
+        },
+        {
+          ...event,
+          eventId: "00000000-0000-4000-8000-000000000013",
+          sequence: 3,
+          type: "location.published",
+          payload: {
+            moduleId: "module-butterfly",
+            revision: 3,
+            location: { id: "location-theater", name: "观止剧场", description: "灯光落在空荡的舞台上。" },
+          },
+        },
+        {
+          ...event,
+          eventId: "00000000-0000-4000-8000-000000000014",
+          sequence: 4,
+          type: "npc.published",
+          payload: {
+            moduleId: "module-butterfly",
+            revision: 3,
+            locationId: "location-theater",
+            locationName: "观止剧场",
+            npc: { id: "npc-hana", name: "花小路", description: "一位神色谨慎的演员。" },
+          },
+        },
+        {
+          ...event,
+          eventId: "00000000-0000-4000-8000-000000000015",
+          sequence: 5,
+          type: "content.revealed",
+          payload: {
+            moduleId: "module-butterfly",
+            revision: 3,
+            contentId: "clue-ticket",
+            contentType: "clue",
+            title: "沾血的票根",
+            body: "日期被墨水涂掉了。",
+            locationId: "location-theater",
+          },
+        },
+      ],
+    });
+    const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
+    const session = { submit } as unknown as RoomSession;
+
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    expect(screen.getByRole("heading", { name: "观止剧场" })).toBeTruthy();
+    expect(screen.getAllByText("灯光落在空荡的舞台上。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("花小路").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("沾血的票根").length).toBeGreaterThan(0);
+    const enterButton = screen.getByRole("button", { name: "让 林若岚 进入此地" });
+    fireEvent.click(enterButton);
+    fireEvent.click(enterButton);
+
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("location.enter", {
+      moduleId: "module-butterfly",
+      revision: 3,
+      locationId: "location-theater",
+      locationName: "观止剧场",
+      characterId: "character-lin",
+      characterName: "林若岚",
+    }, expect.any(String)));
+    expect(submit).toHaveBeenCalledOnce();
+    expect((enterButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByText(/正在等待房主确认/).length).toBeGreaterThan(0);
+  });
+
+  it("never renders a stale keeper module under a newly active revision", async () => {
+    const modulePackage = createKeeperModule();
+    const repository = await getRepository();
+    if (await repository.getModule(modulePackage.moduleId, modulePackage.revision) === undefined) {
+      await repository.saveModule({ package: modulePackage, sourceText: "fixture" });
+    }
+    const hostRoom: RoomRecord = {
+      ...room,
+      localRole: "host",
+      localPeerId: room.hostPeerId,
+      joinToken: "player-join-token",
+    };
+    const firstSwitch: RoomEventV1 = {
+      ...event,
+      eventId: "00000000-0000-4000-8000-000000000021",
+      sequence: 1,
+      type: "module.switched",
+      payload: {
+        moduleId: modulePackage.moduleId,
+        revision: modulePackage.revision,
+        title: modulePackage.metadata.title,
+      },
+    };
+    useAppStore.setState({ currentRoom: hostRoom, participants: [host], paths: {}, events: [firstSwitch] });
+    const submit = vi.fn(async (_type: string, _payload: unknown) => undefined);
+    const session = { participant: host, isHost: true, submit } as unknown as RoomSession;
+
+    render(<RoomView session={session} onLeave={() => undefined} />);
+
+    expect(await screen.findByRole("heading", { name: "精确修订 A" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "向全房间公开地点" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("location.publish", {
+      moduleId: "module-exact-a",
+      revision: 1,
+      location: {
+        id: "location-exact-a",
+        name: "旧书房",
+        description: "玩家看到一间落满灰尘的书房。",
+      },
+    }, expect.any(String)));
+    submit.mockClear();
+
+    await act(async () => {
+      useAppStore.setState({
+        events: [
+          firstSwitch,
+          {
+            ...event,
+            eventId: "00000000-0000-4000-8000-000000000022",
+            sequence: 2,
+            type: "module.switched",
+            payload: { moduleId: "module-exact-b", revision: 2, title: "精确修订 B" },
+          },
+        ],
+      });
+    });
+
+    expect(screen.queryByRole("heading", { name: "精确修订 A" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "向全房间公开地点" })).toBeNull();
+    expect(await screen.findByText(/找不到活动版本 module-exact-b v2/)).toBeTruthy();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("shows percentile candidates and translated CoC check results in the room log", () => {
     useAppStore.setState({
       events: [{
@@ -210,3 +359,83 @@ describe("RoomView", () => {
     expect((screen.getByRole("button", { name: "掷骰并记录" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+function createCharacter(id: string, ownerPeerId: string, name: string): Coc7Character {
+  return {
+    schemaVersion: 1,
+    id,
+    ownerPeerId,
+    name,
+    playerName: "调查员",
+    occupation: "记者",
+    age: 28,
+    residence: "东京",
+    birthplace: "上海",
+    characteristics: { str: 50, con: 50, siz: 50, dex: 50, app: 50, int: 60, pow: 60, edu: 60, luck: 50 },
+    derived: {
+      hitPoints: 10,
+      maxHitPoints: 10,
+      magicPoints: 12,
+      maxMagicPoints: 12,
+      sanity: 60,
+      maxSanity: 99,
+      movementRate: 8,
+      build: 0,
+      damageBonus: "0",
+    },
+    skills: [],
+    status: { temporaryInsanity: false, indefiniteInsanity: false, majorWound: false, dying: false, unconscious: false },
+    inventory: [],
+    background: {
+      personalDescription: "",
+      ideologyAndBeliefs: "",
+      significantPeople: "",
+      meaningfulLocations: "",
+      treasuredPossessions: "",
+      traits: "",
+      injuriesAndScars: "",
+      phobiasAndManias: "",
+      arcaneTomesSpellsAndArtifacts: "",
+      encountersWithStrangeEntities: "",
+    },
+    notes: "",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    extensions: {},
+  };
+}
+
+function createKeeperModule(): ModulePackageV1 {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    moduleId: "module-exact-a",
+    revision: 1,
+    metadata: {
+      title: "精确修订 A",
+      authors: [],
+      language: "zh-CN",
+      summary: "竞态测试模组",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    overview: "",
+    sourceDocuments: [],
+    chapters: [],
+    scenes: [],
+    locations: [{
+      id: "location-exact-a",
+      name: "旧书房",
+      description: "KP 知道书架后有暗门。",
+      playerDescription: "玩家看到一间落满灰尘的书房。",
+      aliases: [],
+      sourceRefs: [],
+    }],
+    npcs: [],
+    clues: [],
+    handouts: [],
+    suggestedChecks: [],
+    keeperNotes: [],
+    relations: [],
+    extensions: {},
+  };
+}

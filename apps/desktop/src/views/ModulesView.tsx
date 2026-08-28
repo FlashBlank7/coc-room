@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { BookOpen, Code2, Download, Eye, FileInput, FlaskConical, History, LayoutList, Play, Save, Trash2, Upload } from "lucide-react";
-import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
+import {
+  deriveRoomWorldState,
+  modulePackageSchema,
+  type ModulePackageV1,
+  type PlayerVisibleLocationV1,
+} from "@coc-room/protocol";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { getRepository, type StoredModule } from "../data/repository";
@@ -50,6 +55,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     }
     return undefined;
   }, [events]);
+  const roomWorld = useMemo(() => deriveRoomWorldState(events), [events]);
   const isActiveRoomModule = useCallback((modulePackage: ModulePackageV1) => (
     activeRoomModule?.moduleId === modulePackage.moduleId
       && activeRoomModule.revision === modulePackage.revision
@@ -312,7 +318,13 @@ export function ModulesView({ session }: { session?: RoomSession }) {
 
   const revealContent = async (
     modulePackage: ModulePackageV1,
-    content: { id: string; title: string; body: string; type: "clue" | "handout" },
+    content: {
+      id: string;
+      title: string;
+      body: string;
+      type: "clue" | "handout";
+      locationId?: string;
+    },
   ) => {
     if (!session?.isHost) return;
     if (!content.body.trim()) {
@@ -328,6 +340,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
         contentType: content.type,
         title: content.title,
         body: content.body,
+        ...(content.locationId === undefined ? {} : { locationId: content.locationId }),
       });
       setError(undefined);
     } catch (cause) {
@@ -338,7 +351,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   return (
     <div className="h-full overflow-y-auto p-7">
       <div className="mx-auto grid max-w-6xl gap-6">
-        <header><p className="text-xs uppercase tracking-[.3em] text-brass">Keeper's library</p><h1 className="mt-2 font-serif text-3xl text-ink">模组资料库</h1><p className="mt-2 text-sm text-zinc-400">解析和编辑独立于房间；只有主动公开的线索会发送给玩家。</p></header>
+        <header><p className="text-xs uppercase tracking-[.3em] text-brass">Keeper's library</p><h1 className="mt-2 font-serif text-3xl text-ink">模组资料库</h1><p className="mt-2 text-sm text-zinc-400">完整模组只留在 KP 本机；只有主动公开的地点、NPC、线索与手记会发送给全房间。</p></header>
         <div className="grid gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
           <div className="grid content-start gap-5">
             <Panel className="grid gap-4">
@@ -489,7 +502,11 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                 <ModuleEntityBrowser key={`${parsedDraft.data.moduleId}-${parsedDraft.data.revision}`} modulePackage={parsedDraft.data} />
                 {canManageRoomModule && (parsedDraft.data.clues.length > 0 || parsedDraft.data.handouts.length > 0) && (
                   isActiveRoomModule(parsedDraft.data) ? (
-                    <RoomContentPublishing modulePackage={parsedDraft.data} onReveal={revealContent} />
+                    <RoomContentPublishing
+                      modulePackage={parsedDraft.data}
+                      publishedLocations={roomWorld.locations}
+                      onReveal={revealContent}
+                    />
                   ) : (
                     <div className="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/20 p-3 text-xs text-amber-200">
                       当前打开的 v{parsedDraft.data.revision} 不是房间正在使用的精确版本。先在左侧将它设为房间模组，才能公开线索或手记。
@@ -536,14 +553,24 @@ export function ModulesView({ session }: { session?: RoomSession }) {
 
 function RoomContentPublishing({
   modulePackage,
+  publishedLocations,
   onReveal,
 }: {
   modulePackage: ModulePackageV1;
+  publishedLocations: ReadonlyMap<string, PlayerVisibleLocationV1>;
   onReveal: (
     modulePackage: ModulePackageV1,
-    content: { id: string; title: string; body: string; type: "clue" | "handout" },
+    content: {
+      id: string;
+      title: string;
+      body: string;
+      type: "clue" | "handout";
+      locationId?: string;
+    },
   ) => Promise<void>;
 }) {
+  const [locationId, setLocationId] = useState("");
+  const locationList = [...publishedLocations.values()];
   return (
     <section aria-label="房间内容公开" className="mt-4 rounded-xl border border-emerald-900/50 bg-emerald-950/15 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -553,6 +580,23 @@ function RoomContentPublishing({
         </div>
         <span className="rounded bg-emerald-950 px-2 py-1 text-[10px] text-emerald-300">精确版本已匹配</span>
       </div>
+      <Field
+        label="关联到地点（可选）"
+        hint={locationList.length === 0 ? "先在房间中公开地点，之后才能把内容放入地点舞台。" : "关联后，内容会同时出现在该地点舞台和总事件记录中。"}
+      >
+        <select
+          aria-label="公开内容关联地点"
+          className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-ink outline-none focus:border-brass disabled:opacity-40"
+          value={locationId}
+          disabled={locationList.length === 0}
+          onChange={(event) => setLocationId(event.target.value)}
+        >
+          <option value="">不关联地点</option>
+          {locationList.map((location) => (
+            <option key={location.id} value={location.id}>{location.name}</option>
+          ))}
+        </select>
+      </Field>
       <div className="mt-3 grid max-h-52 gap-1 overflow-y-auto">
         {modulePackage.clues.map((clue) => (
           <button
@@ -562,7 +606,13 @@ function RoomContentPublishing({
             disabled={!clue.revealText.trim()}
             className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
             title={clue.revealText ? "只公开玩家可见文本" : "此线索尚无玩家可见正文"}
-            onClick={() => void onReveal(modulePackage, { id: clue.id, title: clue.name, body: clue.revealText, type: "clue" })}
+            onClick={() => void onReveal(modulePackage, {
+              id: clue.id,
+              title: clue.name,
+              body: clue.revealText,
+              type: "clue",
+              ...(locationId ? { locationId } : {}),
+            })}
           >
             <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />线索：{clue.name}
           </button>
@@ -574,7 +624,13 @@ function RoomContentPublishing({
             aria-label={`公开手记：${handout.title}`}
             disabled={!handout.content.trim()}
             className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-35"
-            onClick={() => void onReveal(modulePackage, { id: handout.id, title: handout.title, body: handout.content, type: "handout" })}
+            onClick={() => void onReveal(modulePackage, {
+              id: handout.id,
+              title: handout.title,
+              body: handout.content,
+              type: "handout",
+              ...(locationId ? { locationId } : {}),
+            })}
           >
             <Eye className="h-3.5 w-3.5 shrink-0 text-brass" />手记：{handout.title}
           </button>

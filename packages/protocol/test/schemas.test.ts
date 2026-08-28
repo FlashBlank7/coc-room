@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   modulePackageSchema,
+  publishLocationCommandSchema,
+  publishNpcCommandSchema,
   relayCreateRoomRequestSchema,
   relayCreateRoomResponseSchema,
   relayServerEnvelopeSchema,
@@ -59,7 +61,17 @@ describe("shared schemas", () => {
   });
 
   it("validates module entity references", () => {
-    expect(modulePackageSchema.safeParse(moduleFixture()).success).toBe(true);
+    const legacyPackage = moduleFixture();
+    expect(modulePackageSchema.safeParse(legacyPackage).success).toBe(true);
+    expect(legacyPackage.locations[0]?.playerDescription).toBeUndefined();
+    expect(legacyPackage.npcs[0]?.playerDescription).toBeUndefined();
+
+    const playerDescriptions = moduleFixture();
+    playerDescriptions.locations[0]!.playerDescription = "玩家看到的门厅";
+    playerDescriptions.npcs[0]!.playerDescription = "穿着黑色礼服的老人";
+    expect(modulePackageSchema.safeParse(playerDescriptions).success).toBe(true);
+    playerDescriptions.locations[0]!.playerDescription = "x".repeat(20_001);
+    expect(modulePackageSchema.safeParse(playerDescriptions).success).toBe(false);
     const invalid = moduleFixture();
     invalid.scenes[0]?.locationIds.push("missing-location");
     const result = modulePackageSchema.safeParse(invalid);
@@ -71,6 +83,77 @@ describe("shared schemas", () => {
     const duplicateAcrossKinds = moduleFixture();
     duplicateAcrossKinds.locations[0]!.id = "scene-1";
     expect(modulePackageSchema.safeParse(duplicateAcrossKinds).success).toBe(false);
+  });
+
+  it("rejects keeper-only fields in player-visible room snapshots", () => {
+    const common = {
+      protocolVersion: 1 as const,
+      roomId: "room-1",
+      commandId: "10000000-0000-4000-8000-000000000090",
+      sender: { peerId: "host-1", displayName: "守秘人", role: "host" as const },
+      sentAt: "2026-08-27T12:00:00.000Z",
+    };
+    expect(publishLocationCommandSchema.safeParse({
+      ...common,
+      type: "location.publish",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        location: { id: "location-1", name: "旧宅", description: "玩家说明" },
+      },
+    }).success).toBe(true);
+    expect(publishLocationCommandSchema.safeParse({
+      ...common,
+      type: "location.publish",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        location: {
+          id: "location-1",
+          name: "旧宅",
+          description: "玩家说明",
+          aliases: ["鬼屋"],
+        },
+      },
+    }).success).toBe(false);
+    expect(publishNpcCommandSchema.safeParse({
+      ...common,
+      type: "npc.publish",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        locationId: "location-1",
+        locationName: "旧宅",
+        npc: {
+          id: "npc-1",
+          name: "管家",
+          description: "沉默的老人",
+          role: "秘密守卫者",
+        },
+      },
+    }).success).toBe(false);
+
+    expect(roomEventSchema.safeParse({
+      protocolVersion: 1,
+      roomId: "room-1",
+      eventId: "20000000-0000-4000-8000-000000000090",
+      sequence: 1,
+      sender: common.sender,
+      occurredAt: common.sentAt,
+      type: "npc.published",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        locationId: "location-1",
+        locationName: "旧宅",
+        npc: {
+          id: "npc-1",
+          name: "管家",
+          description: "玩家说明",
+          traits: ["隐藏特质"],
+        },
+      },
+    }).success).toBe(false);
   });
 
   it("validates the canonical relay join envelope", () => {

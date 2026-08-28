@@ -2,6 +2,7 @@ export * from "./dice.js";
 export * from "./event-log.js";
 export * from "./export.js";
 export * from "./relay-fragmentation.js";
+export * from "./room-world.js";
 export * from "./sync.js";
 export * from "./schemas/character.js";
 export * from "./schemas/common.js";

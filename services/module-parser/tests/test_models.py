@@ -6,13 +6,15 @@ import pytest
 from pydantic import ValidationError
 
 from coc_module_parser.models import (
+    LocationV1,
     ModuleMetadataV1,
     ModulePackageV1,
+    NPCV1,
+    ParseConfig,
     SceneV1,
     SourceDocumentV1,
     apply_manual_corrections,
     migrate_module_package,
-    ParseConfig,
 )
 
 
@@ -46,12 +48,45 @@ def test_migrates_pre_v1_camel_case_shape() -> None:
     old["moduleId"] = old.pop("module_id")
     old["source"]["charCount"] = old["source"].pop("char_count")
     old.pop("schema_version")
+    old["locations"] = [
+        {
+            "id": "location:legacy",
+            "name": "Legacy hall",
+            "playerDescription": "A long hall with faded wallpaper.",
+        }
+    ]
+    old["npcs"] = [
+        {
+            "id": "npc:legacy",
+            "name": "Legacy host",
+            "playerDescription": "A host wearing a grey coat.",
+        }
+    ]
 
     migrated = migrate_module_package(old)
 
     assert migrated.schema_version == "1.0"
     assert migrated.metadata.title == "Legacy title"
     assert migrated.metadata.author == "Legacy author"
+    assert migrated.locations[0].player_description == (
+        "A long hall with faded wallpaper."
+    )
+    assert migrated.npcs[0].player_description == "A host wearing a grey coat."
+
+
+@pytest.mark.parametrize("model", [LocationV1, NPCV1])
+def test_player_description_is_optional_and_bounded(
+    model: type[LocationV1] | type[NPCV1],
+) -> None:
+    assert model(id="entity:test", name="Test").player_description is None
+    assert model(
+        id="entity:test", name="Test", player_description="  \n"
+    ).player_description is None
+    assert model(
+        id="entity:test", name="Test", player_description="x" * 20_000
+    ).player_description == "x" * 20_000
+    with pytest.raises(ValidationError, match="20000"):
+        model(id="entity:test", name="Test", player_description="x" * 20_001)
 
 
 def test_manual_corrections_replace_lists_and_revalidate() -> None:

@@ -378,10 +378,10 @@ def test_cache_identity_includes_extraction_prompt_version(tmp_path: Path) -> No
         "privacy-prompt-v1",
         "privacy-prompt-v2",
     }
-    assert CACHE_VERSION == "module-fragment-cache-v3-lossless-entities"
+    assert CACHE_VERSION == "module-fragment-cache-v4-player-visible-descriptions"
 
 
-def test_lossless_schema_cache_version_cannot_reuse_v2_entries() -> None:
+def test_player_description_schema_cache_version_cannot_reuse_v3_entries() -> None:
     current = CacheIdentity(
         source_sha256="a" * 64,
         chunk_id="chunk-0001",
@@ -397,7 +397,7 @@ def test_lossless_schema_cache_version_cannot_reuse_v2_entries() -> None:
         extraction_prompt_version="v4",
         schema_sha256="c" * 64,
     )
-    old = replace(current, cache_version="module-fragment-cache-v2")
+    old = replace(current, cache_version="module-fragment-cache-v3-lossless-entities")
 
     assert current.cache_version == CACHE_VERSION
     assert current.key() != old.key()
@@ -480,6 +480,7 @@ def test_cross_chunk_merge_preserves_structured_fields_and_validated_refs() -> N
             LocationV1(
                 id="location:second",
                 name="Archive",
+                player_description="Rows of dusty books surround a west-facing window.",
                 aliases=["West Annex"],
                 source_refs=[second_ref],
             )
@@ -488,6 +489,7 @@ def test_cross_chunk_merge_preserves_structured_fields_and_validated_refs() -> N
             NPCV1(
                 id="npc:second",
                 name="Keeper",
+                player_description="A quiet keeper with ink-stained cuffs.",
                 traits=["quiet"],
                 character=CharacterV1(
                     skills={"Spot Hidden": 55}, hit_points=12, sanity=70
@@ -526,8 +528,14 @@ def test_cross_chunk_merge_preserves_structured_fields_and_validated_refs() -> N
 
     assert result.module.chapters == []
     assert result.module.locations[0].aliases == ["Old Library", "West Annex"]
+    assert result.module.locations[0].player_description == (
+        "Rows of dusty books surround a west-facing window."
+    )
     assert result.module.scenes[0].location_ids == [result.module.locations[0].id]
     assert result.module.npcs[0].traits == ["stern", "quiet"]
+    assert result.module.npcs[0].player_description == (
+        "A quiet keeper with ink-stained cuffs."
+    )
     assert result.module.npcs[0].character == CharacterV1(
         characteristics={"STR": 60},
         skills={"Spot Hidden": 55},

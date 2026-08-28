@@ -63,6 +63,8 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
             LocationV1(
                 id="location:test",
                 name="Archive",
+                description="Keeper-only hidden mechanism",
+                player_description="Tall shelves surround a dusty reading table.",
                 aliases=["Old Library", "West Annex"],
                 source_refs=[source_ref],
             )
@@ -71,6 +73,8 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
             NPCV1(
                 id="npc:test",
                 name="Keeper",
+                description="Keeper-only cult allegiance",
+                player_description="A stern keeper has ink-stained hands.",
                 traits=["stern", "ink-stained hands"],
                 character=CharacterV1(
                     characteristics={"STR": 55, "INT": 80},
@@ -137,7 +141,15 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
     }
     assert payload["chapters"] == []
     assert payload["locations"][0]["aliases"] == ["Old Library", "West Annex"]
+    assert payload["locations"][0]["description"] == "Keeper-only hidden mechanism"
+    assert payload["locations"][0]["playerDescription"] == (
+        "Tall shelves surround a dusty reading table."
+    )
     assert payload["npcs"][0]["traits"] == ["stern", "ink-stained hands"]
+    assert payload["npcs"][0]["description"] == "Keeper-only cult allegiance"
+    assert payload["npcs"][0]["playerDescription"] == (
+        "A stern keeper has ink-stained hands."
+    )
     assert payload["npcs"][0]["character"] == {
         "characteristics": {"STR": 55, "INT": 80},
         "skills": {"Library Use": 70},
@@ -153,6 +165,47 @@ def test_canonical_output_matches_shared_protocol_shape() -> None:
     assert payload["clues"][0]["revealText"] == "Read me"
     assert payload["clues"][0]["isCore"] is True
     assert payload["scenes"][0]["sourceRefs"][0]["sourceId"] == payload["sourceDocuments"][0]["id"]
+    assert CanonicalModulePackageV1.model_validate(payload) == canonical
+
+
+def test_absent_player_descriptions_remain_absent_in_canonical_json() -> None:
+    internal = ModulePackageV1(
+        module_id="module:no-public-copy",
+        metadata=ModuleMetadataV1(title="No public copy"),
+        source=SourceDocumentV1(
+            name="private.md", sha256="d" * 64, char_count=7
+        ),
+        locations=[
+            LocationV1(
+                id="location:private",
+                name="Vault",
+                description="The vault contains the final monster.",
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:private",
+                name="Patron",
+                description="The patron is the final monster.",
+            )
+        ],
+    )
+    canonical = to_canonical_package(
+        internal,
+        normalized_text="private",
+        source_media_type="text/markdown",
+        generated_at=datetime(2026, 8, 27, 10, 0, tzinfo=timezone.utc),
+    )
+    payload = canonical.model_dump(mode="json", exclude_none=True)
+
+    assert "playerDescription" not in payload["locations"][0]
+    assert "playerDescription" not in payload["npcs"][0]
+    assert payload["locations"][0]["description"] == (
+        "The vault contains the final monster."
+    )
+    assert payload["npcs"][0]["description"] == (
+        "The patron is the final monster."
+    )
     assert CanonicalModulePackageV1.model_validate(payload) == canonical
 
 

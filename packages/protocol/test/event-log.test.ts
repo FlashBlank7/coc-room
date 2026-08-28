@@ -4,7 +4,9 @@ import {
   EventReplica,
   HostEventSequencer,
   commandToEventDraft,
+  type ParticipantV1,
   type RoomCommandV1,
+  type RoomEventV1,
 } from "../src";
 import { CHARACTER, HOST, PLAYER, chatEvent } from "./fixtures";
 
@@ -137,6 +139,106 @@ describe("HostEventSequencer", () => {
     ).toThrow(/active module/i);
     expect(sequencer.commitCommand(reveal, { expectedSender: HOST }).event.type).toBe("content.revealed");
   });
+
+  it("authorizes player-visible locations, character movement, NPCs, and located content", () => {
+    const sequencer = worldSequencer();
+    sequencer.commitCommand(switchModuleCommand(30), { expectedSender: HOST });
+    sequencer.commitCommand(characterCommand(31), { expectedSender: PLAYER });
+
+    const wrongRevision = publishLocationCommand(32);
+    expect(() => sequencer.commitCommand({
+      ...wrongRevision,
+      payload: { ...wrongRevision.payload, revision: 2 },
+    }, { expectedSender: HOST })).toThrow(/active module/i);
+
+    sequencer.commitCommand(publishLocationCommand(33), { expectedSender: HOST });
+    expect(() => sequencer.commitCommand(publishLocationCommand(330), { expectedSender: HOST }))
+      .toThrow(/already published unchanged/i);
+    const forgedLocationName = enterLocationCommand(34);
+    expect(() => sequencer.commitCommand({
+      ...forgedLocationName,
+      payload: { ...forgedLocationName.payload, locationName: "伪造地点名" },
+    }, { expectedSender: PLAYER })).toThrow(/location name/i);
+    expect(() => sequencer.commitCommand({
+      ...enterLocationCommand(35),
+      sender: { peerId: "player-2", displayName: "另一位玩家", role: "player" },
+    }, {
+      expectedSender: { peerId: "player-2", role: "player" },
+    })).toThrow(/own character/i);
+
+    expect(sequencer.commitCommand(enterLocationCommand(36), { expectedSender: PLAYER }).event.type)
+      .toBe("location.entered");
+    expect(() => sequencer.commitCommand(enterLocationCommand(360), { expectedSender: PLAYER }))
+      .toThrow(/already at that location/i);
+    const secondLocation = publishLocationCommand(37);
+    sequencer.commitCommand({
+      ...secondLocation,
+      payload: {
+        ...secondLocation.payload,
+        location: { id: "location-2", name: "后院", description: "杂草丛生。" },
+      },
+    }, { expectedSender: HOST });
+    const hostEntry = enterLocationCommand(38);
+    expect(sequencer.commitCommand({
+      ...hostEntry,
+      sender: HOST,
+      payload: {
+        ...hostEntry.payload,
+        locationId: "location-2",
+        locationName: "后院",
+      },
+    }, { expectedSender: HOST }).event.type).toBe("location.entered");
+    expect(sequencer.commitCommand(publishNpcCommand(39), { expectedSender: HOST }).event.type)
+      .toBe("npc.published");
+    expect(() => sequencer.commitCommand(publishNpcCommand(390), { expectedSender: HOST }))
+      .toThrow(/already published there unchanged/i);
+
+    const locatedReveal = revealCommand(40);
+    expect(sequencer.commitCommand({
+      ...locatedReveal,
+      payload: { ...locatedReveal.payload, locationId: "location-1" },
+    }, { expectedSender: HOST }).event.type).toBe("content.revealed");
+    const hiddenLocationReveal = revealCommand(41);
+    expect(() => sequencer.commitCommand({
+      ...hiddenLocationReveal,
+      payload: { ...hiddenLocationReveal.payload, locationId: "location-secret" },
+    }, { expectedSender: HOST })).toThrow(/not been published/i);
+  });
+
+  it("rebuilds character and published-location authority from initial events", () => {
+    const first = worldSequencer();
+    first.commitCommand(characterCommand(50), { expectedSender: PLAYER });
+    first.commitCommand(switchModuleCommand(51), { expectedSender: HOST });
+    first.commitCommand(publishLocationCommand(52), { expectedSender: HOST });
+
+    const restored = worldSequencer(first.eventsAfter(0), 100);
+    expect(restored.commitCommand(enterLocationCommand(53), { expectedSender: PLAYER }).event.type)
+      .toBe("location.entered");
+
+    const renamed = {
+      ...CHARACTER,
+      name: "林记者",
+      updatedAt: "2026-08-27T12:30:00.000Z",
+    };
+    restored.commitCommand({
+      ...characterCommand(54),
+      payload: { character: renamed },
+    }, { expectedSender: PLAYER });
+    expect(() => restored.commitCommand(enterLocationCommand(55), { expectedSender: PLAYER }))
+      .toThrow(/character name/i);
+    const renamedEntry = enterLocationCommand(56);
+    expect(() => restored.commitCommand({
+      ...renamedEntry,
+      payload: { ...renamedEntry.payload, characterName: renamed.name },
+    }, { expectedSender: PLAYER })).toThrow(/already at that location/i);
+
+    restored.commitCommand({
+      ...switchModuleCommand(57),
+      payload: { moduleId: "module-2", revision: 1, title: "第二模组" },
+    }, { expectedSender: HOST });
+    expect(() => restored.commitCommand(publishNpcCommand(58), { expectedSender: HOST }))
+      .toThrow(/active module|not been published/i);
+  });
 });
 
 describe("EventReplica", () => {
@@ -191,6 +293,30 @@ describe("commandToEventDraft", () => {
       payload: { moduleId: "module-1", revision: 1, title: "无名祭祀书" },
     };
     expect(() => commandToEventDraft(command)).toThrow(/host/i);
+
+    const playerLocationPublish: RoomCommandV1 = {
+      ...command,
+      type: "location.publish",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        location: { id: "location-1", name: "旧宅", description: "公开说明" },
+      },
+    };
+    expect(() => commandToEventDraft(playerLocationPublish)).toThrow(/host/i);
+
+    const playerNpcPublish: RoomCommandV1 = {
+      ...command,
+      type: "npc.publish",
+      payload: {
+        moduleId: "module-1",
+        revision: 1,
+        locationId: "location-1",
+        locationName: "旧宅",
+        npc: { id: "npc-1", name: "管家", description: "沉默的老人" },
+      },
+    };
+    expect(() => commandToEventDraft(playerNpcPublish)).toThrow(/host/i);
   });
 
   it("rejects a forged connection role and cross-room commit", () => {
@@ -211,3 +337,94 @@ describe("commandToEventDraft", () => {
     expect(() => sequencer.commit(commandToEventDraft(forged))).toThrow(/other-room/i);
   });
 });
+
+function worldSequencer(initialEvents: readonly RoomEventV1[] = [], idStart = 0): HostEventSequencer {
+  let id = idStart;
+  return new HostEventSequencer("room-1", {
+    initialEvents,
+    createEventId: () => `30000000-0000-4000-8000-${String(++id).padStart(12, "0")}`,
+    clock: () => new Date("2026-08-27T12:00:00.000Z"),
+  });
+}
+
+function commandBase(id: number, sender: ParticipantV1 = HOST) {
+  return {
+    protocolVersion: 1 as const,
+    roomId: "room-1",
+    commandId: `10000000-0000-4000-8000-${String(id).padStart(12, "0")}`,
+    sender,
+    sentAt: "2026-08-27T12:00:00.000Z",
+  };
+}
+
+function switchModuleCommand(id: number): Extract<RoomCommandV1, { type: "module.switch" }> {
+  return {
+    ...commandBase(id),
+    type: "module.switch",
+    payload: { moduleId: "module-1", revision: 1, title: "第一模组" },
+  };
+}
+
+function characterCommand(id: number): Extract<RoomCommandV1, { type: "character.update" }> {
+  return {
+    ...commandBase(id, PLAYER),
+    type: "character.update",
+    payload: { character: CHARACTER },
+  };
+}
+
+function publishLocationCommand(id: number): Extract<RoomCommandV1, { type: "location.publish" }> {
+  return {
+    ...commandBase(id),
+    type: "location.publish",
+    payload: {
+      moduleId: "module-1",
+      revision: 1,
+      location: { id: "location-1", name: "旧宅", description: "潮湿而安静的旧宅。" },
+    },
+  };
+}
+
+function enterLocationCommand(id: number): Extract<RoomCommandV1, { type: "location.enter" }> {
+  return {
+    ...commandBase(id, PLAYER),
+    type: "location.enter",
+    payload: {
+      moduleId: "module-1",
+      revision: 1,
+      locationId: "location-1",
+      locationName: "旧宅",
+      characterId: CHARACTER.id,
+      characterName: CHARACTER.name,
+    },
+  };
+}
+
+function publishNpcCommand(id: number): Extract<RoomCommandV1, { type: "npc.publish" }> {
+  return {
+    ...commandBase(id),
+    type: "npc.publish",
+    payload: {
+      moduleId: "module-1",
+      revision: 1,
+      locationId: "location-1",
+      locationName: "旧宅",
+      npc: { id: "npc-1", name: "管家", description: "沉默的老人。" },
+    },
+  };
+}
+
+function revealCommand(id: number): Extract<RoomCommandV1, { type: "content.reveal" }> {
+  return {
+    ...commandBase(id),
+    type: "content.reveal",
+    payload: {
+      moduleId: "module-1",
+      revision: 1,
+      contentId: "clue-1",
+      contentType: "clue",
+      title: "泥脚印",
+      body: "脚印通向地下室。",
+    },
+  };
+}

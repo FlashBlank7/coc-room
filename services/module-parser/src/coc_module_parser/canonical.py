@@ -91,6 +91,7 @@ class CanonicalSceneV1(CanonicalEntityBase):
 
 
 class CanonicalLocationV1(CanonicalEntityBase):
+    playerDescription: str | None = Field(default=None, max_length=20_000)
     aliases: list[str] = Field(max_length=50)
 
     @field_validator("aliases")
@@ -116,6 +117,7 @@ class CanonicalCharacterV1(CanonicalModel):
 
 
 class CanonicalNpcV1(CanonicalEntityBase):
+    playerDescription: str | None = Field(default=None, max_length=20_000)
     role: str = Field(max_length=1_000)
     motivation: str = Field(max_length=4_000)
     traits: list[str] = Field(max_length=100)
@@ -446,6 +448,7 @@ def to_canonical_package(
                 id=location.id,
                 name=location.name[:240],
                 description=_append_features(location.description, location.features),
+                playerDescription=location.player_description,
                 aliases=location.aliases,
                 sourceRefs=_source_refs(location.source_refs, source_id),
             )
@@ -456,6 +459,7 @@ def to_canonical_package(
                 id=npc.id,
                 name=npc.name[:240],
                 description=npc.description[:20_000],
+                playerDescription=npc.player_description,
                 role=npc.role[:1_000],
                 motivation="\n".join(npc.motivations)[:4_000],
                 traits=[trait[:500] for trait in npc.traits[:100] if trait],

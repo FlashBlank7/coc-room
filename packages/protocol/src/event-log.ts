@@ -1,6 +1,8 @@
 import type { RandomIntSource } from "./dice.js";
 import { rollDice } from "./dice.js";
 import type {
+  PlayerVisibleLocationV1,
+  PlayerVisibleNpcV1,
   RoomCommandV1,
   RoomEventDraftV1,
   RoomEventV1,
@@ -49,6 +51,14 @@ export class HostEventSequencer {
   private readonly eventsById = new Map<string, RoomEventV1>();
   private readonly eventsByCommandId = new Map<string, RoomEventV1>();
   private readonly characterOwners = new Map<string, string>();
+  private readonly characterNames = new Map<string, string>();
+  private readonly publishedLocationNames = new Map<string, string>();
+  private readonly publishedLocations = new Map<string, PlayerVisibleLocationV1>();
+  private readonly currentLocationByCharacterId = new Map<string, string>();
+  private readonly publishedNpcs = new Map<string, Readonly<{
+    locationId: string;
+    npc: PlayerVisibleNpcV1;
+  }>>();
   private activeModule?: Readonly<{ moduleId: string; revision: number }>;
   private nextSequence = 1;
 
@@ -166,6 +176,8 @@ export class HostEventSequencer {
       }
     }
 
+    this.validateWorldEventAgainstHistory(event);
+
     this.eventsBySequence.set(event.sequence, event);
     this.eventsById.set(event.eventId, event);
     if (event.causedByCommandId !== undefined) {
@@ -174,12 +186,30 @@ export class HostEventSequencer {
     if (event.type === "character.updated") {
       const character = event.payload.character;
       this.characterOwners.set(character.id, character.ownerPeerId);
+      this.characterNames.set(character.id, character.name);
     }
     if (event.type === "module.switched") {
       this.activeModule = {
         moduleId: event.payload.moduleId,
         revision: event.payload.revision,
       };
+      this.publishedLocationNames.clear();
+      this.publishedLocations.clear();
+      this.currentLocationByCharacterId.clear();
+      this.publishedNpcs.clear();
+    }
+    if (event.type === "location.published") {
+      this.publishedLocationNames.set(event.payload.location.id, event.payload.location.name);
+      this.publishedLocations.set(event.payload.location.id, event.payload.location);
+    }
+    if (event.type === "location.entered") {
+      this.currentLocationByCharacterId.set(event.payload.characterId, event.payload.locationId);
+    }
+    if (event.type === "npc.published") {
+      this.publishedNpcs.set(event.payload.npc.id, {
+        locationId: event.payload.locationId,
+        npc: event.payload.npc,
+      });
     }
   }
 
@@ -195,16 +225,134 @@ export class HostEventSequencer {
       }
     }
 
-    if (command.type === "content.reveal") {
-      if (
-        this.activeModule === undefined ||
-        this.activeModule.moduleId !== command.payload.moduleId ||
-        this.activeModule.revision !== command.payload.revision
-      ) {
-        throw new Error("Content may only be revealed from the room's active module revision");
+    if (
+      command.type === "content.reveal" ||
+      command.type === "location.publish" ||
+      command.type === "location.enter" ||
+      command.type === "npc.publish"
+    ) {
+      this.requireActiveModule(command.payload.moduleId, command.payload.revision);
+    }
+
+    if (command.type === "location.publish") {
+      const existing = this.publishedLocations.get(command.payload.location.id);
+      if (existing !== undefined && sameLocationSnapshot(existing, command.payload.location)) {
+        throw new Error(`Location ${command.payload.location.id} is already published unchanged`);
       }
     }
+
+    if (command.type === "location.enter") {
+      this.requirePublishedLocation(command.payload.locationId, command.payload.locationName);
+      this.requireCurrentCharacter(
+        command.payload.characterId,
+        command.payload.characterName,
+        command.sender.role === "host" ? undefined : command.sender.peerId,
+      );
+      if (this.currentLocationByCharacterId.get(command.payload.characterId) === command.payload.locationId) {
+        throw new Error(`Character ${command.payload.characterId} is already at that location`);
+      }
+    }
+
+    if (command.type === "npc.publish") {
+      this.requirePublishedLocation(command.payload.locationId, command.payload.locationName);
+      const existing = this.publishedNpcs.get(command.payload.npc.id);
+      if (
+        existing?.locationId === command.payload.locationId &&
+        sameNpcSnapshot(existing.npc, command.payload.npc)
+      ) {
+        throw new Error(`NPC ${command.payload.npc.id} is already published there unchanged`);
+      }
+    }
+
+    if (command.type === "content.reveal" && command.payload.locationId !== undefined) {
+      this.requirePublishedLocation(command.payload.locationId);
+    }
   }
+
+  /** Validates persisted world events while reconstructing authority state. */
+  private validateWorldEventAgainstHistory(event: RoomEventV1): void {
+    if (
+      event.type === "location.published" ||
+      event.type === "location.entered" ||
+      event.type === "npc.published"
+    ) {
+      this.requireActiveModule(event.payload.moduleId, event.payload.revision);
+    }
+
+    if (event.type === "location.published" && event.sender.role !== "host") {
+      throw new Error("Only the host may publish locations");
+    }
+
+    if (event.type === "location.entered") {
+      this.requirePublishedLocation(event.payload.locationId, event.payload.locationName);
+      this.requireCurrentCharacter(
+        event.payload.characterId,
+        event.payload.characterName,
+        event.sender.role === "host" ? undefined : event.sender.peerId,
+      );
+    }
+
+    if (event.type === "npc.published") {
+      if (event.sender.role !== "host") {
+        throw new Error("Only the host may publish NPCs");
+      }
+      this.requirePublishedLocation(event.payload.locationId, event.payload.locationName);
+    }
+
+    if (event.type === "content.revealed" && event.payload.locationId !== undefined) {
+      this.requireActiveModule(event.payload.moduleId, event.payload.revision);
+      this.requirePublishedLocation(event.payload.locationId);
+    }
+  }
+
+  private requireActiveModule(moduleId: string, revision: number): void {
+    if (
+      this.activeModule === undefined ||
+      this.activeModule.moduleId !== moduleId ||
+      this.activeModule.revision !== revision
+    ) {
+      throw new Error("Room world content must use the room's active module revision");
+    }
+  }
+
+  private requirePublishedLocation(locationId: string, expectedName?: string): void {
+    const publishedName = this.publishedLocationNames.get(locationId);
+    if (publishedName === undefined) {
+      throw new Error(`Location ${locationId} has not been published in the active module`);
+    }
+    if (expectedName !== undefined && expectedName !== publishedName) {
+      throw new Error(`Location name does not match the latest published snapshot for ${locationId}`);
+    }
+  }
+
+  private requireCurrentCharacter(
+    characterId: string,
+    expectedName: string,
+    expectedOwnerPeerId?: string,
+  ): void {
+    const ownerPeerId = this.characterOwners.get(characterId);
+    const characterName = this.characterNames.get(characterId);
+    if (ownerPeerId === undefined || characterName === undefined) {
+      throw new Error(`Character ${characterId} does not exist in authoritative history`);
+    }
+    if (expectedOwnerPeerId !== undefined && ownerPeerId !== expectedOwnerPeerId) {
+      throw new Error("Players may only move their own character");
+    }
+    if (expectedName !== characterName) {
+      throw new Error(`Character name does not match the latest snapshot for ${characterId}`);
+    }
+  }
+}
+
+function sameLocationSnapshot(
+  left: PlayerVisibleLocationV1,
+  right: PlayerVisibleLocationV1,
+): boolean {
+  return left.id === right.id && left.name === right.name && left.description === right.description;
+}
+
+function sameNpcSnapshot(left: PlayerVisibleNpcV1, right: PlayerVisibleNpcV1): boolean {
+  return left.id === right.id && left.name === right.name && left.description === right.description;
 }
 
 export interface ReplicaApplyResult {
@@ -342,6 +490,14 @@ export function commandToEventDraft(
     case "content.reveal":
       requireHost(command);
       return { ...common, type: "content.revealed", payload: command.payload };
+    case "location.publish":
+      requireHost(command);
+      return { ...common, type: "location.published", payload: command.payload };
+    case "location.enter":
+      return { ...common, type: "location.entered", payload: command.payload };
+    case "npc.publish":
+      requireHost(command);
+      return { ...common, type: "npc.published", payload: command.payload };
   }
 }
 

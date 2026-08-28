@@ -114,7 +114,20 @@ Pop-Location
 
 辅助脚本只写入通过完整 Schema 校验的 `ModulePackageV1`。底层 JSONL sidecar 会产生零到多条 `progress`，最后恰好一条 `result` 或 `error`。Codex 会使用 ChatGPT/Codex 账户额度，DeepSeek 会产生 API 费用；先用 `--mock` 验证输入。缓存不保存凭据，但会以未加密 JSON 保存已校验的分块抽取结果，因此应把它视为房主私密模组数据；可在应用退出后删除系统应用缓存中的 `module-parser` 目录来清空。
 
-## 5. 检查与测试
+## 5. 沉浸式房间首切片
+
+开发房间世界功能时必须保持以下边界：
+
+- KP 控制面板只能加载 `module.switched` 指定的本机精确修订，不能自动使用同一模组的最新修订代替。
+- 地点和 NPC 发布只能从 `playerDescription` 构造最小快照，绝不能回退到 `description` 或附带 NPC 身份、动机、特征、数值、关系、场景说明、守秘人笔记和原文定位。
+- 地点必须先公开才能进入、发布 NPC 或关联地点内容；玩家只能移动自己的角色。相关规则既要在 command 提交时验证，也要在从旧事件重建房主序列时验证。
+- `deriveRoomWorldState` 只能消费已经确认的 `RoomEventV1`。模组切换会清空模组绑定的世界投影，但不会删除角色卡或历史事件。
+- 当前所有世界事件都进入同一个连续序列并同步给全员。不要添加只在 React 中隐藏的“定向可见”，那仍会把正文写入其他成员的 SQLite。
+- 当前背景实现只能使用内置 CSS 渐变。没有图片上传、资源目录、二进制事件字段或资源分块协议；新增这些能力前应另行设计大小上限、内容校验、持久化、重连补取和公开授权。
+
+协议测试应覆盖精确修订、发布顺序、角色所有权、模组切换后的投影清理、乱序输入的 sequence 归并，以及公开快照中不含 KP 私密字段。桌面组件测试应分别覆盖 KP 发布控制、调查员进入地点、只读记录重建和默认渐变背景。
+
+## 6. 检查与测试
 
 ```powershell
 pnpm --filter @coc-room/protocol build
@@ -138,7 +151,7 @@ Pop-Location
 
 Windows job 还会为每种模式分别启动两个独立的发布构建桌面进程（各自使用真实 WebView2），通过临时 rendezvous 文件交换房间凭据。基础传输冒烟分别验证浏览器 `RTCPeerConnection` / DataChannel 直连和本地 Worker 强制中继，并逐字校验大型中文与 emoji 载荷；完整会话冒烟则让两端各自使用独立 SQLite，验证房主排序、系统安全随机骰、重复命令幂等、离线事件、重连补发和最终事件日志一致。存储模式另行验证 SQLite 重读、Markdown/无脚本自包含 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。NSIS 阶段会静默安装后再次执行存储、导出和 sidecar 检查，再验证卸载。
 
-## 6. Windows x64 NSIS 构建
+## 7. Windows x64 NSIS 构建
 
 一键准备带 target triple 的 sidecar、构建协议和 Tauri：
 
