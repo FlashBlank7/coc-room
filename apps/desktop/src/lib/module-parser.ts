@@ -6,8 +6,16 @@ export interface ParseModuleInput {
   sourceText?: string;
   sourcePath?: string;
   sourceName: string;
+  provider: "codex" | "deepseek";
   model: string;
   mock?: boolean;
+}
+
+export interface CodexStatus {
+  installed: boolean;
+  compatible: boolean;
+  authenticated: boolean;
+  version?: string;
 }
 
 export interface ParserProgress {
@@ -92,6 +100,13 @@ export async function deleteDeepseekKey(): Promise<void> {
   if (window.__TAURI_INTERNALS__) await invoke("delete_deepseek_key");
 }
 
+export async function getCodexStatus(): Promise<CodexStatus> {
+  if (!window.__TAURI_INTERNALS__) {
+    return { installed: false, compatible: false, authenticated: false };
+  }
+  return invoke<CodexStatus>("codex_status");
+}
+
 export async function selectModuleSource(): Promise<string | undefined> {
   if (!window.__TAURI_INTERNALS__) return undefined;
   return (await invoke<string | null>("select_module_source")) ?? undefined;
@@ -129,6 +144,7 @@ export async function parseModule(
         source_text: input.sourceText,
         source_path: input.sourcePath,
         source_name: input.sourceName,
+        provider: input.provider,
         model: input.model,
         mock: input.mock ?? false,
       },
@@ -166,8 +182,8 @@ function withParserProvenance(result: ParserResult, input: ParseModuleInput): Pa
   const status = result.parseStatus
     ?? (issues.some((issue) => issue.severity === "error" || issue.severity === "warning") ? "needs_review" : "ready_for_review");
   const provenance: ModuleParserProvenance = {
-    provider: input.mock ? "mock" : "deepseek",
-    model: input.mock ? "builtin-mock" : input.model,
+    provider: input.mock ? "mock" : input.provider,
+    model: input.mock ? "builtin-mock" : (input.model || "codex-default"),
     parsedAt: new Date().toISOString(),
     sourceName: input.sourceName,
     status,

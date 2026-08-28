@@ -12,6 +12,7 @@ from coc_module_parser.models import (
     SourceDocumentV1,
     apply_manual_corrections,
     migrate_module_package,
+    ParseConfig,
 )
 
 
@@ -65,3 +66,14 @@ def test_manual_corrections_replace_lists_and_revalidate() -> None:
 def test_extensions_require_namespace() -> None:
     with pytest.raises(ValidationError, match="namespace"):
         apply_manual_corrections(package(), {"extensions": {"bgm": {}}})
+
+
+def test_codex_provider_does_not_require_an_api_key() -> None:
+    config = ParseConfig(source_text="# Test", provider="codex", model="")
+    assert config.provider == "codex"
+    assert config.api_key is None
+
+
+def test_deepseek_provider_still_requires_an_api_key() -> None:
+    with pytest.raises(ValidationError, match="api_key"):
+        ParseConfig(source_text="# Test", provider="deepseek")

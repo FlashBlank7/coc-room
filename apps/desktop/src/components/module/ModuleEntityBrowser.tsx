@@ -873,6 +873,7 @@ function formatDate(value: string): string {
 }
 
 function formatParserProvider(value: string): string {
+  if (value === "codex" || value === "codex-cli") return "本机 Codex CLI";
   if (value === "deepseek") return "DeepSeek API";
   if (value === "mock") return "内置模拟解析";
   return value;

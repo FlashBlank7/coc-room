@@ -6,6 +6,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -19,8 +20,34 @@ use tauri_plugin_shell::{
     ShellExt,
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
-use tokio::time::{timeout_at, Instant};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command as TokioCommand,
+    time::{timeout, timeout_at, Instant},
+};
 use zeroize::Zeroizing;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::{
+    io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    process::CommandExt,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::CloseHandle,
+    System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
+        Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+    },
+};
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const KEYRING_SERVICE: &str = "org.coc-room.desktop";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
@@ -28,6 +55,9 @@ const MAX_SOURCE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
+const MAX_CODEX_PROBE_BYTES: u64 = 4 * 1024;
+const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const SIDECAR_STDIN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_NETWORK_SMOKE_REPORT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_SMOKE_RENDEZVOUS_BYTES: usize = 8 * 1024;
 const MAX_STORAGE_SMOKE_EXPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -106,15 +136,136 @@ impl Drop for ModuleParserPermit<'_> {
 }
 
 // Stays armed across awaits so early returns and cancelled command futures terminate the child.
+#[cfg(target_os = "windows")]
+struct ParserJobObject {
+    handle: Option<OwnedHandle>,
+}
+
+#[cfg(target_os = "windows")]
+impl ParserJobObject {
+    fn assign(process_id: u32) -> Result<Self, String> {
+        // SAFETY: every handle is checked for null, the information buffer has the exact
+        // Windows ABI type/size, and temporary process handles are closed on every path.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err("无法创建模组解析进程作业".to_string());
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                CloseHandle(job);
+                return Err("无法配置模组解析进程作业".to_string());
+            }
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, process_id);
+            if process.is_null() {
+                CloseHandle(job);
+                return Err("无法打开模组解析器进程".to_string());
+            }
+            let assigned = AssignProcessToJobObject(job, process);
+            CloseHandle(process);
+            if assigned == 0 {
+                CloseHandle(job);
+                return Err("无法隔离模组解析器进程树".to_string());
+            }
+            Ok(Self {
+                handle: Some(OwnedHandle::from_raw_handle(job)),
+            })
+        }
+    }
+
+    fn terminate(&mut self) -> Result<(), String> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        // SAFETY: handle is an owned, live Job Object handle created in assign().
+        if unsafe { TerminateJobObject(handle.as_raw_handle(), 1) } != 0 {
+            return Ok(());
+        }
+        // Closing a configured KILL_ON_JOB_CLOSE handle is the fail-safe if an
+        // explicit termination request itself fails.
+        drop(self.handle.take());
+        Err("无法终止模组解析进程作业".to_string())
+    }
+}
+
 struct SidecarChildGuard {
     child: Option<CommandChild>,
+    #[cfg(target_os = "windows")]
+    job: ParserJobObject,
 }
 
 impl SidecarChildGuard {
-    fn new(child: CommandChild) -> Self {
-        Self { child: Some(child) }
+    fn new(child: CommandChild) -> Result<Self, String> {
+        #[cfg(target_os = "windows")]
+        {
+            let job = match ParserJobObject::assign(child.pid()) {
+                Ok(job) => job,
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                child: Some(child),
+                job,
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(Self { child: Some(child) })
+        }
     }
 
+    #[cfg(target_os = "windows")]
+    async fn write_with_deadline(
+        &mut self,
+        payload: Zeroizing<Vec<u8>>,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let child = self
+            .child
+            .take()
+            .ok_or_else(|| "模组解析器进程不可用".to_string())?;
+        let mut writer = tokio::task::spawn_blocking(move || {
+            let mut child = child;
+            let result = child
+                .write(payload.as_slice())
+                .map_err(|_| "无法向模组解析器写入请求".to_string());
+            (child, result)
+        });
+        match timeout_at(deadline, &mut writer).await {
+            Ok(Ok((child, result))) => {
+                self.child = Some(child);
+                result
+            }
+            Ok(Err(_)) => {
+                let _ = self.job.terminate();
+                Err("模组解析器写入任务异常".to_string())
+            }
+            Err(_) => {
+                let termination = self.job.terminate();
+                // Terminating (or fail-safe closing) the Job closes every pipe reader,
+                // so the blocking WriteFile completes and can be joined instead of
+                // leaking a detached blocking task.
+                if let Ok((child, _)) = writer.await {
+                    self.child = Some(child);
+                }
+                match termination {
+                    Ok(()) => Err("向模组解析器写入请求超时，已终止解析器".to_string()),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn write(&mut self, payload: &[u8]) -> Result<(), String> {
         let child = self
             .child
@@ -150,6 +301,7 @@ struct ModuleParseRequest {
     source_text: Option<String>,
     source_path: Option<String>,
     source_name: String,
+    provider: String,
     model: String,
     mock: Option<bool>,
 }
@@ -161,10 +313,170 @@ struct SidecarParseRequest<'a> {
     source_text: Option<&'a str>,
     source_path: Option<&'a str>,
     source_name: &'a str,
+    provider: &'a str,
     model: &'a str,
     mock: bool,
     api_key: Option<&'a str>,
+    codex_executable: Option<&'a str>,
     cache_dir: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexStatus {
+    installed: bool,
+    compatible: bool,
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+fn find_codex_executable() -> Option<PathBuf> {
+    if let Some(path_value) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path_value) {
+            #[cfg(target_os = "windows")]
+            let candidate = directory.join("codex.exe");
+            #[cfg(not(target_os = "windows"))]
+            let candidate = directory.join("codex");
+            if candidate.is_file() {
+                if let Ok(canonical) = candidate.canonicalize() {
+                    return Some(canonical);
+                }
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "windows")]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        for extension_root in [".vscode/extensions", ".vscode-insiders/extensions"] {
+            let root = PathBuf::from(&profile).join(extension_root);
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with("openai.chatgpt-") || !name.ends_with("-win32-x64") {
+                    continue;
+                }
+                let candidate = entry.path().join("bin/windows-x86_64/codex.exe");
+                if candidate.is_file() {
+                    if let Ok(canonical) = candidate.canonicalize() {
+                        candidates.push(canonical);
+                    }
+                }
+            }
+        }
+    }
+    candidates.into_iter().max_by_key(|path| {
+        path.metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    })
+}
+
+fn apply_minimal_codex_environment(command: &mut TokioCommand) {
+    command.env_clear();
+    for key in [
+        "APPDATA",
+        "CODEX_HOME",
+        "COMSPEC",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "NO_PROXY",
+        "PATH",
+        "PATHEXT",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SystemRoot",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command.env("NO_COLOR", "1");
+}
+
+async fn run_codex_probe(program: &Path, arguments: &[&str]) -> Option<(bool, Vec<u8>)> {
+    let mut command = TokioCommand::new(program);
+    command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    apply_minimal_codex_environment(&mut command);
+    #[cfg(target_os = "windows")]
+    command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let outcome = timeout(CODEX_PROBE_TIMEOUT, async {
+        let mut output = Vec::new();
+        stdout
+            .take(MAX_CODEX_PROBE_BYTES + 1)
+            .read_to_end(&mut output)
+            .await?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status.success(), output))
+    })
+    .await;
+    match outcome {
+        Ok(Ok((success, output))) if output.len() as u64 <= MAX_CODEX_PROBE_BYTES => {
+            Some((success, output))
+        }
+        _ => {
+            let _ = child.kill().await;
+            None
+        }
+    }
+}
+
+async fn inspect_codex_executable(executable: &Path) -> CodexStatus {
+    let version_probe = run_codex_probe(executable, &["--version"]).await;
+    let version = version_probe
+        .as_ref()
+        .filter(|(success, _)| *success)
+        .and_then(|(_, output)| String::from_utf8(output.clone()).ok())
+        .map(|value| value.trim().chars().take(160).collect::<String>())
+        .filter(|value| !value.is_empty());
+    let compatible = version
+        .as_deref()
+        .is_some_and(|value| value.starts_with("codex-cli "));
+    let authenticated = if compatible {
+        run_codex_probe(executable, &["login", "status"])
+            .await
+            .is_some_and(|(success, _)| success)
+    } else {
+        false
+    };
+    CodexStatus {
+        installed: true,
+        compatible,
+        authenticated,
+        version,
+    }
+}
+
+#[tauri::command]
+async fn codex_status() -> CodexStatus {
+    let Some(executable) = find_codex_executable() else {
+        return CodexStatus {
+            installed: false,
+            compatible: false,
+            authenticated: false,
+            version: None,
+        };
+    };
+    inspect_codex_executable(&executable).await
 }
 
 fn keyring_entry() -> Result<Entry, String> {
@@ -678,7 +990,25 @@ async fn run_module_parser(
         .map_err(|error| format!("无法创建模组解析缓存目录: {error}"))?;
     let cache_dir_text = path_to_string(&cache_dir)?;
 
-    let api_key = if mock {
+    let codex_executable = if !mock && request.provider == "codex" {
+        let executable = find_codex_executable()
+            .ok_or_else(|| "未找到 Codex CLI；请先安装 Codex 或 OpenAI VS Code 扩展".to_string())?;
+        let status = inspect_codex_executable(&executable).await;
+        if !status.compatible {
+            return Err("Codex CLI 版本不兼容；请更新 Codex 后重试".to_string());
+        }
+        if !status.authenticated {
+            return Err("Codex CLI 尚未登录；请先在终端运行 codex login".to_string());
+        }
+        Some(executable)
+    } else {
+        None
+    };
+    let codex_executable_text = codex_executable
+        .as_deref()
+        .map(path_to_string)
+        .transpose()?;
+    let api_key = if mock || request.provider != "deepseek" {
         None
     } else {
         Some(Zeroizing::new(
@@ -694,9 +1024,11 @@ async fn run_module_parser(
             source_text: request.source_text.as_deref(),
             source_path: source_path_text.as_deref(),
             source_name: &source_name,
+            provider: &request.provider,
             model: &request.model,
             mock,
             api_key: api_key.as_deref().map(String::as_str),
+            codex_executable: codex_executable_text.as_deref(),
             cache_dir: &cache_dir_text,
         };
         Zeroizing::new(
@@ -714,12 +1046,22 @@ async fn run_module_parser(
     let (mut receiver, child) = sidecar
         .spawn()
         .map_err(|error| format!("无法启动模组解析器: {error}"))?;
-    let mut child = SidecarChildGuard::new(child);
+    let mut child = SidecarChildGuard::new(child)?;
     let mut stdin_payload = Zeroizing::new(Vec::with_capacity(serialized.len() + 1));
     stdin_payload.extend_from_slice(serialized.as_bytes());
     stdin_payload.push(b'\n');
-    child.write(stdin_payload.as_slice())?;
-    drop(stdin_payload);
+    #[cfg(target_os = "windows")]
+    child
+        .write_with_deadline(
+            stdin_payload,
+            deadline.min(Instant::now() + SIDECAR_STDIN_TIMEOUT),
+        )
+        .await?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        child.write(stdin_payload.as_slice())?;
+        drop(stdin_payload);
+    }
     drop(serialized);
     drop(api_key);
 
@@ -876,14 +1218,17 @@ fn validate_parse_request(request: &ModuleParseRequest) -> Result<(), String> {
     {
         return Err("模组来源名称无效".to_string());
     }
-    if request.model.is_empty()
+    if !matches!(request.provider.as_str(), "codex" | "deepseek") {
+        return Err("不支持的模组解析服务".to_string());
+    }
+    if (request.provider == "deepseek" && request.model.is_empty())
         || request.model.len() > 100
         || !request
             .model
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
     {
-        return Err("DeepSeek 模型名称无效".to_string());
+        return Err("解析模型名称无效".to_string());
     }
     Ok(())
 }
@@ -947,6 +1292,7 @@ pub fn run() {
             save_deepseek_key,
             has_deepseek_key,
             delete_deepseek_key,
+            codex_status,
             network_smoke_config,
             publish_network_smoke_rendezvous,
             read_network_smoke_rendezvous,
@@ -986,6 +1332,26 @@ mod tests {
 
         drop(permit);
         assert!(gate.try_acquire().is_ok());
+    }
+
+    fn parser_request(provider: &str, model: &str) -> ModuleParseRequest {
+        ModuleParseRequest {
+            id: "parse-test".to_string(),
+            action: "parse_module".to_string(),
+            source_text: Some("# Test".to_string()),
+            source_path: None,
+            source_name: "test.md".to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            mock: Some(false),
+        }
+    }
+
+    #[test]
+    fn parser_request_allows_codex_default_but_requires_a_deepseek_model() {
+        assert!(validate_parse_request(&parser_request("codex", "")).is_ok());
+        assert!(validate_parse_request(&parser_request("deepseek", "")).is_err());
+        assert!(validate_parse_request(&parser_request("unknown", "model")).is_err());
     }
 
     #[test]

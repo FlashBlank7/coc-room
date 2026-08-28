@@ -11,10 +11,12 @@ from langgraph.graph import END, START, StateGraph
 
 from .cache import CacheIdentity, ExtractionCache
 from .client import (
+    CodexCliExtractor,
     DeepSeekResponsesExtractor,
     DeterministicMockExtractor,
     ExtractionError,
     FragmentExtractor,
+    ProviderResponseError,
 )
 from .models import (
     EntityRelationV1,
@@ -408,6 +410,12 @@ class ModuleParser:
     def _make_extractor(config: ParseConfig) -> FragmentExtractor:
         if config.mock:
             return DeterministicMockExtractor()
+        if config.provider == "codex":
+            return CodexCliExtractor(
+                model=config.model or "codex-default",
+                executable=str(config.codex_executable or "codex"),
+                max_output_tokens=config.max_output_tokens,
+            )
         assert config.api_key is not None
         return DeepSeekResponsesExtractor(
             api_key=config.api_key.get_secret_value(),
@@ -439,6 +447,16 @@ class ModuleParser:
             config.max_chunk_chars,
             config.chunk_overlap_chars,
         )
+        if (
+            not config.mock
+            and config.provider == "codex"
+            and len(chunks) > config.max_codex_chunks
+        ):
+            raise ProviderResponseError(
+                "Codex input would require too many chunks; split the source into smaller modules",
+                retryable=False,
+                code="CODEX_INPUT_TOO_LARGE",
+            )
         reporter(
             "segment",
             0.18,
@@ -456,13 +474,18 @@ class ModuleParser:
         issues = list(state["issues"])
         fragments: list[ModuleFragmentV1] = []
         attempts = state["attempts"]
-        cache = ExtractionCache(config.cache_dir) if config.cache_dir else None
+        cache = (
+            ExtractionCache(config.cache_dir)
+            if config.cache_dir and getattr(extractor, "cacheable", True)
+            else None
+        )
         schema_json = json.dumps(
-            ModuleFragmentV1.model_json_schema(mode="validation"),
+            extractor.output_schema(),
             sort_keys=True,
             separators=(",", ":"),
         )
         schema_sha = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
+        budget_issue_recorded = False
 
         for index, chunk in enumerate(chunks):
             fraction = index / max(len(chunks), 1)
@@ -484,7 +507,11 @@ class ModuleParser:
                 model=extractor.model,
                 base_url=str(getattr(extractor, "base_url", config.base_url)).rstrip("/"),
                 max_output_tokens=int(
-                    getattr(extractor, "max_output_tokens", config.max_output_tokens)
+                    getattr(
+                        extractor,
+                        "cache_max_output_tokens",
+                        getattr(extractor, "max_output_tokens", config.max_output_tokens),
+                    )
                 ),
                 extraction_prompt_version=extractor.extraction_prompt_version,
                 schema_sha256=schema_sha,
@@ -500,10 +527,42 @@ class ModuleParser:
                 )
                 continue
 
+            # Exhausting the provider-call budget must not discard later cache hits.
+            # Keep scanning every chunk, but never invoke Codex again for cache misses.
+            if (
+                not config.mock
+                and config.provider == "codex"
+                and attempts >= config.max_codex_attempts
+            ):
+                if not budget_issue_recorded:
+                    issues.append(
+                        ParseIssueV1(
+                            severity=IssueSeverity.ERROR,
+                            code="CODEX_CALL_LIMIT",
+                            stage="extract",
+                            message=(
+                                "Codex call budget was exhausted; uncached content requires "
+                                "manual repair or a new explicitly started parse."
+                            ),
+                            chunk_id=chunk.id,
+                            retryable=False,
+                        )
+                    )
+                    budget_issue_recorded = True
+                continue
+
             previous_error: str | None = None
             fragment: ModuleFragmentV1 | None = None
             failures: list[ExtractionError] = []
+            budget_exhausted = False
             for retry in range(config.max_retries + 1):
+                if (
+                    not config.mock
+                    and config.provider == "codex"
+                    and attempts >= config.max_codex_attempts
+                ):
+                    budget_exhausted = True
+                    break
                 attempts += 1
                 try:
                     fragment = extractor.extract(chunk, previous_error=previous_error)
@@ -522,6 +581,8 @@ class ModuleParser:
                         )
                     break
                 except ExtractionError as exc:
+                    if isinstance(exc, ProviderResponseError) and not exc.retryable:
+                        raise
                     failures.append(exc)
                     previous_error = f"{exc.code}: {str(exc)}"
                     if retry >= config.max_retries or not exc.retryable:
@@ -533,6 +594,23 @@ class ModuleParser:
                         {"chunk_id": chunk.id, "retry": retry + 1, "code": exc.code},
                     )
             if fragment is None:
+                if budget_exhausted:
+                    if not budget_issue_recorded:
+                        issues.append(
+                            ParseIssueV1(
+                                severity=IssueSeverity.ERROR,
+                                code="CODEX_CALL_LIMIT",
+                                stage="extract",
+                                message=(
+                                    "Codex call budget was exhausted while retrying this chunk; "
+                                    "uncached content was left for manual repair."
+                                ),
+                                chunk_id=chunk.id,
+                                retryable=False,
+                            )
+                        )
+                        budget_issue_recorded = True
+                    continue
                 last = failures[-1] if failures else None
                 issues.append(
                     ParseIssueV1(

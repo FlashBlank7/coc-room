@@ -4,11 +4,14 @@ import type { ConnectionPath } from "../network/RoomTransport";
 import type { RoomRecord } from "../data/repository";
 
 export type AppView = "lobby" | "room" | "characters" | "modules" | "settings";
+export type ModuleParserProvider = "codex" | "deepseek";
 
 interface AppState {
   activeView: AppView;
   relayUrl: string;
-  model: string;
+  parserProvider: ModuleParserProvider;
+  codexModel: string;
+  deepseekModel: string;
   rooms: RoomRecord[];
   modules: ModulePackageV1[];
   currentRoom?: RoomRecord;
@@ -19,7 +22,9 @@ interface AppState {
   connectionError?: string;
   setActiveView(view: AppView): void;
   setRelayUrl(value: string): void;
-  setModel(value: string): void;
+  setParserProvider(value: ModuleParserProvider): void;
+  setCodexModel(value: string): void;
+  setDeepseekModel(value: string): void;
   setRooms(value: RoomRecord[]): void;
   setModules(value: ModulePackageV1[]): void;
   enterRoom(room: RoomRecord): void;
@@ -34,7 +39,9 @@ interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   activeView: "lobby",
   relayUrl: import.meta.env.VITE_RELAY_URL ?? "http://127.0.0.1:8787",
-  model: "deepseek-v4-flash",
+  parserProvider: "codex",
+  codexModel: "",
+  deepseekModel: "deepseek-v4-flash",
   rooms: [],
   modules: [],
   events: [],
@@ -43,7 +50,9 @@ export const useAppStore = create<AppState>((set) => ({
   relayConnected: false,
   setActiveView: (activeView) => set({ activeView }),
   setRelayUrl: (relayUrl) => set({ relayUrl }),
-  setModel: (model) => set({ model }),
+  setParserProvider: (parserProvider) => set({ parserProvider }),
+  setCodexModel: (codexModel) => set({ codexModel }),
+  setDeepseekModel: (deepseekModel) => set({ deepseekModel }),
   setRooms: (rooms) => set({ rooms }),
   setModules: (modules) => set({ modules }),
   enterRoom: (currentRoom) => set({ currentRoom, activeView: "room", events: [], participants: [], paths: {}, relayConnected: false, connectionError: undefined }),

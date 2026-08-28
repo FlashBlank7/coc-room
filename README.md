@@ -11,7 +11,7 @@
 - 文字聊天、CoC 7 版角色卡、普通骰式、`d100` 奖惩骰与成功等级
 - 本机 SQLite 记录、离线记录查看，导出 Markdown 或自包含 HTML
 - 模组资料库与 `ModulePackageV1`，可按场景、地点、NPC、线索、手记、检定和关系浏览，并用结构化表单修正常用字段；解析结果先审阅再保存/启用
-- Python/LangGraph sidecar 调用 DeepSeek Responses API 做 JSON Schema 结构化抽取
+- Python/LangGraph sidecar 默认委托本机已登录的 Codex CLI 做 Schema 约束抽取；DeepSeek API 作为手动回退
 - 粘贴文本及 `.txt`、`.md`、`.docx`、安全单文档 `.zip` 输入
 - Cloudflare Durable Objects 信令与临时中继，可自行部署
 
@@ -29,7 +29,8 @@
                         │                           │
                  SQLite + Credential Manager       SQLite
                         │
-                 Python JSONL sidecar ── DeepSeek API
+                 Python JSONL sidecar ─┬─ 本机 Codex CLI ── OpenAI
+                                       └─ DeepSeek API（手动回退）
 ```
 
 房主与每位玩家形成星形连接，不建立玩家间全连接。Worker 的 Durable Object 不创建应用数据表或 KV 记录；房间 ID、角色和令牌关系由凭据无状态验证，在线成员状态只存在于可休眠的 WebSocket attachment 中。聊天、事件、信令正文和中继正文均不持久化。更完整的数据流和边界见 [架构说明](docs/architecture.md)。
@@ -40,6 +41,7 @@
 - Node.js 22、pnpm 9.15.4（建议通过 Corepack 使用）
 - Rust stable，目标 `x86_64-pc-windows-msvc`
 - Python 3.12 与 [uv](https://docs.astral.sh/uv/)
+- 真实 Codex 解析需要已安装并登录的 Codex CLI（`codex login`）；不解析模组时可不安装
 - Visual Studio 2022 Build Tools（Desktop development with C++、Windows SDK）
 - Microsoft Edge WebView2 Runtime
 
@@ -90,8 +92,10 @@ pnpm dev:tauri
 - 首版**没有应用层端到端加密**。连接退回 WebSocket 中继时，Cloudflare 和 Worker 运营者理论上能够读取转发中的正文，请勿通过不受信任的公共节点传输敏感内容。
 - Worker 不建立聊天历史或模组正文存储，也不持久化房间元数据或令牌摘要。随机房主令牌通过带域分隔的 SHA-256 派生玩家加入令牌和房间 ID，使 Durable Object 能在不查询服务端房间记录的情况下验证房间、角色和预留的房主 peer ID；未认证 socket 的 15 秒截止 alarm 与在线 WebSocket attachment 不构成可恢复的房间历史。
 - 聊天、角色变化、骰子和已揭示内容保存在每个参与者自己的 SQLite 中。完整模组只应保存在房主本地。
-- DeepSeek API Key 由 Tauri 写入 Windows Credential Manager，只通过 sidecar 的 stdin JSONL 传递；不要把 Key 写入仓库、`.env`、命令行参数、日志或 GitHub Actions 文件。
-- 发送给 DeepSeek 的模组原文会离开本机，并受 DeepSeek 服务条款与数据政策约束。离线模拟解析不会联网。
+- Codex 路径只启动本机已登录的 `codex exec`，不会读取、复制或转发 Codex 登录令牌，也不会开放本地 HTTP 代理。模组正文仍会经 Codex 发送到 OpenAI；这不是离线推理。
+- Codex 任务使用临时工作目录、忽略用户配置/规则、只读沙箱和临时会话。只读沙箱能阻止写入，但不是对本机所有可读文件的严格 allowlist；不要把该能力暴露成公网代理。
+- DeepSeek API Key 仅在用户明确选择 DeepSeek 时由 Tauri 从 Windows Credential Manager 读取，并通过 sidecar 的 stdin JSONL 传递；不要把 Key 写入仓库、`.env`、命令行参数、日志或 GitHub Actions 文件。
+- 发送给 Codex 或 DeepSeek 的模组原文会离开本机，并受对应服务条款与数据政策约束。离线模拟解析不会联网。
 - 模组导入会拒绝 ZIP 路径穿越、符号链接、加密包、异常压缩比、多文档载荷，以及带宏、ActiveX、嵌入对象或 DTD 的 DOCX；这不是完整的恶意文件沙箱。
 
 ## 常用检查

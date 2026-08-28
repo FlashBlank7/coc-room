@@ -4,9 +4,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from coc_module_parser.client import (
     EmptyResponseError,
     InvalidStructureError,
+    ProviderResponseError,
     SequenceExtractor,
 )
 from coc_module_parser.cache import CACHE_VERSION, CacheIdentity
@@ -60,6 +63,99 @@ def test_invalid_fragment_retries_only_failed_chunk() -> None:
     assert result.extraction_attempts == 3
     assert any(issue.code == "EXTRACTION_RETRIED" for issue in result.issues)
     assert result.status == "ready_for_review"
+
+
+def test_non_retryable_provider_error_aborts_without_an_automatic_second_call() -> None:
+    extractor = SequenceExtractor(
+        [ProviderResponseError("provider unavailable", retryable=False)]
+    )
+    parser = ModuleParser(extractor)
+
+    with pytest.raises(ProviderResponseError):
+        parser.parse(ParseConfig(source_text="# Test", mock=True, max_retries=5))
+
+    assert extractor.calls == 1
+
+
+def test_codex_chunk_limit_fails_before_any_provider_call() -> None:
+    extractor = SequenceExtractor([ModuleFragmentV1()])
+    source = "\n\n".join(f"## Scene {index}\n" + ("x" * 900) for index in range(4))
+    parser = ModuleParser(extractor)
+
+    with pytest.raises(ProviderResponseError) as failure:
+        parser.parse(
+            ParseConfig(
+                source_text=source,
+                provider="codex",
+                model="explicit-test-model",
+                max_chunk_chars=1_000,
+                chunk_overlap_chars=0,
+                max_codex_chunks=1,
+            )
+        )
+
+    assert failure.value.code == "CODEX_INPUT_TOO_LARGE"
+    assert extractor.calls == 0
+
+
+def test_codex_attempt_budget_returns_a_partial_draft_without_extra_calls() -> None:
+    extractor = SequenceExtractor(
+        [InvalidStructureError("first attempt was invalid"), ModuleFragmentV1()]
+    )
+    result = ModuleParser(extractor).parse(
+        ParseConfig(
+            source_text="# Test",
+            provider="codex",
+            model="explicit-test-model",
+            max_retries=5,
+            max_codex_attempts=1,
+        )
+    )
+
+    assert extractor.calls == 1
+    assert result.extraction_attempts == 1
+    assert result.status == "needs_review"
+    assert any(issue.code == "CODEX_CALL_LIMIT" for issue in result.issues)
+
+
+def test_codex_attempt_budget_still_loads_later_cached_chunks(tmp_path: Path) -> None:
+    source = "\n\n".join(
+        f"## Chunk {index}\n" + (chr(96 + index) * 900) for index in range(1, 4)
+    )
+    fragments = [
+        ModuleFragmentV1(
+            scenes=[SceneV1(id=f"scene:{index}", title=f"Chunk {index}")]
+        )
+        for index in range(1, 4)
+    ]
+    base_config = ParseConfig(
+        source_text=source,
+        provider="codex",
+        model="explicit-test-model",
+        max_chunk_chars=1_000,
+        chunk_overlap_chars=0,
+        max_retries=0,
+        cache_dir=tmp_path,
+    )
+    warm_extractor = SequenceExtractor(
+        [InvalidStructureError("first chunk failed"), fragments[1], fragments[2]]
+    )
+    ModuleParser(warm_extractor).parse(base_config)
+    assert warm_extractor.calls == 3
+
+    replay_extractor = SequenceExtractor([fragments[0]])
+    result = ModuleParser(replay_extractor).parse(
+        base_config.model_copy(update={"max_codex_attempts": 1})
+    )
+
+    assert replay_extractor.calls == 1
+    assert result.extraction_attempts == 1
+    assert {scene.title for scene in result.module.scenes} == {
+        "Chunk 1",
+        "Chunk 2",
+        "Chunk 3",
+    }
+    assert not any(issue.code == "CODEX_CALL_LIMIT" for issue in result.issues)
 
 
 def test_chunk_retry_preserves_lossless_entity_fields() -> None:
@@ -197,6 +293,21 @@ def test_cache_reuses_validated_fragment_and_never_contains_key(tmp_path: Path) 
     assert extractor.calls == 1
     cache_text = "\n".join(path.read_text("utf-8") for path in tmp_path.rglob("*.json"))
     assert secret not in cache_text
+
+
+def test_non_cacheable_extractor_never_reuses_an_implicit_provider_default(
+    tmp_path: Path,
+) -> None:
+    extractor = SequenceExtractor([ModuleFragmentV1(), ModuleFragmentV1()])
+    extractor.cacheable = False
+    config = ParseConfig(source_text="# Cache", mock=True, cache_dir=tmp_path)
+    parser = ModuleParser(extractor)
+
+    parser.parse(config)
+    parser.parse(config)
+
+    assert extractor.calls == 2
+    assert list(tmp_path.rglob("*.json")) == []
 
 
 def test_cache_identity_includes_provider_and_generation_settings(tmp_path: Path) -> None:

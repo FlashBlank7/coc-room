@@ -18,7 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--provider", choices=("codex", "deepseek"), default="codex")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--codex-executable", type=Path)
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument("--cache-dir", type=Path)
@@ -28,9 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     loaded = load_source_path(args.source)
-    api_key = None if args.mock else getpass.getpass("DeepSeek API key: ")
-    if not args.mock and not api_key:
+    api_key = (
+        getpass.getpass("DeepSeek API key: ")
+        if not args.mock and args.provider == "deepseek"
+        else None
+    )
+    if not args.mock and args.provider == "deepseek" and not api_key:
         raise SystemExit("A non-empty API key is required.")
+    model = args.model or ("deepseek-v4-flash" if args.provider == "deepseek" else "")
 
     def report(stage: str, progress: float, message: str, details: object) -> None:
         del details
@@ -41,9 +48,11 @@ def main() -> int:
         source_name=loaded.name,
         source_sha256=loaded.sha256,
         source_media_type=loaded.media_type,
-        model=args.model,
+        provider=args.provider,
+        model=model,
         mock=args.mock,
         api_key=api_key,
+        codex_executable=args.codex_executable,
         max_retries=args.max_retries,
         cache_dir=args.cache_dir,
     )

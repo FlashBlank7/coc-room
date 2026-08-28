@@ -47,14 +47,38 @@ describe("module parser progress events", () => {
     const onProgress = vi.fn();
 
     const messages = await parseModule(
-      { sourceText: "# 模组", sourceName: "module.md", model: "deepseek-chat" },
+      { sourceText: "# 模组", sourceName: "module.md", provider: "deepseek", model: "deepseek-chat" },
       onProgress,
     );
 
     expect(messages).toHaveLength(1);
     expect(onProgress).toHaveBeenCalledOnce();
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: "extract", progress: 0.5 }));
+    expect(mocks.invoke).toHaveBeenCalledWith("run_module_parser", {
+      request: expect.objectContaining({ provider: "deepseek", model: "deepseek-chat" }),
+    });
     expect(mocks.unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("records Codex provenance and sends no model override when the field is blank", async () => {
+    mocks.invoke.mockResolvedValue([{ type: "result", module: createModulePackage(), issues: [], usage: { calls: 1 } }]);
+
+    const messages = await parseModule({
+      sourceText: "# Codex 模组",
+      sourceName: "codex.md",
+      provider: "codex",
+      model: "",
+    });
+
+    const result = messages[0] as ParserResult;
+    expect(getModuleParserProvenance(result.module)).toMatchObject({
+      provider: "codex",
+      model: "codex-default",
+      sourceName: "codex.md",
+    });
+    expect(mocks.invoke).toHaveBeenCalledWith("run_module_parser", {
+      request: expect.objectContaining({ provider: "codex", model: "" }),
+    });
   });
 
   it("records DeepSeek provenance while stripping source references from persisted issues", async () => {
@@ -78,6 +102,7 @@ describe("module parser progress events", () => {
     const messages = await parseModule({
       sourceText: sourceBody,
       sourceName: "见世之蝶.md",
+      provider: "deepseek",
       model: "deepseek-v4-flash",
     });
     const result = messages[0] as ParserResult;
@@ -111,6 +136,7 @@ describe("module parser progress events", () => {
     const messages = await parseModule({
       sourceText: sourceBody,
       sourceName: "preview.md",
+      provider: "deepseek",
       model: "deepseek-v4-flash",
       mock: true,
     });

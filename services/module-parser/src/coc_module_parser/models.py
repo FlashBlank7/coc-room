@@ -370,14 +370,18 @@ class ParseConfig(StrictModel):
     source_name: str = Field(default="pasted-text.md", min_length=1, max_length=260)
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_media_type: Literal["text/plain", "text/markdown"] = "text/markdown"
-    model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=100)
+    provider: Literal["deepseek", "codex"] = "deepseek"
+    model: str = Field(default="deepseek-v4-flash", max_length=100)
     mock: bool = False
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     base_url: str = Field(default="https://api.deepseek.com", max_length=500)
+    codex_executable: Path | None = None
     max_chunk_chars: int = Field(default=12_000, ge=1_000, le=100_000)
     chunk_overlap_chars: int = Field(default=500, ge=0, le=10_000)
     max_retries: int = Field(default=2, ge=0, le=5)
     max_output_tokens: int = Field(default=16_000, ge=1_000, le=64_000)
+    max_codex_chunks: int = Field(default=64, ge=1, le=128)
+    max_codex_attempts: int = Field(default=96, ge=1, le=192)
     cache_dir: Path | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -385,8 +389,10 @@ class ParseConfig(StrictModel):
     def validate_chunking(self) -> ParseConfig:
         if self.chunk_overlap_chars >= self.max_chunk_chars:
             raise ValueError("chunk_overlap_chars must be smaller than max_chunk_chars")
-        if not self.mock and self.api_key is None:
-            raise ValueError("api_key is required unless mock=true")
+        if not self.mock and self.provider == "deepseek" and self.api_key is None:
+            raise ValueError("api_key is required for the DeepSeek provider")
+        if not self.mock and self.provider == "deepseek" and not self.model.strip():
+            raise ValueError("model is required for the DeepSeek provider")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at must include a timezone offset")
         return self

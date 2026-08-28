@@ -41,13 +41,22 @@ export function App() {
 
   useEffect(() => {
     void getRepository().then(async (repository) => {
-      const [rooms, modules, relayUrl, model] = await Promise.all([
-        repository.listRooms(), repository.listModules(), repository.getSetting("relayUrl"), repository.getSetting("deepseekModel"),
+      const [rooms, modules, relayUrl, parserProvider, codexModel, deepseekModel] = await Promise.all([
+        repository.listRooms(),
+        repository.listModules(),
+        repository.getSetting("relayUrl"),
+        repository.getSetting("moduleParserProvider"),
+        repository.getSetting("codexModel"),
+        repository.getSetting("deepseekModel"),
       ]);
       useAppStore.getState().setRooms(rooms);
       useAppStore.getState().setModules(modules.map((item) => item.package));
       if (relayUrl) useAppStore.getState().setRelayUrl(relayUrl);
-      if (model) useAppStore.getState().setModel(model);
+      if (parserProvider === "codex" || parserProvider === "deepseek") {
+        useAppStore.getState().setParserProvider(parserProvider);
+      }
+      if (codexModel !== undefined) useAppStore.getState().setCodexModel(codexModel);
+      if (deepseekModel) useAppStore.getState().setDeepseekModel(deepseekModel);
     }).catch((error) => useAppStore.getState().setConnectionError(String(error)));
     return () => sessionRef.current?.stop();
   }, []);

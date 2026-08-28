@@ -13,6 +13,7 @@
 - uv
 - Visual Studio 2022 Build Tools：Desktop development with C++ 和 Windows 10/11 SDK
 - Microsoft Edge WebView2 Runtime
+- 可选：真实 Codex 解析需要 Codex CLI，并先执行 `codex login`
 
 ```powershell
 corepack enable
@@ -91,17 +92,27 @@ uv run pytest
 Pop-Location
 ```
 
-真实解析可在 Tauri 的设置页保存 Key 后操作。本地生成一个可导入草稿时，也可使用开发辅助脚本；它会在终端中无回显读取 Key，Key 不进入命令行、环境变量、输出文件或缓存：
+桌面端默认使用本机 Codex CLI。先登录，再在“设置 → 模组解析服务”检测状态：
+
+```powershell
+codex login
+codex login status
+```
+
+本地生成一个可导入草稿时，也可使用开发辅助脚本。Codex 登录完全由 CLI 管理，应用不会读取登录令牌；正文经 stdin 传给一次性 `codex exec` 任务：
 
 ```powershell
 Push-Location services/module-parser
 uv run python scripts/parse_file.py C:\path\to\module.docx `
   ..\..\local-modules\module.cocmod.json `
+  --provider codex `
   --cache-dir ..\..\local-modules\.cache
 Pop-Location
 ```
 
-辅助脚本只写入通过完整 Schema 校验的 `ModulePackageV1`。底层 JSONL sidecar 会产生零到多条 `progress`，最后恰好一条 `result` 或 `error`。真实调用会产生 API 费用；先用 `--mock` 验证输入。缓存不保存凭据，但会以未加密 JSON 保存已校验的分块抽取结果，因此应把它视为房主私密模组数据；可在应用退出后删除系统应用缓存中的 `module-parser` 目录来清空。
+如需手动回退到 DeepSeek，追加 `--provider deepseek --model deepseek-v4-flash`；脚本会在终端中无回显读取 Key，Key 不进入命令行、环境变量、输出文件或缓存。
+
+辅助脚本只写入通过完整 Schema 校验的 `ModulePackageV1`。底层 JSONL sidecar 会产生零到多条 `progress`，最后恰好一条 `result` 或 `error`。Codex 会使用 ChatGPT/Codex 账户额度，DeepSeek 会产生 API 费用；先用 `--mock` 验证输入。缓存不保存凭据，但会以未加密 JSON 保存已校验的分块抽取结果，因此应把它视为房主私密模组数据；可在应用退出后删除系统应用缓存中的 `module-parser` 目录来清空。
 
 ## 5. 检查与测试
 
@@ -119,7 +130,8 @@ Pop-Location
 - TypeScript 测试覆盖共享协议、排序/去重/补发、骰子、导出、仓库与 Worker 协议。
 - 桌面端通过 workspace 包的 `dist` 类型入口解析共享协议，因此全新 checkout 要先执行上面的协议构建。
 - Worker 测试运行在 Cloudflare 的本地 `workerd` 环境，不访问已部署服务。
-- Python 默认测试使用模拟响应，不访问 DeepSeek。
+- Python 默认测试使用模拟响应或伪造子进程，不调用 Codex 或 DeepSeek。
+- 真实 Codex 调用依赖当前 Windows 用户自己的 CLI 登录并消耗其 Codex 额度，默认 CI 不运行。
 - GitHub 的真实 DeepSeek 冒烟工作流只能通过 `workflow_dispatch` 手工执行，并要求 `DEEPSEEK_API_KEY` Secret；普通 push/PR CI 不读取该 Secret。
 
 普通 `pnpm test` 中的 `RoomSession.live.test.ts` 默认跳过，因为它需要一个已启动的 Worker。CI 会启动本地 `workerd` 并设置 `COC_ROOM_LIVE_RELAY_URL`，让两个真实 `RoomSession` 通过 WebSocket 强制中继，验证聊天、骰子、模组切换、大型 UTF-8 揭示、离线事件和重连补发；这两个会话仍使用内存仓库，不是 SQLite 桌面 E2E。

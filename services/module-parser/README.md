@@ -21,12 +21,38 @@ process alive and handles lines sequentially until EOF.
 ```
 
 The deterministic `mock` path never opens a network connection and is the default for
-tests. A real request passes the key only inside stdin JSON:
+tests. The desktop and `parse_file.py` default real provider invoke the locally installed,
+user-authenticated Codex CLI through its supported non-interactive mode. The adapter does
+not read or copy Codex credentials and does not open an HTTP proxy:
+
+```json
+{
+  "id": "parse-codex",
+  "source_path": "C:\\scenarios\\example.docx",
+  "provider": "codex",
+  "model": "",
+  "codex_executable": "C:\\path\\to\\codex.exe",
+  "cache_dir": "C:\\Users\\me\\AppData\\Local\\coc-room\\module-cache"
+}
+```
+
+An empty Codex model uses the CLI build's built-in default and deliberately disables the
+persistent extraction cache, because that default may be rerouted without a local version
+change. Set an explicit model to enable reproducible cache reuse. The adapter uses an isolated
+temporary working directory, ignores user config and rules, enables the read-only sandbox,
+disables shell/unified execution and web search, passes source text only through stdin,
+validates against a strict JSON Schema, and runs ephemerally.
+Inference still happens through OpenAI; this is not an offline model. Read-only sandboxing
+prevents writes but is not a strict allowlist for every readable file on the machine.
+See the official [Codex non-interactive mode documentation](https://developers.openai.com/codex/non-interactive-mode).
+
+DeepSeek remains an explicit fallback. Its key is passed only inside stdin JSON:
 
 ```json
 {
   "id": "parse-1",
   "source_path": "C:\\scenarios\\example.docx",
+  "provider": "deepseek",
   "model": "deepseek-v4-flash",
   "api_key": "<provided-at-runtime>",
   "cache_dir": "C:\\Users\\me\\AppData\\Local\\coc-room\\module-cache"
@@ -38,13 +64,19 @@ passed only to the DeepSeek `Authorization` header, excluded from model dumps, a
 not logged, returned, or written to the extraction cache. The Tauri host is responsible
 for obtaining it from Windows Credential Manager and clearing its own in-memory copy.
 
-For a local development import, the helper below prompts for the key without echoing it
-and writes only the validated module package. The cache contains validated fragments,
-never credentials:
+For a local Codex development import, sign in with `codex login`, then run:
 
 ```powershell
 uv run python scripts/parse_file.py scenario.zip ..\..\local-modules\scenario.cocmod.json `
-  --cache-dir ..\..\local-modules\.cache
+  --provider codex --cache-dir ..\..\local-modules\.cache
+```
+
+For DeepSeek, add `--provider deepseek --model deepseek-v4-flash`; the helper prompts for
+the key without echoing it. The cache contains validated fragments, never credentials:
+
+```powershell
+uv run python scripts/parse_file.py scenario.zip ..\..\local-modules\scenario.cocmod.json `
+  --provider deepseek --model deepseek-v4-flash --cache-dir ..\..\local-modules\.cache
 ```
 
 Every output line contains `protocol_version`, `request_id`, and `type`. Parse requests
@@ -82,8 +114,8 @@ The compiled LangGraph is linear at the document level:
 
 1. normalize text;
 2. split at heading/paragraph boundaries with overlap;
-3. extract each chunk with the DeepSeek Responses API and a Pydantic-generated JSON
-   Schema;
+3. extract each chunk with the selected Codex CLI or DeepSeek provider and a
+   Pydantic-generated JSON Schema;
 4. resolve/deduplicate references and discard invalid source locations;
 5. validate the complete `ModulePackageV1`;
 6. summarize issues for editor review.
@@ -98,6 +130,12 @@ Empty, incomplete/truncated, invalid JSON, and schema-invalid responses are retr
 for their source chunk. Non-retryable HTTP failures stop that chunk immediately. The
 Responses API call is non-streaming and uses `POST /responses`, `text.format.type =
 json_schema`, and the configurable model name.
+
+Codex parsing is additionally bounded to 64 chunks and 96 actual extraction attempts per
+explicit task. Oversized input fails before inference; exhausting the attempt budget stops
+new calls and returns a review draft. These are hard safety limits, not output-token claims:
+`codex exec` has no matching max-output-token flag, while the adapter independently caps
+the final result file at 8 MiB.
 
 Caching is opt-in through `cache_dir`. Cache identities contain the original source
 SHA-256, chunk SHA-256/range and splitting parameters, extractor/model identity, schema

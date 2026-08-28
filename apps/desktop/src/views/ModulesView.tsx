@@ -18,7 +18,10 @@ export function ModulesView({ session }: { session?: RoomSession }) {
   const modules = useAppStore((state) => state.modules);
   const setModules = useAppStore((state) => state.setModules);
   const events = useAppStore((state) => state.events);
-  const model = useAppStore((state) => state.model);
+  const parserProvider = useAppStore((state) => state.parserProvider);
+  const codexModel = useAppStore((state) => state.codexModel);
+  const deepseekModel = useAppStore((state) => state.deepseekModel);
+  const model = parserProvider === "codex" ? codexModel : deepseekModel;
   const currentRoom = useAppStore((state) => state.currentRoom);
   const [sourceName, setSourceName] = useState("新模组.md");
   const [sourceText, setSourceText] = useState("");
@@ -149,7 +152,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
     setBusy(true); setError(undefined); setProgress([]); setWarnings([]);
     try {
       const messages = await parseModule(
-        { sourceText: sourceText || undefined, sourcePath, sourceName, model, mock },
+        { sourceText: sourceText || undefined, sourcePath, sourceName, provider: parserProvider, model, mock },
         (update) => setProgress((current) => [...current, update]),
       );
       const updates = messages.filter((message): message is ParserProgress => message.type === "progress");
@@ -345,7 +348,11 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                 <Textarea value={sourceText} onChange={(event) => { setSourceText(event.target.value); setSourcePath(undefined); }} className="min-h-56" />
               </Field>
               {sourcePath && <p className="break-all text-xs text-zinc-500">已选择：{sourcePath}</p>}
-              <div className="grid grid-cols-2 gap-2"><Button variant="secondary" onClick={() => void chooseSource()}><Upload className="mr-2 h-4 w-4" />选择文件</Button><Button onClick={() => void runParser(false)} disabled={busy}><Play className="mr-2 h-4 w-4" />DeepSeek 解析</Button></div>
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-400">
+                当前解析服务：<span className="text-brass">{parserProvider === "codex" ? "本机 Codex CLI" : "DeepSeek API"}</span>
+                {parserProvider === "codex" && <span className="mt-1 block text-zinc-600">复用本机 Codex 登录；模型在 OpenAI 云端运行，并非离线推理。</span>}
+              </div>
+              <div className="grid grid-cols-2 gap-2"><Button variant="secondary" onClick={() => void chooseSource()}><Upload className="mr-2 h-4 w-4" />选择文件</Button><Button onClick={() => void runParser(false)} disabled={busy}><Play className="mr-2 h-4 w-4" />{parserProvider === "codex" ? "Codex 解析" : "DeepSeek 解析"}</Button></div>
               <Button variant="ghost" onClick={() => void runParser(true)} disabled={busy}><FlaskConical className="mr-2 h-4 w-4" />无 API 模拟结构</Button>
               {progress.map((item, index) => <div key={`${item.stage}-${index}`} className="text-xs text-zinc-400">{item.stage} · {item.message}</div>)}
               {warnings.map((warning) => <div key={warning} className="text-xs text-amber-300">{warning}</div>)}

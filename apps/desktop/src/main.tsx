@@ -191,6 +191,7 @@ async function runStorageSmoke(): Promise<Record<string, unknown>> {
     const parserMessages = await parseModule({
       sourceText,
       sourceName: "storage-smoke.md",
+      provider: "deepseek",
       model: "deterministic-v1",
       mock: true,
     });

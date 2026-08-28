@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .canonical import CanonicalModulePackageV1, to_canonical_package
+from .client import ProviderResponseError
 from .inputs import InputError, load_source_path, load_source_text
 from .models import (
     ParseConfig,
@@ -91,13 +92,17 @@ def _parse_config(payload: dict[str, Any]) -> ParseConfig:
         )
     allowed = {
         "api_key",
+        "provider",
         "model",
         "mock",
         "base_url",
+        "codex_executable",
         "max_chunk_chars",
         "chunk_overlap_chars",
         "max_retries",
         "max_output_tokens",
+        "max_codex_chunks",
+        "max_codex_attempts",
         "cache_dir",
         "generated_at",
     }
@@ -170,6 +175,15 @@ def process_request(raw: Any, emit: Emit) -> None:
             )
         except InputError as exc:
             emit(_error(request_id, exc.code, str(exc)))
+        except ProviderResponseError as exc:
+            emit(
+                _error(
+                    request_id,
+                    exc.code,
+                    str(exc),
+                    retryable=exc.retryable,
+                )
+            )
         except ValidationError as exc:
             emit(
                 _error(
