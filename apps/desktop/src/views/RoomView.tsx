@@ -13,6 +13,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
 import type { RoomSession } from "../network/RoomSession";
 import { encodeInvitation } from "../lib/invitation";
 import { isRoomHostAvailable } from "../lib/room-availability";
+import { downloadTextInBrowser } from "../lib/browser-download";
 import { useAppStore } from "../store/app-store";
 import { Button } from "../components/ui/Button";
 import { Field, Input } from "../components/ui/Field";
@@ -108,7 +109,7 @@ export function RoomView({ session, readOnly = false, onLeave }: RoomViewProps) 
         const path = await save({ defaultPath: filename, filters: [{ name: format.toUpperCase(), extensions: [format] }] });
         if (path) await writeTextFile(path, content);
       } else {
-        download(filename, content, format === "html" ? "text/html" : "text/markdown");
+        downloadTextInBrowser(filename, content, format === "html" ? "text/html;charset=utf-8" : "text/markdown;charset=utf-8");
       }
     } catch (cause) {
       setConnectionError(cause instanceof Error ? cause.message : String(cause));
@@ -297,7 +298,6 @@ function EventCard({ event }: { event: RoomEventV1 }) {
 
 function EmptyRoom() { return <div className="grid h-full place-items-center text-zinc-500">尚未加入房间</div>; }
 function safeName(value: string) { return value.replace(/[<>:"/\\|?*]/g, "_"); }
-function download(name: string, content: string, type: string) { const url = URL.createObjectURL(new Blob([content], { type })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
 
 const checkOutcomeLabels: Record<CheckOutcome, string> = {
   critical: "大成功",

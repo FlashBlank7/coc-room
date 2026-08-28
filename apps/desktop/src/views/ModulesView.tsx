@@ -12,6 +12,7 @@ import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
 import { ModuleEntityBrowser } from "../components/module/ModuleEntityBrowser";
 import { StructuredModuleEditor } from "../components/module/StructuredModuleEditor";
+import { downloadTextInBrowser } from "../lib/browser-download";
 
 export function ModulesView({ session }: { session?: RoomSession }) {
   const modules = useAppStore((state) => state.modules);
@@ -290,7 +291,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
       if (window.__TAURI_INTERNALS__) {
         const path = await save({ defaultPath: fileName, filters: [{ name: "CoC module", extensions: ["json"] }] });
         if (path) await writeTextFile(path, content);
-      } else download(fileName, content);
+      } else downloadTextInBrowser(fileName, content, "application/json;charset=utf-8");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -576,8 +577,6 @@ function RoomContentPublishing({
 }
 
 function safeName(value: string) { return value.replace(/[<>:"/\\|?*]/g, "_"); }
-function download(name: string, content: string) { const url = URL.createObjectURL(new Blob([content], { type: "application/json" })); const a = document.createElement("a"); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); }
-
 function nextModuleRevision(candidate: ModulePackageV1, modules: ModulePackageV1[]): ModulePackageV1 {
   const existing = modules.find((item) => item.moduleId === candidate.moduleId);
   const now = new Date().toISOString();
