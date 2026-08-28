@@ -27,7 +27,11 @@ describe("ModulesView browser import", () => {
     fireEvent.change(input, { target: { files: [file] } });
 
     const browser = await screen.findByLabelText(`${modulePackage.metadata.title}模组内容浏览`);
-    expect(screen.getByLabelText(`已保存模组：${modulePackage.metadata.title}`).getAttribute("aria-current")).toBe("true");
+    const savedModule = screen.getByLabelText(`已保存模组：${modulePackage.metadata.title}`);
+    expect(savedModule.getAttribute("aria-current")).toBe("true");
+    const savedDirectory = within(savedModule).getByLabelText(`${modulePackage.metadata.title}人物与地点`);
+    expect(within(savedDirectory).getByText("观止剧场")).not.toBeNull();
+    expect(within(savedDirectory).getByText("花小路")).not.toBeNull();
     expect(screen.getByRole("tab", { name: "资料浏览" }).getAttribute("aria-selected")).toBe("true");
     expect(useAppStore.getState().modules).toHaveLength(1);
     expect(useAppStore.getState().modules[0]?.moduleId).toBe(modulePackage.moduleId);

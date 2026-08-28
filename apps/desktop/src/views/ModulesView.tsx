@@ -384,6 +384,7 @@ export function ModulesView({ session }: { session?: RoomSession }) {
                       </div>
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
+                    <ModuleLibraryEntityDirectory modulePackage={modulePackage} />
                     <div className="mt-3 flex gap-1">
                       <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
                         <BookOpen className="mr-1.5 h-3.5 w-3.5" />打开
@@ -572,6 +573,47 @@ function RoomContentPublishing({
           </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+function ModuleLibraryEntityDirectory({ modulePackage }: { modulePackage: ModulePackageV1 }) {
+  const groups = [
+    {
+      label: "地点",
+      items: modulePackage.locations.map((location) => ({ id: location.id, name: location.name })),
+    },
+    {
+      label: "人物",
+      items: modulePackage.npcs.map((npc) => ({ id: npc.id, name: npc.name })),
+    },
+  ];
+
+  return (
+    <section
+      aria-label={`${modulePackage.metadata.title}人物与地点`}
+      className="mt-3 grid gap-2 rounded-md border border-zinc-800 bg-zinc-950/45 p-2.5"
+    >
+      {groups.map(({ label, items }) => (
+        <div key={label} className="grid grid-cols-[3.5rem_minmax(0,1fr)] items-start gap-2">
+          <div className="pt-1 text-[11px] font-medium text-brass">{label} {items.length}</div>
+          {items.length === 0 ? (
+            <div className="pt-1 text-[11px] text-zinc-600">尚未抽取</div>
+          ) : (
+            <div className="flex max-h-20 flex-wrap gap-1 overflow-y-auto pr-1">
+              {items.map((item) => (
+                <span
+                  key={item.id}
+                  title={item.id}
+                  className="rounded bg-zinc-900 px-1.5 py-1 text-[11px] leading-none text-zinc-300"
+                >
+                  {item.name}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </section>
   );
 }
