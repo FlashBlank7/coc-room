@@ -380,7 +380,7 @@ class DeepSeekCharacterDraftProvider:
     model: str = DEFAULT_DEEPSEEK_NPC_MODEL
     base_url: str = "https://api.deepseek.com"
     max_output_tokens: int = 8_192
-    timeout_seconds: float = 600.0
+    timeout_seconds: float = 1_500.0
     client: httpx.Client | None = field(default=None, repr=False)
 
     def generate(self, provider_input: str) -> CharacterDraftProviderOutputV1:
@@ -539,7 +539,7 @@ class CodexCharacterDraftProvider(CodexNpcReplyProvider):
             except subprocess.TimeoutExpired as exc:
                 raise ProviderResponseError(
                     "Codex CLI timed out",
-                    retryable=False,
+                    retryable=True,
                     code="CODEX_TIMEOUT",
                 ) from exc
             except OSError as exc:

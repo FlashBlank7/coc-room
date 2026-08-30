@@ -95,7 +95,7 @@ class GenerateNpcReplyTaskV1(StrictModel):
         validation_alias=AliasChoices("codexExecutable", "codex_executable"),
     )
     timeout_seconds: float = Field(
-        default=600.0,
+        default=1_500.0,
         ge=5.0,
         le=86_400.0,
         validation_alias=AliasChoices("timeoutSeconds", "timeout_seconds"),
@@ -204,7 +204,7 @@ class DeepSeekNpcReplyProvider:
     model: str = DEFAULT_DEEPSEEK_NPC_MODEL
     base_url: str = "https://api.deepseek.com"
     max_output_tokens: int = 8_192
-    timeout_seconds: float = 600.0
+    timeout_seconds: float = 1_500.0
     client: httpx.Client | None = field(default=None, repr=False)
 
     def generate(self, context: NpcContextWindowV1) -> NpcReplyOutputV1:
@@ -287,7 +287,7 @@ class CodexNpcReplyProvider:
 
     model: str = ""
     executable: str = "codex"
-    timeout_seconds: float = 600.0
+    timeout_seconds: float = 1_500.0
     runner: CodexRunner | None = field(default=None, repr=False)
     _ready: bool = field(default=False, init=False, repr=False)
 
@@ -478,7 +478,7 @@ class CodexNpcReplyProvider:
             except subprocess.TimeoutExpired as exc:
                 raise ProviderResponseError(
                     "Codex CLI timed out",
-                    retryable=False,
+                    retryable=True,
                     code="CODEX_TIMEOUT",
                 ) from exc
             except OSError as exc:

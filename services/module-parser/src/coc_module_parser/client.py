@@ -560,34 +560,18 @@ CodexRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _codex_environment() -> dict[str, str]:
-    """Pass only the environment needed to find auth and run the CLI.
+    """Give the local Codex CLI the full environment minus provider API keys.
 
-    In particular, provider API keys and unrelated application secrets are not inherited.
+    An earlier allowlist here silently dropped SYSTEMROOT on Windows (the key
+    was spelled "SystemRoot" while os.environ normalizes to upper case), which
+    made every codex subprocess hang inside schannel TLS. Pass everything
+    through instead, excluding only provider credentials: an inherited
+    OPENAI_API_KEY would silently switch codex from its own login to API-key
+    billing, and the DeepSeek key must only travel via stdin JSONL.
     """
 
-    allowed = {
-        "APPDATA",
-        "CODEX_HOME",
-        "COMSPEC",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "LANG",
-        "LC_ALL",
-        "LOCALAPPDATA",
-        "NO_PROXY",
-        "PATH",
-        "PATHEXT",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "SystemRoot",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    result = {key: value for key, value in os.environ.items() if key in allowed}
+    excluded = {"OPENAI_API_KEY", "DEEPSEEK_API_KEY"}
+    result = {key: value for key, value in os.environ.items() if key.upper() not in excluded}
     result["NO_COLOR"] = "1"
     return result
 

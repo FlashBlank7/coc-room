@@ -66,7 +66,7 @@ describe("local AI bridge boundary", () => {
     }, origin, sessionToken)).toThrow("只接受 JSON 请求");
   });
 
-  it("passes only an allowlisted environment to the Python wrapper", () => {
+  it("passes the full environment minus provider API keys to the Python wrapper", () => {
     const environment = createBridgeSidecarEnvironment(
       "C:\\workspace\\services\\module-parser",
       "C:\\temp\\bridge",
@@ -75,10 +75,11 @@ describe("local AI bridge boundary", () => {
         PATH: "C:\\Windows\\System32",
         USERPROFILE: "C:\\Users\\keeper",
         HTTPS_PROXY: "http://127.0.0.1:8080",
+        // SYSTEMROOT must flow through: without it codex hangs in schannel TLS.
+        SYSTEMROOT: "C:\\Windows",
         OPENAI_API_KEY: "must-not-be-inherited",
         CODEX_API_KEY: "must-not-be-inherited",
         DEEPSEEK_API_KEY: "must-not-be-inherited",
-        COC_ROOM_UNRELATED_SECRET: "must-not-be-inherited",
       },
     );
 
@@ -86,6 +87,7 @@ describe("local AI bridge boundary", () => {
       PATH: "C:\\Windows\\System32",
       USERPROFILE: "C:\\Users\\keeper",
       HTTPS_PROXY: "http://127.0.0.1:8080",
+      SYSTEMROOT: "C:\\Windows",
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
       COC_ROOM_DEV_BRIDGE_TEMP_ROOT: "C:\\temp\\bridge",
@@ -94,7 +96,6 @@ describe("local AI bridge boundary", () => {
     expect(environment).not.toHaveProperty("OPENAI_API_KEY");
     expect(environment).not.toHaveProperty("CODEX_API_KEY");
     expect(environment).not.toHaveProperty("DEEPSEEK_API_KEY");
-    expect(environment).not.toHaveProperty("COC_ROOM_UNRELATED_SECRET");
   });
 
   it("accepts a bounded text parse but rejects path, credential, and tool fields", () => {

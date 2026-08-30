@@ -225,31 +225,15 @@ def find_codex_executable() -> Path | None:
 
 
 def codex_probe_environment() -> dict[str, str]:
-    """Pass login-location and network settings, but no provider API keys."""
+    """Give the local Codex CLI the full environment minus provider API keys.
 
-    allowed = {
-        "APPDATA",
-        "CODEX_HOME",
-        "COMSPEC",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "LANG",
-        "LC_ALL",
-        "LOCALAPPDATA",
-        "NO_PROXY",
-        "PATH",
-        "PATHEXT",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "SystemRoot",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    result = {key: value for key, value in os.environ.items() if key in allowed}
+    The old allowlist dropped SYSTEMROOT on Windows ("SystemRoot" never matched
+    the upper-cased os.environ key), which hung codex inside schannel TLS.
+    Provider keys stay excluded so codex keeps using its own login.
+    """
+
+    excluded = {"OPENAI_API_KEY", "DEEPSEEK_API_KEY"}
+    result = {key: value for key, value in os.environ.items() if key.upper() not in excluded}
     result["NO_COLOR"] = "1"
     return result
 

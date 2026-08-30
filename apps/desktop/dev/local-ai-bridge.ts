@@ -31,30 +31,6 @@ export const SIDECAR_TOTAL_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 export const SIDECAR_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
 export const FIXED_AI_TIMEOUT_MS = 30 * 60 * 1_000;
 const ALLOWED_SOURCE_EXTENSIONS = new Set([".txt", ".md", ".markdown", ".docx", ".pdf", ".zip"]);
-const SIDECAR_INHERITED_ENVIRONMENT_KEYS = new Set([
-  "APPDATA",
-  "CODEX_HOME",
-  "COMSPEC",
-  "HOME",
-  "HOMEDRIVE",
-  "HOMEPATH",
-  "HTTPS_PROXY",
-  "HTTP_PROXY",
-  "LANG",
-  "LC_ALL",
-  "LOCALAPPDATA",
-  "NO_PROXY",
-  "PATH",
-  "PATHEXT",
-  "SSL_CERT_DIR",
-  "SSL_CERT_FILE",
-  "SYSTEMROOT",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "USERPROFILE",
-  "WINDIR",
-]);
 
 type SidecarDeadline = "total" | "idle";
 
@@ -804,15 +780,24 @@ function isPlainRecord(value: unknown): Record<string, unknown> | undefined {
  * Provider credentials are resolved by the wrapper itself and Codex receives a
  * second, narrower environment at its own subprocess boundary.
  */
+const SIDECAR_EXCLUDED_ENVIRONMENT_KEYS = new Set([
+  "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "DEEPSEEK_API_KEY",
+]);
+
 export function createBridgeSidecarEnvironment(
   parserRoot: string,
   tempRoot: string,
   cacheRoot: string,
   inherited: Record<string, string | undefined> = process.env,
 ): NodeJS.ProcessEnv {
+  // Pass the full environment through minus provider API keys. An earlier
+  // allowlist starved the codex subprocess of SYSTEMROOT on Windows, which
+  // hung its TLS stack; credentials still must not reach the sidecar via env.
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(inherited)) {
-    if (value !== undefined && SIDECAR_INHERITED_ENVIRONMENT_KEYS.has(key.toUpperCase())) {
+    if (value !== undefined && !SIDECAR_EXCLUDED_ENVIRONMENT_KEYS.has(key.toUpperCase())) {
       environment[key] = value;
     }
   }
