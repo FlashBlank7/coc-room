@@ -1,3 +1,4 @@
+import { characteristicBandSuffix } from "../../../lib/characteristic-bands";
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   isAudienceSubsetV2,
@@ -537,7 +538,7 @@ export function CheckNegotiationV2({
           setCharacterId(event.target.value);
           setCheckOptionId("");
         }}>{ownCharacters.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
-        <Field label="我猜可能用到（可不选）"><select aria-label="使用技能或属性" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={selectedCheck?.id ?? ""} onChange={(event) => setCheckOptionId(event.target.value)}><option value="">不确定，让 KP 决定</option>{checkOptions.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.value}</option>)}</select></Field>
+        <Field label="我猜可能用到（可不选）"><select aria-label="使用技能或属性" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={selectedCheck?.id ?? ""} onChange={(event) => setCheckOptionId(event.target.value)}><option value="">不确定，让 KP 决定</option>{checkOptions.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.value}{characteristicBandSuffix(option.name, option.value)}</option>)}</select></Field>
         <p className="text-xs leading-5 text-zinc-500">技能只是建议；KP 会根据你的目标和做法，决定直接给出结果或采用哪项检定。</p>
         <Button disabled={busy || !goal.trim() || !approach.trim()} onClick={() => void run(async () => {
           await session.submitConfirmed({
@@ -902,7 +903,7 @@ function CheckRequestCard({ request, character, originalRequest, busy, onAuthori
           const next = availableChecks.find(({ id }) => id === event.target.value);
           setCheckOptionId(event.target.value);
           if (next) setTarget(next.value);
-        }}>{availableChecks.length > 0 ? availableChecks.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.value}</option>) : <option value="legacy">{selectedCheck.name} · {selectedCheck.value}</option>}</select></Field>
+        }}>{availableChecks.length > 0 ? availableChecks.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.value}{characteristicBandSuffix(option.name, option.value)}</option>) : <option value="legacy">{selectedCheck.name} · {selectedCheck.value}</option>}</select></Field>
         <Field label="采用的角色卡数值"><Input aria-label={`检定目标：${request.characterName}`} type="number" min={1} max={100} value={target} onChange={(event) => setTarget(clampTarget(Number(event.target.value)))} /></Field>
         <Field label="奖惩骰"><select aria-label={`奖惩骰：${request.characterName}`} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={modifier} onChange={(event) => setModifier(Number(event.target.value))}><option value={2}>2 个奖励骰</option><option value={1}>1 个奖励骰</option><option value={0}>无奖惩骰</option><option value={-1}>1 个惩罚骰</option><option value={-2}>2 个惩罚骰</option></select></Field>
       </div>

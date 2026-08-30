@@ -758,15 +758,15 @@ fn validate_request(request: &NpcReplyRequest) -> Result<(), String> {
             .characteristics
             .values()
             .chain(character.skills.values())
-            .any(|value| !(0..=100).contains(value))
+            .any(|value| !(0..=999).contains(value))
             || character
                 .hit_points
-                .is_some_and(|value| !(0..=99).contains(&value))
+                .is_some_and(|value| !(0..=999).contains(&value))
             || character
                 .sanity
-                .is_some_and(|value| !(0..=100).contains(&value))
+                .is_some_and(|value| !(0..=999).contains(&value))
         {
-            return Err("NPC 数值超出 CoC 百分值范围".to_string());
+            return Err("NPC 数值超出允许范围".to_string());
         }
     }
 

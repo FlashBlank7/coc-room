@@ -6,6 +6,12 @@ import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve, win32 } from "node:path";
 import type { Plugin } from "vite";
 
+import {
+  CodexImageBridgeError,
+  probeCodexImageCapabilities,
+  runCodexImageGeneration,
+} from "./codex-image-app-server";
+
 export const LOCAL_AI_BRIDGE_PREFIX = "/__coc_room_local_ai/v1";
 export const LOCAL_AI_BRIDGE_HEADER = "x-coc-room-local-ai";
 export const LOCAL_AI_BRIDGE_TOKEN_META = "coc-room-local-ai-token";
@@ -16,6 +22,9 @@ const RENDER_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/render-pdf-pages`;
 const CHARACTER_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/character-draft`;
 const NPC_STATS_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-stats-draft`;
 const NPC_REPLY_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-reply`;
+const IMAGE_GENERATION_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/image-generation`;
+const IMAGE_CAPABILITIES_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/image-capabilities`;
+const MAX_IMAGE_REQUEST_BYTES = 1024 * 1024;
 const MAX_TEXT_CHARACTERS = 50_000_000;
 const MAX_REGULAR_SOURCE_BYTES = 100 * 1024 * 1024;
 const MAX_PDF_SOURCE_BYTES = 200 * 1024 * 1024;
@@ -301,6 +310,80 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
             return;
           }
 
+          if (pathname === IMAGE_CAPABILITIES_ROUTE && request.method === "POST") {
+            const body = requireRecord(await readJsonBody(request, MAX_IMAGE_REQUEST_BYTES));
+            assertExactKeys(body, ["id"]);
+            const requestId = validateFixedAiRequestId(body.id);
+            const capabilities = await probeCodexImageCapabilities();
+            response.statusCode = 200;
+            response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+            response.setHeader("X-Content-Type-Options", "nosniff");
+            response.end(`${JSON.stringify({
+              protocol_version: "1.0",
+              request_id: requestId,
+              type: "result",
+              result: { ...capabilities },
+            })}\n`);
+            return;
+          }
+
+          if (pathname === IMAGE_GENERATION_ROUTE && request.method === "POST") {
+            if (runningTasks >= MAX_CONCURRENT_TASKS) throw new BridgeHttpError(409, "LOCAL_AI_BUSY", "本地 AI 并发任务已满，请稍候");
+            const parsed = validateImageJobRequest(await readJsonBody(request, MAX_IMAGE_REQUEST_BYTES));
+            runningTasks += 1;
+            const imageAbort = new AbortController();
+            const lifecycle = new SidecarLifecycle(() => imageAbort.abort(), FIXED_AI_TIMEOUT_MS, null);
+            const onDisconnect = () => imageAbort.abort();
+            disconnect.signal.addEventListener("abort", onDisconnect, { once: true });
+            try {
+              const result = await runCodexImageGeneration({
+                kind: parsed.kind,
+                description: parsed.description,
+                style: parsed.style,
+                aspectRatio: parsed.aspectRatio,
+                model: parsed.model,
+              }, imageAbort.signal);
+              response.statusCode = 200;
+              response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+              response.setHeader("X-Content-Type-Options", "nosniff");
+              response.end(`${JSON.stringify({
+                protocol_version: "1.0",
+                request_id: parsed.id,
+                type: "result",
+                result: {
+                  kind: parsed.kind,
+                  mediaType: result.mediaType,
+                  byteLength: result.byteLength,
+                  sha256: result.sha256,
+                  dataBase64: result.dataBase64,
+                  ...(result.width === undefined ? {} : { width: result.width }),
+                  ...(result.height === undefined ? {} : { height: result.height }),
+                  ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),
+                },
+              })}\n`);
+            } catch (error) {
+              if (response.headersSent || disconnect.signal.aborted) throw error;
+              // Wire codes are upper-case so the browser envelope validator keeps them.
+              const code = (error instanceof CodexImageBridgeError ? error.code : "generation_failed").toUpperCase();
+              const retryable = error instanceof CodexImageBridgeError ? error.retryable : false;
+              const message = error instanceof CodexImageBridgeError ? error.message : "图片生成失败";
+              response.statusCode = 200;
+              response.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+              response.setHeader("X-Content-Type-Options", "nosniff");
+              response.end(`${JSON.stringify({
+                protocol_version: "1.0",
+                request_id: parsed.id,
+                type: "error",
+                error: { code, message, retryable },
+              })}\n`);
+            } finally {
+              lifecycle.stop();
+              disconnect.signal.removeEventListener("abort", onDisconnect);
+              runningTasks -= 1;
+            }
+            return;
+          }
+
           if (request.method === "POST" && (
             pathname === CHARACTER_DRAFT_ROUTE
             || pathname === NPC_STATS_DRAFT_ROUTE
@@ -489,9 +572,38 @@ export function validateCharacterDraftRequest(raw: unknown): {
     id: validateFixedAiRequestId(value.id),
     provider: validateProvider(value.provider),
     model: validateModel(value.model),
-    prompt: requireBoundedText(value.prompt, 1, 8_000, "角色草稿描述"),
+    prompt: requireBoundedText(value.prompt, 1, 100_000, "角色草稿描述"),
     playerName: requireBoundedText(value.playerName, 1, 160, "玩家称呼"),
     ownerSeatId: requireIdentifier(value.ownerSeatId, "玩家席位"),
+  };
+}
+
+const IMAGE_JOB_KINDS = new Set(["location", "npc", "character", "cover", "textlessMap"]);
+const IMAGE_ASPECT_RATIOS = new Set(["square", "landscape", "portrait"]);
+
+export function validateImageJobRequest(raw: unknown): {
+  id: string;
+  kind: string;
+  description: string;
+  style?: string;
+  aspectRatio: string;
+  model?: string;
+} {
+  const value = requireRecord(raw);
+  assertExactKeys(value, ["id", "kind", "description", "style", "aspectRatio", "model"]);
+  const kind = requireString(value.kind);
+  if (!IMAGE_JOB_KINDS.has(kind)) throw new BridgeHttpError(400, "INVALID_AI_REQUEST", "图片任务类型无效");
+  const aspectRatio = requireString(value.aspectRatio);
+  if (!IMAGE_ASPECT_RATIOS.has(aspectRatio)) throw new BridgeHttpError(400, "INVALID_AI_REQUEST", "图片比例无效");
+  const style = value.style === undefined ? undefined : requireBoundedText(value.style, 0, 2_000, "视觉风格");
+  const model = value.model === undefined ? undefined : validateModel(value.model);
+  return {
+    id: validateFixedAiRequestId(value.id),
+    kind,
+    description: requireBoundedText(value.description, 1, 20_000, "画面描述"),
+    ...(style === undefined || style === "" ? {} : { style }),
+    aspectRatio,
+    ...(model === undefined || model === "" ? {} : { model }),
   };
 }
 
@@ -512,8 +624,8 @@ export function validateNpcStatsDraftRequest(raw: unknown): {
     model: validateModel(value.model),
     npcId: requireIdentifier(value.npcId, "NPC"),
     name: requireBoundedText(value.name, 1, 300, "NPC 名称"),
-    description: requireBoundedText(value.description, 0, 30_000, "NPC 描述"),
-    guidance: requireBoundedText(value.guidance, 0, 8_000, "NPC 补充要求"),
+    description: requireBoundedText(value.description, 0, 100_000, "NPC 描述"),
+    guidance: requireBoundedText(value.guidance, 0, 50_000, "NPC 补充要求"),
   };
 }
 
@@ -556,7 +668,7 @@ function validateNpcCard(raw: unknown): Record<string, unknown> {
   return {
     id: requireIdentifier(value.id, "NPC"),
     name: requireBoundedText(value.name, 1, 300, "NPC 名称"),
-    description: requireBoundedText(value.description, 0, 30_000, "NPC 描述"),
+    description: requireBoundedText(value.description, 0, 100_000, "NPC 描述"),
     ...(playerDescription === undefined ? {} : { player_description: playerDescription }),
     role: requireBoundedText(value.role, 0, 1_000, "NPC 身份"),
     motivations: validateBoundedStringArray(value.motivations, 100, 4_000, "NPC 动机"),
@@ -571,10 +683,10 @@ function validateNpcCharacter(raw: unknown): Record<string, unknown> {
   assertExactKeys(value, ["characteristics", "skills", "hit_points", "sanity"]);
   const hitPoints = value.hit_points;
   const sanity = value.sanity;
-  if (hitPoints !== undefined && !isIntegerInRange(hitPoints, 0, 99)) {
+  if (hitPoints !== undefined && !isIntegerInRange(hitPoints, 0, 999)) {
     throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC HP 无效");
   }
-  if (sanity !== undefined && !isIntegerInRange(sanity, 0, 100)) {
+  if (sanity !== undefined && !isIntegerInRange(sanity, 0, 999)) {
     throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC SAN 无效");
   }
   return {
@@ -586,15 +698,15 @@ function validateNpcCharacter(raw: unknown): Record<string, unknown> {
 }
 
 function validateNpcPins(raw: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(raw) || raw.length > 12) {
-    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 挂载资料最多 12 条");
+  if (!Array.isArray(raw) || raw.length > 64) {
+    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 挂载资料最多 64 条");
   }
   let totalCharacters = 0;
   const pins = raw.map((candidate) => {
     const value = requireRecord(candidate);
     assertExactKeys(value, ["id", "title", "content"]);
     const title = requireBoundedText(value.title, 1, 300, "NPC 资料标题");
-    const content = requireBoundedText(value.content, 1, 20_000, "NPC 资料正文");
+    const content = requireBoundedText(value.content, 1, 100_000, "NPC 资料正文");
     totalCharacters += [...title].length + [...content].length;
     return {
       id: requireBoundedText(value.id, 1, 128, "NPC 资料 ID"),
@@ -602,15 +714,15 @@ function validateNpcPins(raw: unknown): Record<string, unknown>[] {
       content,
     };
   });
-  if (totalCharacters > 120_000) {
-    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 挂载资料超过 120,000 字符");
+  if (totalCharacters > 400_000) {
+    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 挂载资料超过 400,000 字符");
   }
   return pins;
 }
 
 function validateNpcMessages(raw: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 40) {
-    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 对话只能包含最近 1–40 条消息");
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 200) {
+    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 对话只能包含最近 1–200 条消息");
   }
   let totalCharacters = 0;
   const messages = raw.map((candidate) => {
@@ -619,7 +731,7 @@ function validateNpcMessages(raw: unknown): Record<string, unknown>[] {
     if (value.role !== "human" && value.role !== "npc") {
       throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 对话角色无效");
     }
-    const content = requireBoundedText(value.content, 1, 24_000, "NPC 对话正文");
+    const content = requireBoundedText(value.content, 1, 100_000, "NPC 对话正文");
     totalCharacters += [...content].length;
     const senderLabel = value.senderLabel === undefined
       ? undefined
@@ -631,8 +743,8 @@ function validateNpcMessages(raw: unknown): Record<string, unknown>[] {
       ...(senderLabel === undefined ? {} : { senderLabel }),
     };
   });
-  if (totalCharacters > 24_000) {
-    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 对话超过 24,000 字符窗口");
+  if (totalCharacters > 100_000) {
+    throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", "NPC 对话超过 100,000 字符窗口");
   }
   return messages;
 }
@@ -901,7 +1013,7 @@ async function runSidecar(
     const fixedAiAction = isFixedAiAction(options.payload.action);
     lifecycle = new SidecarLifecycle((deadline) => {
       const error = fixedAiAction
-        ? new BridgeHttpError(504, "LOCAL_AI_TIMEOUT", "本地 AI 任务达到固定 120 秒上限，已终止")
+        ? new BridgeHttpError(504, "LOCAL_AI_TIMEOUT", "本地 AI 任务达到 30 分钟兜底上限，已终止")
         : deadline === "total"
           ? new BridgeHttpError(504, "PARSER_TOTAL_TIMEOUT", "模组解析达到固定 45 分钟总上限，已终止")
           : new BridgeHttpError(504, "PARSER_IDLE_TIMEOUT", "模组解析连续 60 秒没有合法 JSONL 心跳，已终止");
@@ -1150,7 +1262,7 @@ function validatePercentageRecord(
   }
   const result: Record<string, number> = {};
   for (const [key, candidate] of Object.entries(record)) {
-    if ([...key].length < 1 || [...key].length > 120 || !isIntegerInRange(candidate, 0, 100)) {
+    if ([...key].length < 1 || [...key].length > 120 || !isIntegerInRange(candidate, 0, 999)) {
       throw new BridgeHttpError(400, "INVALID_NPC_CONTEXT", `${label}无效`);
     }
     result[key] = candidate;

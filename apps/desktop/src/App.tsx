@@ -123,6 +123,8 @@ export function App() {
   const [npcShadowReplies, setNpcShadowReplies] = useState<NpcShadowReplyV1[]>([]);
   const [requestCharacterDraft, setRequestCharacterDraft] = useState<((prompt: string, playerName: string) => Promise<Coc7Character>)>();
   const [hostCharacterDrafts, setHostCharacterDrafts] = useState<HostCharacterDraftReview[]>([]);
+  const [aiDraftStage, setAiDraftStage] = useState<string>();
+  const [lateApprovedDraft, setLateApprovedDraft] = useState<Coc7Character>();
   const [resolveRoomAsset, setResolveRoomAsset] = useState<((asset: AssetDescriptorV1) => Promise<string>)>();
   const roomPaused = Boolean(currentRoom && !isViewingLocalRecord && (
     (currentRoom.protocolVersion ?? 1) === 2
@@ -209,6 +211,7 @@ export function App() {
   const clearSessionPresentation = (roomId?: string) => {
     setRequestCharacterDraft(undefined);
     setHostCharacterDrafts([]);
+    setAiDraftStage(undefined);
     setNpcJobStatuses([]);
     setNpcShadowReplies([]);
     setResolveRoomAsset(undefined);
@@ -282,10 +285,28 @@ export function App() {
               character: parsed.data,
             }].slice(-200));
           },
+          onClientStatus: (status) => {
+            if (!active || sessionV2Ref.current !== next) return;
+            setAiDraftStage(status.message);
+            if (status.status === "completed") {
+              try {
+                const record = status.result as Record<string, unknown> | undefined;
+                setLateApprovedDraft(coc7CharacterSchema.parse(record?.character));
+              } catch {
+                // Malformed late payloads keep only the stage message.
+              }
+            }
+          },
         });
         attempt.aiCoordinator = aiCoordinator;
         next.onUnhandledWireMessage = (fromSeat, message) => {
           aiCoordinator.handleWireMessage(fromSeat, message);
+        };
+        next.onSeatAuthenticated = (seatId) => {
+          aiCoordinator.flushOutbox(seatId);
+        };
+        next.onSeatCredentialRotated = (seatId) => {
+          aiCoordinator.forgetSeat(seatId);
         };
         let coordinator: RoomAssetCoordinator | undefined;
         let latestViews: RoomEventViewV2[] = [];
@@ -322,6 +343,9 @@ export function App() {
         };
         next.onAuthenticationState = (state) => {
           latestAuthentication = state;
+          // A re-authenticated player replays unfinished draft requests so the
+          // host can re-send any status lost while the connection blinked.
+          if (state === "authenticated") aiCoordinator.resendPendingRequests();
           if (active && sessionV2Ref.current === next) setAuthenticationV2(state);
         };
         next.onPathChange = (peerId, path) => {
@@ -398,7 +422,11 @@ export function App() {
         assetCoordinatorRef.current = coordinator;
         npcBrokerRef.current = npcBroker;
         active = true;
-        setRequestCharacterDraft(() => (prompt: string, playerName: string) => aiCoordinator.requestCharacterDraft(prompt, playerName));
+        setRequestCharacterDraft(() => (prompt: string, playerName: string) => {
+          setAiDraftStage(undefined);
+          return aiCoordinator.requestCharacterDraft(prompt, playerName)
+            .finally(() => setAiDraftStage(undefined));
+        });
         if (coordinator) setResolveRoomAsset(() => (asset: AssetDescriptorV1) => coordinator.resolve(asset));
         setViewsV2(latestViews);
         setWorldV2(latestWorld);
@@ -611,8 +639,18 @@ export function App() {
             session={sessionV2 ?? session}
             worldV2={worldV2}
             requestCharacterDraft={requestCharacterDraft}
+            aiDraftStage={aiDraftStage}
+            lateApprovedDraft={lateApprovedDraft}
+            onConsumeLateApprovedDraft={() => setLateApprovedDraft(undefined)}
             hostCharacterDrafts={hostCharacterDrafts}
-            onDismissHostCharacterDraft={(jobId) => setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId))}
+            onApproveHostCharacterDraft={(jobId) => {
+              aiCoordinatorRef.current?.approveDraft(jobId);
+              setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId));
+            }}
+            onRejectHostCharacterDraft={(jobId) => {
+              aiCoordinatorRef.current?.rejectDraft(jobId);
+              setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId));
+            }}
           />}
           {activeView === "modules" && <ModulesView session={sessionV2 ?? session} />}
           {activeView === "settings" && <SettingsView />}

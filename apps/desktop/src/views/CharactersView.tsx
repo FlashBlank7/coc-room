@@ -8,6 +8,7 @@ import type { RoomSession } from "../network/RoomSession";
 import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
 import { deriveCoc7Stats } from "../lib/character-derivation";
+import { describeCharacteristic } from "../lib/characteristic-bands";
 import { isRoomHostAvailable } from "../lib/room-availability";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
@@ -91,14 +92,22 @@ export function CharactersView({
   session,
   worldV2,
   requestCharacterDraft,
+  aiDraftStage,
+  lateApprovedDraft,
+  onConsumeLateApprovedDraft,
   hostCharacterDrafts = [],
-  onDismissHostCharacterDraft,
+  onApproveHostCharacterDraft,
+  onRejectHostCharacterDraft,
 }: {
   session?: CharacterRoomSession;
   worldV2?: RoomWorldStateV2;
   requestCharacterDraft?: (prompt: string, playerName: string) => Promise<Coc7Character>;
+  aiDraftStage?: string;
+  lateApprovedDraft?: Coc7Character;
+  onConsumeLateApprovedDraft?: () => void;
   hostCharacterDrafts?: readonly HostCharacterDraftReview[];
-  onDismissHostCharacterDraft?: (jobId: string) => void;
+  onApproveHostCharacterDraft?: (jobId: string) => void;
+  onRejectHostCharacterDraft?: (jobId: string) => void;
 }) {
   const events = useAppStore((state) => state.events);
   const currentRoom = useAppStore((state) => state.currentRoom);
@@ -877,6 +886,17 @@ export function CharactersView({
                   <Button className="justify-self-start" disabled={aiBusy || roomPaused || !aiPrompt.trim()} onClick={() => void generateCharacterDraft()}>
                     {aiBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成待审核草稿
                   </Button>
+                  {aiBusy && <p role="status" className="text-xs leading-5 text-zinc-400">{aiDraftStage ?? "正在请求房主生成角色草稿…"}</p>}
+                  {!aiBusy && lateApprovedDraft && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-900/60 bg-emerald-950/15 p-3">
+                    <p className="text-xs leading-5 text-emerald-200">KP 已通过你此前申请的草稿“{lateApprovedDraft.name}”。</p>
+                    <Button variant="secondary" onClick={() => {
+                      if (!confirmDiscardChanges(`载入“${lateApprovedDraft.name}”`)) return;
+                      setDraft(coc7CharacterSchema.parse(lateApprovedDraft));
+                      setPrivateNotes("");
+                      onConsumeLateApprovedDraft?.();
+                    }}>载入这份草稿</Button>
+                    <Button variant="ghost" onClick={() => onConsumeLateApprovedDraft?.()}>忽略</Button>
+                  </div>}
                   {aiDraftNotice && <p className="text-xs leading-5 text-amber-200">{aiDraftNotice}</p>}
                   <details className="text-xs text-zinc-500">
                     <summary className="cursor-pointer">这段描述会发到哪里？</summary>
@@ -887,18 +907,22 @@ export function CharactersView({
             )}
 
             {isV2 && sessionV2?.isHost && hostCharacterDrafts.length > 0 && (
-              <Section title="等待你确认的玩家角色" description="玩家用一句话生成了以下草稿。先打开检查，确认后再带入房间。">
+              <Section title="等待你审核的玩家草稿" description="玩家用一句话生成了以下草稿，对方正在等待审核结果：通过后完整角色卡才会发给申请玩家，退回会立即通知对方。">
                 <div className="grid gap-2">{hostCharacterDrafts.map((review) => <div key={review.jobId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-900/60 bg-amber-950/10 p-3 text-sm">
                   <div><b>{review.character.name}</b><p className="mt-1 text-xs text-zinc-500">申请玩家：{review.requesterName} · {review.character.occupation || "未指定职业"}</p></div>
-                  <div className="flex gap-2"><Button variant="secondary" onClick={() => {
-                    if (!confirmDiscardChanges(`打开“${review.character.name}”的审核草稿`)) return;
-                    setDraft(review.character);
-                    setPrivateNotes("");
-                    setCleanSnapshot(undefined);
-                    setPendingRoomSnapshot(undefined);
-                    setRoomEditBaseUpdatedAt(null);
-                    setAiDraftNotice("KP 正在审核玩家草稿；只有点击“带入当前房间”后，完整角色卡才会向房间发布。");
-                  }}>打开审核</Button><Button variant="ghost" onClick={() => onDismissHostCharacterDraft?.(review.jobId)}>丢弃</Button></div>
+                  <div className="flex gap-2">
+                    <Button onClick={() => onApproveHostCharacterDraft?.(review.jobId)}>通过并发给玩家</Button>
+                    <Button variant="secondary" onClick={() => {
+                      if (!confirmDiscardChanges(`打开“${review.character.name}”的审核草稿`)) return;
+                      setDraft(review.character);
+                      setPrivateNotes("");
+                      setCleanSnapshot(undefined);
+                      setPendingRoomSnapshot(undefined);
+                      setRoomEditBaseUpdatedAt(null);
+                      setAiDraftNotice("这是玩家草稿的预览；要把角色卡交到玩家手里，请回到上方待审列表点“通过并发给玩家”。");
+                    }}>查看</Button>
+                    <Button variant="ghost" onClick={() => onRejectHostCharacterDraft?.(review.jobId)}>退回</Button>
+                  </div>
                 </div>)}</div>
               </Section>
             )}
@@ -936,7 +960,7 @@ export function CharactersView({
             <Section id="character-attributes" title="2. 九项属性" description="初始值暂填为 50，请按本团采用的车卡方式调整；生命、魔法、移动力等会自动计算。">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
                 {(Object.entries(characteristicLabels) as Array<[CharacteristicKey, string]>).map(([key, label]) => (
-                  <Field key={key} label={label}>
+                  <Field key={key} label={label} hint={describeCharacteristic(key, draft.characteristics[key])}>
                     <Input
                       disabled={!canEdit}
                       type="number"

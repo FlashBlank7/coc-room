@@ -82,23 +82,23 @@ class NpcStatsProviderInputV1(StrictModel):
 class NpcCharacteristicDraftV1(StrictModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True, populate_by_name=True)
 
-    strength: int = Field(ge=0, le=100, validation_alias="str", serialization_alias="str")
-    constitution: int = Field(ge=0, le=100, validation_alias="con", serialization_alias="con")
-    size: int = Field(ge=0, le=100, validation_alias="siz", serialization_alias="siz")
-    dexterity: int = Field(ge=0, le=100, validation_alias="dex", serialization_alias="dex")
-    intelligence: int = Field(ge=0, le=100, validation_alias="int", serialization_alias="int")
-    power: int = Field(ge=0, le=100, validation_alias="pow", serialization_alias="pow")
+    strength: int = Field(ge=0, le=999, validation_alias="str", serialization_alias="str")
+    constitution: int = Field(ge=0, le=999, validation_alias="con", serialization_alias="con")
+    size: int = Field(ge=0, le=999, validation_alias="siz", serialization_alias="siz")
+    dexterity: int = Field(ge=0, le=999, validation_alias="dex", serialization_alias="dex")
+    intelligence: int = Field(ge=0, le=999, validation_alias="int", serialization_alias="int")
+    power: int = Field(ge=0, le=999, validation_alias="pow", serialization_alias="pow")
     appearance: int | None = Field(
         default=None,
         ge=0,
-        le=100,
+        le=999,
         validation_alias="app",
         serialization_alias="app",
     )
     education: int | None = Field(
         default=None,
         ge=0,
-        le=100,
+        le=999,
         validation_alias="edu",
         serialization_alias="edu",
     )
@@ -106,7 +106,7 @@ class NpcCharacteristicDraftV1(StrictModel):
 
 class NpcSkillDraftV1(StrictModel):
     name: str = Field(min_length=1, max_length=120)
-    value: int = Field(ge=0, le=100)
+    value: int = Field(ge=0, le=999)
 
 
 class NpcStatsProviderOutputV1(StrictModel):
@@ -116,11 +116,11 @@ class NpcStatsProviderOutputV1(StrictModel):
     skills: list[NpcSkillDraftV1] = Field(default_factory=list, max_length=100)
     hit_points: int = Field(
         ge=0,
-        le=99,
+        le=999,
         validation_alias=AliasChoices("hitPoints", "hit_points"),
         serialization_alias="hitPoints",
     )
-    sanity: int | None = Field(default=None, ge=0, le=100)
+    sanity: int | None = Field(default=None, ge=0, le=999)
 
     @field_validator("skills")
     @classmethod
@@ -138,17 +138,17 @@ class NpcStatsCharacterWireV1(StrictModel):
     skills: dict[str, int] = Field(max_length=100)
     hit_points: int = Field(
         ge=0,
-        le=99,
+        le=999,
         validation_alias=AliasChoices("hitPoints", "hit_points"),
         serialization_alias="hitPoints",
     )
-    sanity: int | None = Field(default=None, ge=0, le=100)
+    sanity: int | None = Field(default=None, ge=0, le=999)
 
     @field_validator("characteristics", "skills")
     @classmethod
     def validate_percentages(cls, values: dict[str, int]) -> dict[str, int]:
-        if any(isinstance(value, bool) or not 0 <= value <= 100 for value in values.values()):
-            raise ValueError("NPC values must be integers from 0 to 100")
+        if any(isinstance(value, bool) or not 0 <= value <= 999 for value in values.values()):
+            raise ValueError("NPC values must be integers from 0 to 999")
         if any(not key.strip() or len(key) > 120 for key in values):
             raise ValueError("NPC stat names must contain 1 to 120 characters")
         return values

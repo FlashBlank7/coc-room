@@ -72,10 +72,10 @@ export const moduleNpcSchema = moduleEntityBase
     traits: z.array(z.string().min(1).max(500)).max(100),
     character: z
       .object({
-        characteristics: z.record(z.number().int().min(0).max(100)),
-        skills: z.record(z.number().int().min(0).max(100)),
-        hitPoints: z.number().int().min(0).max(99).optional(),
-        sanity: z.number().int().min(0).max(100).optional(),
+        characteristics: z.record(z.number().int().min(0).max(999)),
+        skills: z.record(z.number().int().min(0).max(999)),
+        hitPoints: z.number().int().min(0).max(999).optional(),
+        sanity: z.number().int().min(0).max(999).optional(),
       })
       .strict()
       .optional(),

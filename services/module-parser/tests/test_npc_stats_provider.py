@@ -183,7 +183,7 @@ def test_npc_stats_output_rejects_truncation_invalid_ranges_and_duplicates() -> 
         provider.generate('{"name":"Watchman","description":"","guidance":""}')
 
     invalid = _stats_payload()
-    invalid["hitPoints"] = 100
+    invalid["hitPoints"] = 1000
     with pytest.raises(InvalidStructureError):
         DeepSeekNpcStatsDraftProvider(
             api_key=_task().api_key,  # type: ignore[arg-type]

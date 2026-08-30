@@ -82,7 +82,7 @@ describe("TauriNpcStatsDraftExecutor", () => {
       .rejects.toThrow("不匹配");
 
     const invalid = new TauriNpcStatsDraftExecutor(async () => [
-      { ...result(), result: { ...result().result, character: { ...result().result.character, hitPoints: 100 } } },
+      { ...result(), result: { ...result().result, character: { ...result().result.character, hitPoints: 1000 } } },
     ]);
     await expect(invalid.generateDraft(input(), new AbortController().signal))
       .rejects.toThrow("HP 无效");

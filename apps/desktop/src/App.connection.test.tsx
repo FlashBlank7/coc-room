@@ -75,6 +75,10 @@ vi.mock("./network/RoomAssetCoordinator", () => ({
 vi.mock("./ai/room-ai-job-coordinator", () => ({
   RoomAiJobCoordinator: class MockRoomAiJobCoordinator {
     shutdown() {}
+    flushOutbox() {}
+    resendPendingRequests() {}
+    approveDraft() { return false; }
+    rejectDraft() { return false; }
     async requestCharacterDraft() { throw new Error("not used"); }
   },
 }));

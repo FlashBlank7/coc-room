@@ -167,6 +167,9 @@ export class RoomSessionV2 {
   onPreview?: (fromSeat: SeatV2, preview: Extract<RoomWireMessage, { kind: "board.preview" }>) => void;
   onCommandRejected?: (commandId: string, message: string) => void;
   onUnhandledWireMessage?: (fromSeat: SeatV2, message: RoomWireMessage) => void;
+  /** Host only: a seat completed (or re-completed) authentication. */
+  onSeatAuthenticated?: (seatId: string) => void;
+  onSeatCredentialRotated?: (seatId: string) => void;
   onError?: (message: string) => void;
 
   constructor(options: RoomSessionV2Options) {
@@ -550,6 +553,7 @@ export class RoomSessionV2 {
     const oldPeer = this.peerBySeat.get(seatId);
     if (oldPeer) this.forgetAuthenticatedPeer(oldPeer);
     else this.emitPresence();
+    this.onSeatCredentialRotated?.(seatId);
     return roomInvitationPayloadV2Schema.parse({
       protocolVersion: 2,
       roomId: this.room.id,
@@ -783,6 +787,7 @@ export class RoomSessionV2 {
       seat,
     });
     this.emitPresence();
+    this.onSeatAuthenticated?.(seat.seatId);
   }
 
   private handleAuthResult(message: Extract<RoomWireMessage, { kind: "v2.auth.result" }>): void {

@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { assetDescriptorV1Schema, type AssetDescriptorV1 } from "@coc-room/protocol";
 
+import { runWebDevelopmentAiTask } from "../ai/web-development-ai-bridge";
+import { importManagedAssetBytes } from "./asset-store";
+import { getLocalAiRuntime } from "./runtime-capabilities";
+
 export const CODEX_IMAGE_JOB_KINDS = [
   "location",
   "npc",
@@ -116,11 +120,19 @@ const defaultDependencies: CodexImageExecutorDependencies = {
 };
 
 export class CodexImageExecutor {
+  private webJobAbort: AbortController | undefined;
+
   constructor(private readonly dependencies: CodexImageExecutorDependencies = defaultDependencies) {}
 
   async capabilities(authorization: CodexImageKeeperAuthorization): Promise<CodexImageCapabilities> {
-    this.requireDesktop();
     const keeperAuthorization = validateKeeperAuthorization(authorization);
+    if (!this.dependencies.isDesktop()) {
+      this.requireWebBridge();
+      const result = await this.runWebTask("image-capabilities", {
+        id: globalThis.crypto.randomUUID(),
+      });
+      return parseCapabilities(result);
+    }
     try {
       return parseCapabilities(await this.dependencies.invoke("codex_image_capabilities", {
         authorization: keeperAuthorization,
@@ -138,9 +150,20 @@ export class CodexImageExecutor {
     input: CodexImageJob,
     authorization: CodexImageKeeperAuthorization,
   ): Promise<CodexImageDraft> {
-    this.requireDesktop();
     const request = validateCodexImageJob(input);
     const keeperAuthorization = validateKeeperAuthorization(authorization);
+    if (!this.dependencies.isDesktop()) {
+      this.requireWebBridge();
+      const result = await this.runWebTask("image-generation", {
+        id: globalThis.crypto.randomUUID(),
+        kind: request.kind,
+        description: request.description,
+        ...(request.style === undefined ? {} : { style: request.style }),
+        aspectRatio: request.aspectRatio,
+        ...(request.model === undefined ? {} : { model: request.model }),
+      });
+      return await importWebImageDraft(request.kind, result);
+    }
     try {
       const raw = await this.dependencies.invoke("run_codex_image_job", {
         authorization: keeperAuthorization,
@@ -161,8 +184,14 @@ export class CodexImageExecutor {
   }
 
   async cancel(authorization: CodexImageKeeperAuthorization): Promise<boolean> {
-    this.requireDesktop();
     const keeperAuthorization = validateKeeperAuthorization(authorization);
+    if (!this.dependencies.isDesktop()) {
+      // The web bridge tears the codex child down when the request aborts.
+      if (this.webJobAbort === undefined) return false;
+      this.webJobAbort.abort();
+      this.webJobAbort = undefined;
+      return true;
+    }
     try {
       const result = await this.dependencies.invoke("cancel_codex_image_job", {
         authorization: keeperAuthorization,
@@ -175,14 +204,81 @@ export class CodexImageExecutor {
     }
   }
 
-  private requireDesktop(): void {
-    if (!this.dependencies.isDesktop()) {
+  private requireWebBridge(): void {
+    if (getLocalAiRuntime() !== "web-bridge") {
       throw new CodexImageExecutorError(
         "desktop_only",
-        "Codex 图片生成仅能在 CoC Room 桌面应用中运行。",
+        "当前网页没有本地 AI 安全桥；请通过 pnpm dev 的 KP 页或桌面应用生成图片。",
       );
     }
   }
+
+  private async runWebTask(
+    route: "image-generation" | "image-capabilities",
+    request: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const abort = new AbortController();
+    // Only generation jobs are user-cancellable; a concurrent capabilities
+    // probe must not steal the cancel slot from a running generation.
+    if (route === "image-generation") this.webJobAbort = abort;
+    try {
+      const messages = await runWebDevelopmentAiTask(route, request, abort.signal);
+      const terminal = messages.find((message): message is Record<string, unknown> => (
+        isRecord(message) && (message.type === "result" || message.type === "error")
+      ));
+      if (terminal === undefined) throw protocolError("本地 AI 桥没有返回图片结果。");
+      if (terminal.type === "error") {
+        const detail = isRecord(terminal.error) ? terminal.error : {};
+        const rawCode = (typeof detail.code === "string" ? detail.code : "generation_failed").toLowerCase();
+        const code = ERROR_CODES.has(rawCode as CodexImageErrorCode)
+          ? rawCode as CodexImageErrorCode
+          : "generation_failed";
+        throw new CodexImageExecutorError(
+          code,
+          typeof detail.message === "string" && detail.message !== "" ? detail.message : "图片生成失败。",
+          { retryable: detail.retryable === true },
+        );
+      }
+      if (!isRecord(terminal.result)) throw protocolError("图片结果格式无效。");
+      return terminal.result;
+    } catch (error) {
+      if (abort.signal.aborted) {
+        throw new CodexImageExecutorError("cancelled", "图片任务已取消。");
+      }
+      throw error;
+    } finally {
+      if (this.webJobAbort === abort) this.webJobAbort = undefined;
+    }
+  }
+}
+
+async function importWebImageDraft(
+  kind: CodexImageJobKind,
+  result: Record<string, unknown>,
+): Promise<CodexImageDraft> {
+  const encoded = result.dataBase64;
+  const mediaType = result.mediaType;
+  if (typeof encoded !== "string" || encoded === "" || typeof mediaType !== "string") {
+    throw protocolError("图片结果缺少图像数据。");
+  }
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(encoded);
+    bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  } catch {
+    throw protocolError("图片数据不是有效的 Base64。");
+  }
+  const imported = await importManagedAssetBytes("image", bytes, mediaType);
+  return {
+    kind,
+    status: "awaitingReview",
+    asset: imported.asset,
+    deduplicated: imported.deduplicated,
+    ...(typeof result.revisedPrompt === "string" && result.revisedPrompt !== ""
+      ? { revisedPrompt: result.revisedPrompt }
+      : {}),
+  };
 }
 
 export const codexImageExecutor = new CodexImageExecutor();

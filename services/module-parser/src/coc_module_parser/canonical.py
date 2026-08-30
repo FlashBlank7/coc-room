@@ -35,7 +35,7 @@ class CanonicalMetadataV1(CanonicalModel):
     authors: list[str] = Field(max_length=32)
     language: str = Field(min_length=2, max_length=35)
     source: str | None = Field(default=None, max_length=500)
-    summary: str = Field(max_length=8_000)
+    summary: str = Field(max_length=50_000)
     createdAt: str
     updatedAt: str
 
@@ -71,28 +71,28 @@ class CanonicalChapterV1(CanonicalModel):
     title: str = Field(min_length=1, max_length=240)
     order: int = Field(ge=0)
     sceneIds: list[str] = Field(max_length=500)
-    notes: str = Field(max_length=20_000)
+    notes: str = Field(max_length=100_000)
 
 
 class CanonicalEntityBase(CanonicalModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     name: str = Field(min_length=1, max_length=240)
-    description: str = Field(max_length=20_000)
+    description: str = Field(max_length=100_000)
     sourceRefs: list[CanonicalSourceReferenceV1] = Field(max_length=100)
 
 
 class CanonicalSceneV1(CanonicalEntityBase):
-    synopsis: str = Field(max_length=20_000)
+    synopsis: str = Field(max_length=100_000)
     locationIds: list[str] = Field(max_length=100)
     npcIds: list[str] = Field(max_length=200)
     clueIds: list[str] = Field(max_length=200)
     handoutIds: list[str] = Field(max_length=200)
     suggestedCheckIds: list[str] = Field(max_length=100)
-    keeperNotes: str = Field(max_length=20_000)
+    keeperNotes: str = Field(max_length=100_000)
 
 
 class CanonicalLocationV1(CanonicalEntityBase):
-    playerDescription: str | None = Field(default=None, max_length=20_000)
+    playerDescription: str | None = Field(default=None, max_length=100_000)
     aliases: list[str] = Field(max_length=50)
 
     @field_validator("aliases")
@@ -106,21 +106,21 @@ class CanonicalLocationV1(CanonicalEntityBase):
 class CanonicalCharacterV1(CanonicalModel):
     characteristics: dict[str, int]
     skills: dict[str, int]
-    hitPoints: int | None = Field(default=None, ge=0, le=99)
-    sanity: int | None = Field(default=None, ge=0, le=100)
+    hitPoints: int | None = Field(default=None, ge=0, le=999)
+    sanity: int | None = Field(default=None, ge=0, le=999)
 
     @field_validator("characteristics", "skills")
     @classmethod
     def validate_percentages(cls, values: dict[str, int]) -> dict[str, int]:
-        if any(isinstance(value, bool) or not 0 <= value <= 100 for value in values.values()):
-            raise ValueError("characteristic and skill values must be integers from 0 to 100")
+        if any(isinstance(value, bool) or not 0 <= value <= 999 for value in values.values()):
+            raise ValueError("characteristic and skill values must be integers from 0 to 999")
         return values
 
 
 class CanonicalNpcV1(CanonicalEntityBase):
-    playerDescription: str | None = Field(default=None, max_length=20_000)
+    playerDescription: str | None = Field(default=None, max_length=100_000)
     role: str = Field(max_length=1_000)
-    motivation: str = Field(max_length=4_000)
+    motivation: str = Field(max_length=20_000)
     traits: list[str] = Field(max_length=100)
     character: CanonicalCharacterV1 | None = None
 
@@ -133,29 +133,29 @@ class CanonicalNpcV1(CanonicalEntityBase):
 
 
 class CanonicalClueV1(CanonicalEntityBase):
-    revealText: str = Field(max_length=20_000)
+    revealText: str = Field(max_length=100_000)
     isCore: bool
 
 
 class CanonicalHandoutV1(CanonicalEntityBase):
     title: str = Field(min_length=1, max_length=240)
-    content: str = Field(max_length=50_000)
+    content: str = Field(max_length=200_000)
 
 
 class CanonicalSuggestedCheckV1(CanonicalModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     skill: str = Field(min_length=1, max_length=160)
     difficulty: Literal["regular", "hard", "extreme"]
-    purpose: str = Field(max_length=4_000)
-    onSuccess: str = Field(max_length=8_000)
-    onFailure: str = Field(max_length=8_000)
+    purpose: str = Field(max_length=20_000)
+    onSuccess: str = Field(max_length=50_000)
+    onFailure: str = Field(max_length=50_000)
     sourceRefs: list[CanonicalSourceReferenceV1] = Field(max_length=100)
 
 
 class CanonicalKeeperNoteV1(CanonicalModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=240)
-    content: str = Field(max_length=50_000)
+    content: str = Field(max_length=200_000)
     relatedEntityIds: list[str] = Field(max_length=200)
     sourceRefs: list[CanonicalSourceReferenceV1] = Field(max_length=100)
 
@@ -165,7 +165,7 @@ class CanonicalRelationV1(CanonicalModel):
     fromEntityId: str = Field(pattern=ENTITY_ID_PATTERN)
     toEntityId: str = Field(pattern=ENTITY_ID_PATTERN)
     kind: str = Field(min_length=1, max_length=120)
-    description: str = Field(max_length=4_000)
+    description: str = Field(max_length=20_000)
     sourceRefs: list[CanonicalSourceReferenceV1] = Field(max_length=100)
 
 
@@ -176,7 +176,7 @@ class CanonicalModulePackageV1(CanonicalModel):
     moduleId: str = Field(pattern=ENTITY_ID_PATTERN)
     revision: int = Field(gt=0)
     metadata: CanonicalMetadataV1
-    overview: str = Field(max_length=50_000)
+    overview: str = Field(max_length=200_000)
     sourceDocuments: list[CanonicalSourceDocumentV1] = Field(max_length=100)
     chapters: list[CanonicalChapterV1] = Field(max_length=500)
     scenes: list[CanonicalSceneV1] = Field(max_length=2_000)

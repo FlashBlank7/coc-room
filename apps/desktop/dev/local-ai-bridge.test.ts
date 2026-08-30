@@ -13,6 +13,7 @@ import {
   validateBridgeHttpRequest,
   validateCharacterDraftRequest,
   validateNpcReplyRequest,
+  validateImageJobRequest,
   validateNpcStatsDraftRequest,
   validateParseRequest,
   validateRenderRequest,
@@ -189,12 +190,12 @@ describe("local AI bridge boundary", () => {
       id: "00000000-0000-4000-8000-000000000101",
       provider: "codex",
       model: "",
-      prompt: "蝶".repeat(8_000),
+      prompt: "蝶".repeat(100_000),
       playerName: "玩家甲",
       ownerSeatId: "seat-player",
     };
-    expect(validateCharacterDraftRequest(character).prompt).toHaveLength(8_000);
-    expect(() => validateCharacterDraftRequest({ ...character, prompt: "蝶".repeat(8_001) }))
+    expect(validateCharacterDraftRequest(character).prompt).toHaveLength(100_000);
+    expect(() => validateCharacterDraftRequest({ ...character, prompt: "蝶".repeat(100_001) }))
       .toThrow("长度无效");
 
     const stats = {
@@ -203,10 +204,10 @@ describe("local AI bridge boundary", () => {
       model: "deepseek-test",
       npcId: "npc:keeper",
       name: "守门人",
-      description: "雾".repeat(30_000),
+      description: "雾".repeat(100_000),
       guidance: "",
     };
-    expect(validateNpcStatsDraftRequest(stats).description).toHaveLength(30_000);
+    expect(validateNpcStatsDraftRequest(stats).description).toHaveLength(100_000);
     expect(() => validateNpcStatsDraftRequest({ ...stats, description: `${stats.description}雾` }))
       .toThrow("长度无效");
 
@@ -221,16 +222,34 @@ describe("local AI bridge boundary", () => {
     }
   });
 
+  it("accepts only exact, bounded image job fields", () => {
+    const job = {
+      id: "00000000-0000-4000-8000-000000000103",
+      kind: "character",
+      description: "雨夜里的侦探",
+      aspectRatio: "portrait",
+    };
+    expect(validateImageJobRequest(job)).toMatchObject({ kind: "character", aspectRatio: "portrait" });
+    expect(validateImageJobRequest({ ...job, style: "旧纸蚀刻", model: "gpt-image" }).style).toBe("旧纸蚀刻");
+    expect(() => validateImageJobRequest({ ...job, kind: "banner" })).toThrow("图片任务类型无效");
+    expect(() => validateImageJobRequest({ ...job, aspectRatio: "wide" })).toThrow("图片比例无效");
+    expect(() => validateImageJobRequest({ ...job, description: "蝶".repeat(20_001) })).toThrow("长度无效");
+    expect(() => validateImageJobRequest({ ...job, id: "not-a-uuid" })).toThrow("任务 ID 无效");
+    for (const forbidden of ["apiKey", "sourcePath", "command", "tools", "timeoutMs", "authorization"]) {
+      expect(() => validateImageJobRequest({ ...job, [forbidden]: "blocked" })).toThrow("不接受字段");
+    }
+  });
+
   it("recursively bounds the NPC panel context and rejects proxy fields", () => {
     const reply = safeNpcReplyRequest();
     expect(validateNpcReplyRequest(reply).messages).toHaveLength(1);
     expect(validateNpcReplyRequest({
       ...reply,
-      messages: [{ ...reply.messages[0], content: "蝶".repeat(24_000) }],
+      messages: [{ ...reply.messages[0], content: "蝶".repeat(100_000) }],
     }).messages).toHaveLength(1);
     expect(() => validateNpcReplyRequest({
       ...reply,
-      messages: [{ ...reply.messages[0], content: "蝶".repeat(24_001) }],
+      messages: [{ ...reply.messages[0], content: "蝶".repeat(100_001) }],
     })).toThrow("长度无效");
     expect(() => validateNpcReplyRequest({
       ...reply,

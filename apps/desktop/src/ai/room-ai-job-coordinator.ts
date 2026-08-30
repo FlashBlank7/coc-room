@@ -35,6 +35,7 @@ export interface RoomAiJobCoordinatorOptions {
   maxQueued?: number;
   timeoutMs?: number;
   onHostStatus?(seat: SeatV2, status: AiJobStatus): void;
+  onClientStatus?(status: AiJobStatus): void;
 }
 
 interface QueuedJob {
@@ -43,9 +44,16 @@ interface QueuedJob {
 }
 
 interface PendingClientRequest {
+  request: AiJobRequest;
   resolve(character: Coc7Character): void;
   reject(error: Error): void;
   timer: ReturnType<typeof globalThis.setTimeout>;
+  awaitingReview: boolean;
+}
+
+interface HeldReview {
+  requester: SeatV2;
+  terminal: AiJobStatus;
 }
 
 const MAX_PROMPT_CODE_POINTS = 100_000;
@@ -54,7 +62,8 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 /**
  * Host-controlled broker for room AI drafts. Remote peers can request the
  * fixed `character-draft` operation only; provider/model selection and the
- * actual executor always stay on the host.
+ * actual executor always stay on the host. Remote results are held for KP
+ * review and only released to the requesting player via approveDraft.
  */
 export class RoomAiJobCoordinator {
   private readonly session: RoomSessionV2;
@@ -65,10 +74,15 @@ export class RoomAiJobCoordinator {
   private readonly maxQueued: number;
   private readonly timeoutMs: number;
   private readonly onHostStatus?: (seat: SeatV2, status: AiJobStatus) => void;
+  private readonly onClientStatus?: (status: AiJobStatus) => void;
   private readonly queue: QueuedJob[] = [];
   private readonly running = new Map<string, AbortController>();
-  private readonly seenJobIds = new Set<string>();
+  /** jobId → requesting seatId; also the idempotency ledger for replays. */
+  private readonly seenJobIds = new Map<string, string>();
   private readonly pendingClients = new Map<string, PendingClientRequest>();
+  private readonly pendingReview = new Map<string, HeldReview>();
+  private readonly terminalByJobId = new Map<string, AiJobStatus>();
+  private readonly outbox = new Map<string, AiJobStatus[]>();
   private disposed = false;
 
   constructor(options: RoomAiJobCoordinatorOptions) {
@@ -80,6 +94,7 @@ export class RoomAiJobCoordinator {
     this.maxQueued = clampInteger(options.maxQueued ?? 64, 1, 1024);
     this.timeoutMs = clampInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1_000, 60 * 60_000);
     this.onHostStatus = options.onHostStatus;
+    this.onClientStatus = options.onClientStatus;
   }
 
   async requestCharacterDraft(prompt: string, playerName: string): Promise<Coc7Character> {
@@ -99,11 +114,13 @@ export class RoomAiJobCoordinator {
     };
 
     const promise = new Promise<Coc7Character>((resolve, reject) => {
-      const timer = globalThis.setTimeout(() => {
-        this.pendingClients.delete(jobId);
-        reject(new Error("角色草稿请求超时"));
-      }, this.timeoutMs + 5_000);
-      this.pendingClients.set(jobId, { resolve, reject, timer });
+      this.pendingClients.set(jobId, {
+        request,
+        resolve,
+        reject,
+        timer: this.armClientTimer(jobId),
+        awaitingReview: false,
+      });
     });
 
     if (this.session.isHost) {
@@ -133,19 +150,115 @@ export class RoomAiJobCoordinator {
     return false;
   }
 
+  /** Releases a KP-reviewed draft to the requesting player. */
+  approveDraft(jobId: string): boolean {
+    const held = this.pendingReview.get(jobId);
+    if (!held) return false;
+    this.pendingReview.delete(jobId);
+    this.dispatchToRequester(held.requester, held.terminal);
+    return true;
+  }
+
+  /** Returns a KP-reviewed draft to the requesting player as rejected. */
+  rejectDraft(jobId: string, reason?: string): boolean {
+    const held = this.pendingReview.get(jobId);
+    if (!held) return false;
+    this.pendingReview.delete(jobId);
+    const detail = reason?.trim();
+    this.dispatchToRequester(held.requester, status(
+      jobId,
+      "cancelled",
+      detail ? `KP 退回了这份草稿：${detail}` : "KP 退回了这份草稿",
+    ));
+    return true;
+  }
+
+  /** Re-sends statuses that could not reach a seat while it was offline. */
+  flushOutbox(seatId?: string): void {
+    if (this.disposed) return;
+    for (const seat of seatId === undefined ? [...this.outbox.keys()] : [seatId]) {
+      const parked = this.outbox.get(seat);
+      if (!parked?.length) continue;
+      const remaining = parked.filter((message) => !this.session.sendAiJobStatusToSeat(seat, message));
+      if (remaining.length === 0) this.outbox.delete(seat);
+      else this.outbox.set(seat, remaining);
+    }
+  }
+
+  /** Player-side recovery: re-request unfinished jobs after re-authentication. */
+  resendPendingRequests(): void {
+    if (this.disposed || this.session.isHost) return;
+    for (const pending of this.pendingClients.values()) {
+      try {
+        this.session.sendAiJobRequest(pending.request);
+      } catch {
+        // Host still offline; the client timer keeps bounding the wait.
+      }
+    }
+  }
+
   shutdown(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.queue.splice(0);
     for (const controller of this.running.values()) controller.abort(new Error("房间 AI 草稿代理已经关闭"));
     this.running.clear();
+    // Held reviews live only in this host's memory; tell waiting players the
+    // truth instead of letting their spinners run into a misleading timeout.
+    for (const [jobId, held] of this.pendingReview) {
+      try {
+        this.session.sendAiJobStatusToSeat(held.requester.seatId, status(
+          jobId,
+          "cancelled",
+          "KP 已离开房间，这份草稿失效了；KP 回来后可以重新申请",
+        ));
+      } catch {
+        // The session is going down with us; nothing more to do.
+      }
+    }
+    this.pendingReview.clear();
+    this.outbox.clear();
     for (const [jobId] of this.pendingClients) this.rejectPending(jobId, new Error("房间 AI 草稿代理已经关闭"));
+  }
+
+  /**
+   * Drops every artifact tied to a seat whose credentials were rotated: parked
+   * statuses and held drafts must never reach the invitation's next holder.
+   */
+  forgetSeat(seatId: string): void {
+    this.outbox.delete(seatId);
+    for (const [jobId, held] of [...this.pendingReview]) {
+      if (held.requester.seatId === seatId) this.pendingReview.delete(jobId);
+    }
+    for (const [jobId, ownerSeatId] of [...this.seenJobIds]) {
+      if (ownerSeatId === seatId) {
+        this.seenJobIds.delete(jobId);
+        this.terminalByJobId.delete(jobId);
+      }
+    }
   }
 
   private acceptHostRequest(requester: SeatV2, request: AiJobRequest): void {
     if (this.disposed) return;
-    if (this.seenJobIds.has(request.jobId)) return;
-    this.seenJobIds.add(request.jobId);
+    this.flushOutbox(requester.seatId);
+    const ownerSeatId = this.seenJobIds.get(request.jobId);
+    if (ownerSeatId !== undefined) {
+      // Idempotent replay (player reconnected): re-send the current state to
+      // the original requester only; never leak results to another seat.
+      if (ownerSeatId !== requester.seatId) return;
+      if (this.pendingReview.has(request.jobId)) {
+        this.sendToSeatOrPark(requester.seatId, reviewNotice(request.jobId));
+        return;
+      }
+      const terminal = this.terminalByJobId.get(request.jobId);
+      if (terminal) {
+        this.sendToSeatOrPark(requester.seatId, terminal);
+        return;
+      }
+      this.sendToSeatOrPark(requester.seatId, status(request.jobId, "running", "角色草稿仍在处理中"));
+      return;
+    }
+    this.seenJobIds.set(request.jobId, requester.seatId);
 
     try {
       if (request.task !== "character-draft") {
@@ -207,7 +320,13 @@ export class RoomAiJobCoordinator {
       }, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason ?? new Error("角色草稿执行超时");
       const character = validateCharacterDraft(raw, requester, String(request.input.playerName));
-      this.deliver(requester, status(request.jobId, "completed", "角色草稿已生成，确认保存前不会发布", { character }));
+      const terminal = status(request.jobId, "completed", "角色草稿已生成，确认保存前不会发布", { character });
+      if (requester.seatId === this.session.localSeat.seatId) {
+        // The host reviewing their own draft is meaningless; deliver directly.
+        this.deliver(requester, terminal);
+      } else {
+        this.holdForReview(requester, terminal);
+      }
     } catch (error) {
       const message = controller.signal.aborted ? "角色草稿执行超时" : toError(error).message;
       this.deliver(requester, status(request.jobId, "failed", message));
@@ -216,18 +335,44 @@ export class RoomAiJobCoordinator {
     }
   }
 
+  private holdForReview(requester: SeatV2, terminal: AiJobStatus): void {
+    this.pendingReview.set(terminal.jobId, { requester, terminal });
+    this.onHostStatus?.(requester, terminal);
+    this.sendToSeatOrPark(requester.seatId, reviewNotice(terminal.jobId));
+  }
+
   private deliver(requester: SeatV2, message: AiJobStatus): void {
-    this.onHostStatus?.(requester, message);
+    if (requester.seatId !== this.session.localSeat.seatId) this.onHostStatus?.(requester, message);
+    this.dispatchToRequester(requester, message);
+  }
+
+  private dispatchToRequester(requester: SeatV2, message: AiJobStatus): void {
+    if (isTerminalStatus(message.status)) this.terminalByJobId.set(message.jobId, message);
     if (requester.seatId === this.session.localSeat.seatId) {
       this.acceptClientStatus(message);
       return;
     }
-    this.session.sendAiJobStatusToSeat(requester.seatId, message);
+    this.sendToSeatOrPark(requester.seatId, message);
+  }
+
+  private sendToSeatOrPark(seatId: string, message: AiJobStatus): void {
+    if (this.session.sendAiJobStatusToSeat(seatId, message)) return;
+    const parked = this.outbox.get(seatId) ?? [];
+    // Only the latest status per job matters once the seat comes back.
+    this.outbox.set(seatId, [...parked.filter((item) => item.jobId !== message.jobId), message]);
   }
 
   private acceptClientStatus(message: AiJobStatus): void {
     const pending = this.pendingClients.get(message.jobId);
-    if (!pending) return;
+    if (!pending) {
+      // A terminal that arrives after the local timer fired (slow KP review,
+      // reconnect) must still reach the UI instead of vanishing: an approved
+      // character is recoverable through onClientStatus.
+      if (message.status === "completed" || message.status === "failed" || message.status === "cancelled") {
+        this.onClientStatus?.(message);
+      }
+      return;
+    }
     if (message.status === "completed") {
       try {
         const character = coc7CharacterSchema.parse(asRecord(message.result).character);
@@ -239,7 +384,24 @@ export class RoomAiJobCoordinator {
       }
     } else if (message.status === "failed" || message.status === "cancelled") {
       this.rejectPending(message.jobId, new Error(message.message));
+    } else {
+      // The host is alive and still holds this job; restart the full wait.
+      globalThis.clearTimeout(pending.timer);
+      pending.timer = this.armClientTimer(message.jobId);
+      if (isReviewNotice(message)) pending.awaitingReview = true;
+      this.onClientStatus?.(message);
     }
+  }
+
+  private armClientTimer(jobId: string): ReturnType<typeof globalThis.setTimeout> {
+    return globalThis.setTimeout(() => {
+      const pending = this.pendingClients.get(jobId);
+      if (!pending) return;
+      this.pendingClients.delete(jobId);
+      pending.reject(new Error(pending.awaitingReview
+        ? "KP 尚未审核；若 KP 通过草稿，这里会再次提示载入，也可稍后重新申请"
+        : "角色草稿请求超时"));
+    }, this.timeoutMs + 5_000);
   }
 
   private rejectPending(jobId: string, error: Error): void {
@@ -296,6 +458,21 @@ function status(
     message: message.slice(0, 1_000),
     ...(result === undefined ? {} : { result }),
   };
+}
+
+function reviewNotice(jobId: string): AiJobStatus {
+  return status(jobId, "running", "草稿已生成，等待 KP 审核", { pendingReview: true });
+}
+
+function isReviewNotice(message: AiJobStatus): boolean {
+  return Boolean(
+    message.result && typeof message.result === "object"
+    && (message.result as { pendingReview?: unknown }).pendingReview === true,
+  );
+}
+
+function isTerminalStatus(state: AiJobStatus["status"]): boolean {
+  return state === "completed" || state === "failed" || state === "cancelled";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

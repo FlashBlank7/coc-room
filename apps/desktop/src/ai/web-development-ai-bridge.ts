@@ -8,7 +8,9 @@ const MAX_MESSAGES = 100_000;
 export type WebDevelopmentAiRoute =
   | "character-draft"
   | "npc-stats-draft"
-  | "npc-reply";
+  | "npc-reply"
+  | "image-generation"
+  | "image-capabilities";
 
 export type WebDevelopmentAiBridgeRunner = (
   route: WebDevelopmentAiRoute,
@@ -186,7 +188,11 @@ function validateEnvelope(
     ? "角色草稿生成失败，未创建替代内容"
     : route === "npc-stats-draft"
       ? "NPC 属性草稿生成失败，未修改人物"
-      : "NPC 回复生成失败，未发布替代内容";
+      : route === "image-generation"
+        ? "图片生成失败，未产生草稿"
+        : route === "image-capabilities"
+          ? "图片能力探测失败"
+          : "NPC 回复生成失败，未发布替代内容";
   return {
     protocol_version: "1.0",
     request_id: requestId,

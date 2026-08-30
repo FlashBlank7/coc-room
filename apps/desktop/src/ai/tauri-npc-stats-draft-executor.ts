@@ -150,8 +150,8 @@ function parseNpcStatsCharacter(value: unknown): NpcStatsCharacterV1 {
   }
   const characteristics = parsePercentageRecord(value.characteristics, 16, "NPC 属性");
   const skills = parsePercentageRecord(value.skills, 100, "NPC 技能");
-  if (!isIntegerInRange(value.hitPoints, 0, 99)) throw new Error("NPC HP 无效");
-  if (value.sanity !== undefined && !isIntegerInRange(value.sanity, 0, 100)) {
+  if (!isIntegerInRange(value.hitPoints, 0, 999)) throw new Error("NPC HP 无效");
+  if (value.sanity !== undefined && !isIntegerInRange(value.sanity, 0, 999)) {
     throw new Error("NPC SAN 无效");
   }
   return {
@@ -166,7 +166,7 @@ function parsePercentageRecord(value: unknown, maximumKeys: number, label: strin
   if (!isRecord(value) || Object.keys(value).length > maximumKeys) throw new Error(`${label}无效`);
   const parsed: Record<string, number> = {};
   for (const [key, number] of Object.entries(value)) {
-    if ([...key].length < 1 || [...key].length > 120 || !isIntegerInRange(number, 0, 100)) {
+    if ([...key].length < 1 || [...key].length > 120 || !isIntegerInRange(number, 0, 999)) {
       throw new Error(`${label}无效`);
     }
     parsed[key] = number;

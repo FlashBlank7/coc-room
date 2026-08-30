@@ -1,3 +1,4 @@
+import { characteristicBandSuffix } from "../lib/characteristic-bands";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { Check, Clapperboard, Copy, Dices, Download, FileText, FolderKanban, ImagePlus, Loader2, LogOut, Map, MoreHorizontal, Music, Plus, RefreshCw, Send, Sparkles, Square, UserRound, UsersRound, Volume2, VolumeX, Wrench, X } from "lucide-react";
 import {
@@ -1977,6 +1978,10 @@ export function RoomViewV2({
           <Field label="生成后准备用在哪里" hint="先确定用途，避免花费额度后才发现没有合法位置。"><select aria-label="图片使用位置" className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={imageTarget} onChange={(event) => setImageTarget(event.target.value)}><option value="">选择一个位置</option>{imageTargetOptions.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></Field>
           {imageTargetOptions.length === 0 && <p className="rounded border border-dashed border-zinc-800 p-3 text-xs leading-5 text-zinc-500">{imageTargetEmptyMessage(imageKind)}</p>}
           <Textarea aria-label="图片内容" value={imageDescription} maxLength={4_000} onChange={(event) => setImageDescription(event.target.value)} placeholder="描述画面，例如：雨夜里的旧剧院后门，昏暗煤气灯。地图中不要要求生成文字，地名可在画面上另行标注。" />
+          <Button variant="secondary" className="justify-self-start" disabled={!imageTarget} onClick={() => {
+            const composed = composeImageDescription(imageKind, imageTarget, world);
+            if (composed) setImageDescription(composed);
+          }}><Sparkles className="mr-2 h-4 w-4" />按所选目标自动填写（含人设与模组背景）</Button>
           <Field label="画面风格（可留空）"><Input value={imageStyle} maxLength={500} onChange={(event) => setImageStyle(event.target.value)} placeholder="例如：旧纸蚀刻、昏暗写实" /></Field>
           <div className="flex gap-2">
             <Button className="flex-1" disabled={imageBusy || !imageTarget || !imageDescription.trim() || imageCapabilities?.imageGeneration !== true} onClick={() => void generateImageDraft()}>
@@ -2725,13 +2730,43 @@ function imageTargetEmptyMessage(kind: CodexImageJobKind): string {
 
 function imageCapabilityMessage(error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
-  if (/desktop|桌面/i.test(detail)) return "图片草稿目前只能在桌面应用中生成；不影响网页跑团。";
+  if (/desktop|桌面|安全桥/i.test(detail)) return "本页没有本地 AI 安全桥；请用 pnpm dev 的 KP 页或桌面应用生成图片，不影响网页跑团。";
   if (/login|auth|登录|凭据/i.test(detail)) return "Codex 尚未登录，完成登录后可生成图片；不影响其他功能。";
   return "图片生成暂不可用；不影响聊天、检定和场景推进。";
 }
 
+/** Composes an image description from the selected target's own sheet data plus the active module backdrop. */
+function composeImageDescription(kind: CodexImageJobKind, target: string, world: RoomWorldStateV2): string {
+  const backdrop = world.activeModule ? `模组《${world.activeModule.title}》的世界观与时代氛围。` : "";
+  if (target.startsWith("board:")) {
+    const board = world.boards.get(target.slice("board:".length));
+    if (!board) return "";
+    return [`${board.name}的俯视地图底图。`, board.description, backdrop].filter(Boolean).join(" ");
+  }
+  if (!target.startsWith("entity:")) return "";
+  const entity = world.entities.get(target.slice("entity:".length));
+  if (!entity) return "";
+  const parts: string[] = [];
+  if (kind === "character" && entity.kind === "character") {
+    const characterId = typeof entity.data.characterId === "string" ? entity.data.characterId : undefined;
+    const sheet = characterId ? world.latestCharacters.get(characterId) : undefined;
+    if (sheet) {
+      parts.push(`${sheet.name}，${sheet.age} 岁，职业：${sheet.occupation}。`);
+      if (sheet.background.personalDescription) parts.push(sheet.background.personalDescription);
+      if (sheet.background.traits) parts.push(`气质特点：${sheet.background.traits}。`);
+    } else {
+      parts.push(`调查员${entity.name}。`);
+    }
+  } else {
+    parts.push(`${entity.name}。`);
+    if (entity.description) parts.push(entity.description);
+  }
+  parts.push(backdrop);
+  return parts.filter(Boolean).join(" ").slice(0, 4_000);
+}
+
 function formatNpcStats(values: Record<string, number>): string {
-  return Object.entries(values).map(([name, value]) => `${name} ${value}`).join(" · ");
+  return Object.entries(values).map(([name, value]) => `${name} ${value}${characteristicBandSuffix(name, value)}`).join(" · ");
 }
 
 function difficultyLabel(value: "regular" | "hard" | "extreme") {

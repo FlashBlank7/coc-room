@@ -87,7 +87,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText("出生地"), { target: { value: "横滨" } });
 
     expect(derivedValue("最大 HP")).toContain("10");
-    fireEvent.change(screen.getByLabelText("体质 CON"), { target: { value: "80" } });
+    fireEvent.change(screen.getByLabelText(/^体质 CON/), { target: { value: "80" } });
     expect(derivedValue("最大 HP")).toContain("13");
     fireEvent.change(screen.getByLabelText(/^当前生命 HP/), { target: { value: "12" } });
 
@@ -754,6 +754,81 @@ describe("CharactersView permissions and editing", () => {
 
     expect(imported.character).toEqual(character);
     expect(imported.privateNotes).toBe("只留在本机");
+  });
+});
+
+describe("CharactersView AI draft review", () => {
+  it("gives the KP approve, preview and return actions for a pending player draft", () => {
+    const hostRoom: RoomRecord = {
+      ...createRoom("host", "host-local"),
+      id: "character-room-host",
+      protocolVersion: 2,
+      localSeatId: "seat-host-v2",
+      hostSeatId: "seat-host-v2",
+      seatCredentialVersion: 1,
+    };
+    useAppStore.setState({ currentRoom: hostRoom, activeView: "characters" });
+    const session = new RoomSessionV2({
+      room: hostRoom,
+      displayName: "Keeper",
+      repository: {} as never,
+      transport: {} as never,
+    });
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    render(<CharactersView
+      session={session}
+      worldV2={createRoomWorldStateV2(hostRoom.id)}
+      hostCharacterDrafts={[{
+        jobId: "job-review-0001",
+        requesterSeatId: "seat-player-v2",
+        requesterName: "Alice",
+        character: createReadyCharacter("draft-review-1", "seat-player-v2", "雾中来客", "Alice"),
+      }]}
+      onApproveHostCharacterDraft={onApprove}
+      onRejectHostCharacterDraft={onReject}
+    />);
+
+    expect(screen.getByText(/通过后完整角色卡才会发给申请玩家/)).toBeTruthy();
+    expect(screen.getByText(/申请玩家：Alice/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "通过并发给玩家" }));
+    expect(onApprove).toHaveBeenCalledWith("job-review-0001");
+    fireEvent.click(screen.getByRole("button", { name: "退回" }));
+    expect(onReject).toHaveBeenCalledWith("job-review-0001");
+  });
+
+  it("shows the live draft stage while waiting and surfaces a KP rejection", async () => {
+    const v2Room: RoomRecord = {
+      ...createRoom("player", "player-v2"),
+      id: "character-room-v2",
+      protocolVersion: 2,
+      localSeatId: "seat-player-v2",
+      hostSeatId: "seat-host-v2",
+      seatCredentialVersion: 1,
+    };
+    useAppStore.setState({ currentRoom: v2Room, activeView: "characters" });
+    const session = new RoomSessionV2({
+      room: v2Room,
+      displayName: "Alice",
+      repository: {} as never,
+      transport: {} as never,
+    });
+    const generation = createDeferred<Coc7Character>();
+    const requestCharacterDraft = vi.fn(() => generation.promise);
+    render(<CharactersView
+      session={session}
+      worldV2={createRoomWorldStateV2(v2Room.id)}
+      requestCharacterDraft={requestCharacterDraft}
+      aiDraftStage="草稿已生成，等待 KP 审核"
+    />);
+
+    fireEvent.change(screen.getByPlaceholderText(/1920 年代东京/), { target: { value: "谨慎的女记者" } });
+    fireEvent.click(screen.getByRole("button", { name: "生成待审核草稿" }));
+    expect(await screen.findByText("草稿已生成，等待 KP 审核")).toBeTruthy();
+
+    await act(async () => { generation.reject(new Error("KP 退回了这份草稿：职业与本团年代不符")); });
+    expect(await screen.findByText(/KP 退回了这份草稿：职业与本团年代不符/)).toBeTruthy();
+    expect(screen.queryByText("草稿已生成，等待 KP 审核")).toBeNull();
   });
 });
 

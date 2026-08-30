@@ -1,3 +1,4 @@
+import { characteristicBandSuffix } from "../../lib/characteristic-bands";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ModulePackageV1, SourceReferenceV1 } from "@coc-room/protocol";
 import {
@@ -828,7 +829,7 @@ function StatBlock({ label, values }: { label: string; values: Record<string, nu
     <div>
       <SectionLabel>{label}</SectionLabel>
       <div className="mt-1.5 flex flex-wrap gap-1.5">
-        {entries.map(([name, value]) => <span key={name} className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-300">{name} {value}</span>)}
+        {entries.map(([name, value]) => <span key={name} className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-300">{name} {value}{characteristicBandSuffix(name, value)}</span>)}
       </div>
     </div>
   );

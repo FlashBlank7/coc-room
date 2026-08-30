@@ -104,14 +104,14 @@ class LocationV1(StrictModel):
 class CharacterV1(StrictModel):
     characteristics: dict[str, int] = Field(default_factory=dict)
     skills: dict[str, int] = Field(default_factory=dict)
-    hit_points: int | None = Field(default=None, ge=0, le=99)
-    sanity: int | None = Field(default=None, ge=0, le=100)
+    hit_points: int | None = Field(default=None, ge=0, le=999)
+    sanity: int | None = Field(default=None, ge=0, le=999)
 
     @field_validator("characteristics", "skills")
     @classmethod
     def validate_percentages(cls, values: dict[str, int]) -> dict[str, int]:
-        if any(isinstance(value, bool) or not 0 <= value <= 100 for value in values.values()):
-            raise ValueError("characteristic and skill values must be integers from 0 to 100")
+        if any(isinstance(value, bool) or not 0 <= value <= 999 for value in values.values()):
+            raise ValueError("characteristic and skill values must be integers from 0 to 999")
         return values
 
 
