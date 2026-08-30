@@ -6,14 +6,19 @@
 
 ## 已实现的核心能力
 
-- 2–8 人房间，无账号，以房间 ID 和随机令牌加入
-- 房主权威事件序列、事件幂等落库、断线后分块补发
+- 2–8 人 V2 房间，无账号；每位玩家使用独立 `seatId + seatSecret` 邀请并通过房主 HMAC 挑战认证
+- 房主权威连续事件序列、完整/脱敏视图、幂等落库、最多 500 条或 4 MiB 的逐页 ACK 补发
 - 文字聊天、CoC 7 版角色卡、普通骰式、`d100` 奖惩骰与成功等级
-- 本机 SQLite 记录、离线记录查看，导出 Markdown 或自包含 HTML
+- 玩家先描述行动、KP 再裁定是否检定；失败后可提出一次强推，KP 必须先声明二次失败代价
+- 本机 SQLite 记录、离线记录查看，导出 Markdown 或无脚本离线 HTML；网页记录会嵌入本席位可见且在安全大小内的本机图片/音频，缺失或过大的媒体明确标注原因；无权席位只落不含类型、正文和资源哈希的连续占位头
 - 模组资料库与 `ModulePackageV1`，可按场景、地点、NPC、线索、手记、检定和关系浏览，并用结构化表单修正常用字段；解析结果先审阅再保存/启用
-- 沉浸式房间首切片：KP 从本机活动模组的精确修订公开地点与 NPC 的玩家可见快照，调查员可用自己的角色进入已公开地点
-- Python/LangGraph sidecar 默认委托本机已登录的 Codex CLI 做 Schema 约束抽取；DeepSeek API 作为手动回退
-- 粘贴文本及 `.txt`、`.md`、`.docx`、安全单文档 `.zip` 输入
+- V2 独立实体、Artifact、NPC 互动和通用 `scene` / `map` / `evidence` 画板；自由摆放、关系线与合作式多边形迷雾
+- SHA-256 内容寻址资源库；图片规范化、音频资源、本地同步播放，以及 24 KiB 分块的 P2P/WSS 续传与复核
+- 个人角色库与安全 ZIP `.cocchar`；新模组使用带 manifest、画板和资源的安全 ZIP `.cocmod`
+- Python/LangGraph sidecar 默认委托本机已登录的 Codex CLI 做 Schema 约束抽取；DeepSeek API 作为显式可选提供者
+- 粘贴文本及 `.txt`、`.md`、`.docx`、数字/扫描/混合 PDF 输入；PDF 只允许 Codex 路径并保留页码来源
+- 独立 Codex App Server 图片执行器；地点、NPC、角色、封面和无文字地图均先生成本机草稿，人工确认后才绑定发布
+- NPC 自动互动只读取当前 NPC 卡、最多 12 条 KP 显式挂载资料和本面板最近 40 条/24,000 字符；支持影子审核、立即停止和实验性自动发布
 - Cloudflare Durable Objects 信令与临时中继，可自行部署
 
 ## 架构概览
@@ -39,14 +44,14 @@
 ## 环境要求
 
 - Windows 10/11 x64
-- Node.js 22、pnpm 9.15.4（建议通过 Corepack 使用）
-- Rust stable，目标 `x86_64-pc-windows-msvc`
-- Python 3.12 与 [uv](https://docs.astral.sh/uv/)
-- 真实 Codex 解析需要已安装并登录的 Codex CLI（`codex login`）；不解析模组时可不安装
-- Visual Studio 2022 Build Tools（Desktop development with C++、Windows SDK）
-- Microsoft Edge WebView2 Runtime
+- 日常网页开发只需要 Node.js 22 与 pnpm 9.15.4（建议通过 Corepack 使用）
+- 验证桌面原生功能时再安装 Rust stable、`x86_64-pc-windows-msvc`、Visual Studio 2022 Build Tools、Windows SDK 与 WebView2 Runtime
+- 构建模组解析 sidecar 时再安装 Python 3.12 与 [uv](https://docs.astral.sh/uv/)
+- 真实 Codex 解析还需要已安装并登录的 Codex CLI（`codex login`）
 
 ## 快速开始
+
+日常修 Bug 走网页热更新，不走安装包循环：React、TypeScript、CSS、共享协议和房间逻辑都用 `pnpm dev`；需要检查 SQLite、系统文件框等原生边界时，首次运行 `pnpm dev:tauri:first`，以后保持 `pnpm dev:tauri` 不关，前端修改同样会在 Tauri 窗口内热更新。只有 Rust/Tauri 配置、桌面内嵌 Python sidecar 或正式 NSIS 发布需要原生重编译或重启。详见[开发与发布指南](docs/development.md#2-本地开发)。
 
 安装 JavaScript 依赖：
 
@@ -56,23 +61,44 @@ corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
 ```
 
-终端一启动本地信令/中继节点：
+仓库提供 `.node-version`；如果本机有多个 Node，请先确认 `node --version` 为 22.x。双端开发启动器会拒绝旧 Node，并直接说明应切换版本。
+
+默认开发入口会同时启动本地信令/中继、共享协议监视和 Vite 网页，并自动打开 `http://127.0.0.1:1420`：
 
 ```powershell
-pnpm dev:relay
+pnpm dev
 ```
 
-终端二启动浏览器预览：
+页面和协议源码修改会热更新，不会编译 Rust、Python sidecar 或 NSIS。如果 `8787` 端口已有中继在运行，只启动网页与协议监视：
 
 ```powershell
-pnpm dev:desktop
+pnpm dev:web:ui
 ```
 
-根命令会先构建共享协议，再同时监视协议和桌面 UI，因此干净 checkout 不会读到过期 `dist`。浏览器预览使用内存仓库，只适合 UI 开发；SQLite、Windows Credential Manager 和真实 Python sidecar 需要 Tauri。启动完整桌面应用：
+`pnpm dev:desktop` 保留为 `dev:web:ui` 的兼容别名。网页右下角会标明运行模式；房间、模组、角色与设置保存在浏览器 IndexedDB，可从设置或开发入口清空。真实 Codex/DeepSeek 模组解析、AI 车卡、NPC 属性草稿、受限上下文 NPC 回复，以及 TXT/Markdown/DOCX/PDF/安全 ZIP 输入都可通过 Vite 同源本地安全桥运行，无需重编译 Tauri；长解析可从界面安全停止，迟到结果不会写入草稿。先在 `services/module-parser` 执行 `uv sync --locked --extra dev --python 3.12`。Codex 复用本机 CLI 登录，DeepSeek Key 使用隐藏终端输入写入 Windows Credential Manager：
+
+KP/玩家双端联调可运行 `pnpm dev:web:duo`：它同时启动本地中继、协议监视、KP 1420 和玩家 1421，两端使用独立 Origin/IndexedDB，Ctrl+C 会统一清理全部子进程。本地 AI 安全桥默认只在 KP 进程启用；玩家页没有桥令牌或桥路由，房间内角色草稿会通过房间消息交给 KP。URL 中的联调角色参数只显示标签，不用于授权。`pnpm smoke:web-duo` 可在随机端口做无浏览器、无 AI 的启停检查。
 
 ```powershell
-pnpm dev:tauri
+pnpm ai:key:set
+pnpm ai:key:status
 ```
+
+本地桥不接受来自网页的 Key、本机路径、命令、Shell、工具、自定义提供者地址或超时参数。桥固定使用 45 分钟总上限和 60 秒合法 JSONL 空闲上限，15 秒 Codex 心跳只延长空闲计时；网页刷新、取消或断开会终止 Python/Codex 整个进程树。上传文件只在校验后的系统临时目录中存活到任务结束或取消清理完成。SQLite、原生系统文件对话框和桌面托管资源库仍需在阶段验收时启动 Tauri：
+
+```powershell
+pnpm dev:tauri:first # 首次准备 sidecar 并启动
+```
+
+完成首次准备后，日常桌面壳验收直接运行 `pnpm dev:tauri`，不会重复构建 sidecar。进程保持运行时，React、TypeScript 与 CSS 修改也会热更新，不会重打安装包；只有 Rust、Tauri 配置或 Python sidecar 本体变化需要重新运行 `pnpm prepare:windows` 或等待对应的原生重编译/重启。
+
+网页壳层冒烟测试不需要 Rust 或 Python：
+
+```powershell
+pnpm smoke:web
+```
+
+准备好 Python 解析环境后，`pnpm smoke:web-bridge` 会在临时端口验证 Vite、HMR、安全桥会话边界和离线 mock 解析，且不会启动或编译 Tauri。
 
 本地默认中继源为 `http://127.0.0.1:8787`。部署 Worker 后，将 `VITE_RELAY_URL` 设为 Wrangler 输出的 HTTPS **源地址**（不是房间 WebSocket 完整 URL），再启动或构建客户端：
 
@@ -85,18 +111,17 @@ pnpm dev:tauri
 
 当前项目没有公共 Worker。公网使用时，先按开发指南部署自己的 Worker，并用仓库自带的 relay smoke 验收 HTTPS 源地址；房主随后在“设置 → 公网信令/中继节点”中填入该源地址并保存。创建房间后，完整的 WSS 房间地址会写进邀请串，玩家直接粘贴邀请串即可加入，不需要另外配置该 Worker。
 
-导入 `.cocmod.json` 后，模组会自动滚动到右侧“模组工作台”并以“资料浏览”模式打开；概览会直接列出人物和地点名称，点击名称可进入完整资料卡。“结构化编辑”用于修正元数据、章节、场景、地点、NPC、线索、手记、检定和主持人笔记，“高级 JSON”保留完整底层编辑能力。Codex/DeepSeek 会为地点与 NPC 尝试生成保守、无剧透的玩家可见初见稿；无法安全判断时留空，且所有稿件都必须由 KP 审核。已经保存在资料库中的模组可点击左侧卡片的“打开”；浏览器预览刷新后会清空内存数据，Tauri 桌面版才会持久化到 SQLite。
+导入 `.cocmod.json` 后，模组会自动滚动到右侧“检查整理结果”，并以“阅读备团资料”模式打开；概览会直接列出人物和地点名称，点击名称可进入完整资料卡。“检查并修正”用于修正元数据、章节、场景、地点、NPC、线索、手记、检定和主持人笔记，“高级数据 → 编辑底层 JSON”保留完整底层编辑能力。Codex/DeepSeek 会为地点与 NPC 尝试生成保守、无剧透的玩家可见初见稿；无法安全判断时留空，且所有稿件都必须由 KP 审核。已经保存在资料库中的模组可点击左侧卡片的“打开”；浏览器预览持久化到 IndexedDB，Tauri 桌面版持久化到 SQLite。
 
-## 沉浸式房间首切片
+新的 `.cocmod` ZIP 可以保留预设画板与资源描述符，但导入模组不等于把它们发布进当前房间：模组库会持续显示这项提醒，KP 仍需在现场明确检查、绑定和公开。网页端导出会先把 JSON 与资源字节复制到当前 JavaScript realm，避免嵌入式 WebView/测试环境把字节数组误编码成 ZIP 目录；导出的 `.cocmod` 与 `.cocchar` 都必须通过再导入回归测试。
 
-地点和 NPC 各有一份单独的“玩家可见说明”。`description`、NPC 身份、动机、特征、数值、原文定位等仍是 KP 私密资料，不会作为公开说明的后备内容。使用流程如下：
+## V2 沉浸式房间
 
-1. 在模组库的结构化编辑器中填写地点和 NPC 的玩家可见说明，保存为一个新修订。
-2. KP 将该精确修订设为房间模组。房间中的守秘人场景控制只读取 KP 本机模组库里的同一 `moduleId + revision`；本机缺少该版本时不会从玩家端或 Worker 获取完整模组，也不能继续发布。
-3. KP 向全房间公开地点；调查员选择自己已保存的角色进入已公开地点；KP 可再让具有玩家可见说明的 NPC 在该地点登场，也可把已公开线索或手记关联到地点舞台。
-4. 已公开地点、角色进入和 NPC 登场都会成为房主排序的房间事件，进入每位参与者的本地记录和 Markdown/HTML 导出。切换活动模组修订后，房间舞台会从新修订重新开始投影。
+模组实体与房间实体、Artifact、画板位置彼此独立。KP 从本机模组的精确修订发布玩家可见快照后，可以把同一个 NPC 放到多个画板、把已公开线索连接成线索板，或让 NPC 完全不出现在地点上。公开画板不能引用定向秘密内容，协议 reducer 会拒绝这类泄漏，而不是只靠界面隐藏。
 
-当前地点舞台只有根据地点 ID 选择的内置渐变背景。KP 上传背景图、图片持久化、P2P 资源分块和按地点/成员定向公开尚未实现；“进入地点”目前表示全房间可见的角色位置，不是内容访问控制。
+背景图和音频事件只保存内容描述符；实际字节进入应用数据目录中的内容寻址资源库。玩家只有先收到带该描述符的完整授权事件，房主才会响应资源请求。慢速下载不阻塞事件游标，哈希失败则拒绝入库；已发布音频会自动预取，KP 只在当前在线受众席位确认资源就绪后创建播放事件。
+
+V1 房间仍可从本机打开和导出，但只读且不会原地升级。V2 的席位、定向事件、画板、资源和 NPC 会话不会写进 V1 记录。协议详见 [V2 架构与路线图](docs/v2-architecture.md)，后续地图分期见 [进阶地图路线图](docs/advanced-map-roadmap.md)。
 
 ## 隐私与安全边界
 
@@ -104,10 +129,10 @@ pnpm dev:tauri
 - 首版**没有应用层端到端加密**。连接退回 WebSocket 中继时，Cloudflare 和 Worker 运营者理论上能够读取转发中的正文，请勿通过不受信任的公共节点传输敏感内容。
 - Worker 不建立聊天历史或模组正文存储，也不持久化房间元数据或令牌摘要。随机房主令牌通过带域分隔的 SHA-256 派生玩家加入令牌和房间 ID，使 Durable Object 能在不查询服务端房间记录的情况下验证房间、角色和预留的房主 peer ID；未认证 socket 的 15 秒截止 alarm 与在线 WebSocket attachment 不构成可恢复的房间历史。
 - 聊天、角色变化、骰子和已揭示内容保存在每个参与者自己的 SQLite 中。完整模组只应保存在房主本地。
-- 当前 `character.updated` 仍是全房间事件并携带完整角色卡；角色背景、物品和备注也会进入所有成员的本地副本。现阶段请把角色卡视为团内共享内容，不要在备注中保存只应由本人和 KP 知道的秘密；真正的本人/KP 定向角色字段需要后续可见性协议。
-- 地点、NPC 和角色进入事件当前同步给全体房间成员，没有定向可见；一经房主确认就会进入其他成员的本地副本，界面无法替他们撤回。KP 应在发布前检查玩家可见说明。
-- Codex 路径只启动本机已登录的 `codex exec`，不会读取、复制或转发 Codex 登录令牌，也不会开放本地 HTTP 代理。模组正文仍会经 Codex 发送到 OpenAI；这不是离线推理。
-- Codex 任务使用临时工作目录、忽略用户配置/规则、只读沙箱和临时会话。只读沙箱能阻止写入，但不是对本机所有可读文件的严格 allowlist；不要把该能力暴露成公网代理。
+- V2 角色卡默认全房间可见；私人笔记只存在个人角色库和 `.cocchar`，不会进入房间事件。已经发出的内容无法撤回，扩大受众会发送新的授权视图。
+- V2 地点、NPC、线索、画板和 NPC 会话都带受众；无权席位只收到脱敏占位。迷雾是协作 UI 遮罩，不是密码学保密。
+- Codex 路径只启动本机已登录的 `codex exec`，不会读取、复制或转发 Codex 登录令牌，也不会开放通用 Codex/HTTP 代理。网页开发时使用的同源本地安全桥仅提供固定任务路由。模组正文仍会经 Codex 发送到 OpenAI；这不是离线推理。
+- 模组文本与 NPC 文本任务使用固定 Schema、临时工作目录并关闭工具。PDF 视觉页由已授权原文件重新渲染、复核后通过 `codex exec --image` 进入独立严格转写步骤，最多 4 页且临时图随后销毁。NPC 请求边界没有房间快照、数据库、文件路径、网络工具或通用 Codex 指令字段；Codex 图片使用另一条 App Server 执行器，返回路径必须位于执行器拥有的目录并经图片验证与资源入库。
 - DeepSeek API Key 仅在用户明确选择 DeepSeek 时由 Tauri 从 Windows Credential Manager 读取，并通过 sidecar 的 stdin JSONL 传递；不要把 Key 写入仓库、`.env`、命令行参数、日志或 GitHub Actions 文件。
 - 发送给 Codex 或 DeepSeek 的模组原文会离开本机，并受对应服务条款与数据政策约束。离线模拟解析不会联网。
 - 模组导入会拒绝 ZIP 路径穿越、符号链接、加密包、异常压缩比、多文档载荷，以及带宏、ActiveX、嵌入对象或 DTD 的 DOCX；这不是完整的恶意文件沙箱。

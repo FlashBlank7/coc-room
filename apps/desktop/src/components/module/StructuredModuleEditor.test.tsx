@@ -2,16 +2,17 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { modulePackageSchema, type ModulePackageV1 } from "@coc-room/protocol";
 import { StructuredModuleEditor } from "./StructuredModuleEditor";
 
 describe("StructuredModuleEditor", () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
   it("edits common fields, adds/removes entities, and preserves untouched data", () => {
     let current = createPackage();
     render(<Harness initial={current} onChange={(next) => { current = next; }} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "基本信息" }));
     fireEvent.change(screen.getByLabelText("模组简介"), { target: { value: "更新后的简介" } });
     expect(current.metadata.summary).toBe("更新后的简介");
     expect(current.extensions).toEqual({ "org.example.advanced": { keep: true } });
@@ -25,6 +26,7 @@ describe("StructuredModuleEditor", () => {
     expect(current.locations[0]?.id).toBe("location-1");
     expect(modulePackageSchema.safeParse(current).success).toBe(true);
 
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByLabelText("删除地点 location-1"));
     expect(current.locations.map((item) => item.id)).toEqual(["location-new"]);
     expect(current.scenes[0]?.locationIds).toEqual([]);
@@ -41,7 +43,7 @@ describe("StructuredModuleEditor", () => {
     let current = createPackage();
     render(<Harness initial={current} onChange={(next) => { current = next; }} />);
     fireEvent.click(screen.getByRole("button", { name: "编辑章节（0）" }));
-    fireEvent.click(screen.getByRole("button", { name: "添加章节 / 手动分组" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加章节分组（可选）" }));
     expect(current.chapters[0]).toEqual({ id: "chapter-new", title: "新章节", order: 0, sceneIds: [], notes: "" });
     fireEvent.click(screen.getByLabelText("章节 chapter-new 包含场景 scene-1"));
     expect(current.chapters[0]?.sceneIds).toEqual(["scene-1"]);
@@ -52,6 +54,8 @@ describe("StructuredModuleEditor", () => {
     let current = createPackage();
     render(<Harness initial={current} onChange={(next) => { current = next; }} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "基本信息" }));
+    fireEvent.click(screen.getByText("不常用设置"));
     const language = screen.getByLabelText("模组语言");
     fireEvent.change(language, { target: { value: "z" } });
     expect(language.getAttribute("aria-invalid")).toBe("true");
@@ -61,10 +65,23 @@ describe("StructuredModuleEditor", () => {
     expect((language as HTMLInputElement).value).toBe("zh-CN");
 
     fireEvent.click(screen.getByRole("button", { name: "编辑章节（0）" }));
-    fireEvent.click(screen.getByRole("button", { name: "添加章节 / 手动分组" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加章节分组（可选）" }));
     fireEvent.change(screen.getByLabelText("章节 chapter-new 顺序"), { target: { value: "1.5" } });
     expect(current.chapters[0]?.order).toBe(1);
     expect(modulePackageSchema.safeParse(current).success).toBe(true);
+  });
+
+  it("does not remove linked material after an accidental delete click", () => {
+    let current = createPackage();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<Harness initial={current} onChange={(next) => { current = next; }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑地点（1）" }));
+    fireEvent.click(screen.getByLabelText("删除地点 location-1"));
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("场景中对它的关联也会一起移除"));
+    expect(current.locations).toHaveLength(1);
+    expect(current.scenes[0]?.locationIds).toEqual(["location-1"]);
   });
 });
 

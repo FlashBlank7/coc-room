@@ -5,11 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:web": "vite --mode web --open",
     "tauri": "tauri",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "test": "vitest run",
-    "smoke:relay-session": "vitest run src/network/RoomSession.live.test.ts --reporter=verbose"
+    "smoke:web": "vitest run src/components/runtime-shell.test.tsx --reporter=verbose",
+    "smoke:web-bridge": "node dev/smoke-web-bridge.mjs",
+    "smoke:relay-session": "vitest run src/network/RoomSession.live.test.ts src/network/RoomSessionV2.live.test.ts --reporter=verbose"
   },
   "dependencies": {
     "@coc-room/protocol": "workspace:*",
@@ -21,6 +24,7 @@
     "@tauri-apps/plugin-sql": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fflate": "0.8.2",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -40,11 +40,15 @@ class FakeWebSocket extends EventTarget {
 class FakeRTCDataChannel {
   readonly sent: string[] = [];
   readyState: RTCDataChannelState = "connecting";
+  bufferedAmount = 0;
+  bufferedAmountLowThreshold = 0;
   throwOnSend = false;
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
+
+  constructor(readonly label: string) {}
 
   send(value: string): void {
     if (this.throwOnSend) throw new Error("simulated DataChannel send failure");
@@ -80,8 +84,8 @@ class FakeRTCPeerConnection {
     FakeRTCPeerConnection.instances.push(this);
   }
 
-  createDataChannel(_label: string, _options?: RTCDataChannelInit): FakeRTCDataChannel {
-    const channel = new FakeRTCDataChannel();
+  createDataChannel(label: string, _options?: RTCDataChannelInit): FakeRTCDataChannel {
+    const channel = new FakeRTCDataChannel(label);
     this.channels.push(channel);
     return channel;
   }

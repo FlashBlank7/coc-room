@@ -106,9 +106,11 @@ export function RoomWorldStage({
       >
         <div className="max-w-md">
           <MapPin className="mx-auto h-8 w-8 text-zinc-700" aria-hidden="true" />
-          <h2 className="mt-3 font-serif text-xl text-zinc-300">尚未公开地点</h2>
+          <h2 className="mt-3 font-serif text-xl text-zinc-300">还没有开放地点</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-500">
-            {readOnly ? "这份本地记录中没有已公开地点。" : "等待守秘人公开第一个可进入的地点。"}
+            {readOnly
+              ? "这份本地记录中没有已公开地点。"
+              : "KP 还没有向大家开放可进入的地点。此时仍可以继续聊天、行动和检定。"}
           </p>
         </div>
       </section>
@@ -123,16 +125,24 @@ export function RoomWorldStage({
   const alreadyHere = selectedCharacter
     ? currentLocationByCharacterId.get(selectedCharacter.id) === activeLocation.id
     : false;
+  const ownCurrentLocation = ownCurrentLocationId ? locations.get(ownCurrentLocationId) : undefined;
   const entryDisabled = readOnly || disabled || !onEnterLocation || !selectedCharacter || alreadyHere;
   const entryLabel = readOnly
     ? "本地记录只读"
     : !selectedCharacter
       ? "先创建自己的调查员角色卡"
       : alreadyHere
-        ? `${selectedCharacter.name} 已在此地`
+        ? `${selectedCharacter.name} 已在${activeLocation.name}`
         : disabled
           ? disabledReason ?? "当前无法进入地点"
-          : `让 ${selectedCharacter.name} 进入此地`;
+          : `${selectedCharacter.name}前往${activeLocation.name}`;
+  const locationStatus = selectedCharacter
+    ? alreadyHere
+      ? `${selectedCharacter.name} 正在这里。`
+      : ownCurrentLocation
+        ? `${selectedCharacter.name} 目前在${ownCurrentLocation.name}；你正在查看${activeLocation.name}。`
+        : `${selectedCharacter.name} 还没有进入任何地点；你正在查看${activeLocation.name}。`
+    : `正在查看${activeLocation.name}。`;
 
   const selectLocation = (locationId: string) => {
     setUncontrolledLocationId(locationId);
@@ -145,6 +155,7 @@ export function RoomWorldStage({
         aria-label="已公开地点"
         className="sticky top-0 z-20 flex gap-2 overflow-x-auto border-b border-zinc-800 bg-zinc-950/95 px-5 py-3 backdrop-blur"
       >
+        <span className="inline-flex shrink-0 items-center text-xs font-medium text-zinc-500">可前往：</span>
         {locationList.map((location) => {
           const selected = location.id === activeLocation.id;
           const ownCharacterHere = ownCharacters.some(
@@ -187,7 +198,7 @@ export function RoomWorldStage({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="flex items-center gap-1.5 text-[11px] uppercase tracking-[.25em] text-brass">
-                  <Theater className="h-3.5 w-3.5" aria-hidden="true" />当前查看地点
+                  <Theater className="h-3.5 w-3.5" aria-hidden="true" />{alreadyHere ? "当前所在地点" : "正在查看的地点"}
                 </p>
                 <h2 className="mt-2 font-serif text-3xl text-ink">{activeLocation.name}</h2>
               </div>
@@ -210,23 +221,31 @@ export function RoomWorldStage({
             <p className="mt-4 whitespace-pre-wrap text-sm leading-6 text-zinc-300">
               {activeLocation.description || "守秘人尚未提供这个地点的公开说明。"}
             </p>
+            <p role="status" aria-live="polite" className={`mt-4 rounded-lg border px-3 py-2 text-xs leading-5 ${alreadyHere ? "border-emerald-900/60 bg-emerald-950/20 text-emerald-200" : "border-zinc-800 bg-zinc-950/60 text-zinc-400"}`}>
+              {locationStatus}
+            </p>
             {!readOnly && (
-              <div className="mt-5 flex flex-wrap items-center gap-3">
-                <Button
-                  type="button"
-                  disabled={entryDisabled}
-                  onClick={() => {
-                    if (selectedCharacter) onEnterLocation?.(selectedCharacter, activeLocation);
-                  }}
-                >
-                  <DoorOpen className="mr-2 h-4 w-4" aria-hidden="true" />
-                  {entryLabel}
-                </Button>
-                {disabled && disabledReason && (
-                  <span className="text-xs text-amber-300">{disabledReason}</span>
-                )}
-                {!selectedCharacter && (
-                  <span className="text-xs text-zinc-500">在角色卡页面保存自己的调查员后即可进入。</span>
+                <div className="mt-5 grid gap-2">
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    disabled={entryDisabled}
+                    onClick={() => {
+                      if (selectedCharacter) onEnterLocation?.(selectedCharacter, activeLocation);
+                    }}
+                  >
+                    <DoorOpen className="mr-2 h-4 w-4" aria-hidden="true" />
+                    {entryLabel}
+                  </Button>
+                  {disabled && disabledReason && (
+                    <span className="text-xs text-amber-300">{disabledReason}</span>
+                  )}
+                  {!selectedCharacter && (
+                    <span className="text-xs text-zinc-500">在角色卡页面保存自己的调查员后即可进入。</span>
+                  )}
+                </div>
+                {!entryDisabled && selectedCharacter && (
+                  <p className="text-xs leading-5 text-zinc-500">进入后，房间里的所有人都会看到{selectedCharacter.name}来到了{activeLocation.name}。</p>
                 )}
               </div>
             )}
@@ -234,7 +253,7 @@ export function RoomWorldStage({
 
           <div className="grid content-start gap-3">
             <PresencePanel
-              title="在场调查员"
+              title="在这里的调查员"
               icon={<UsersRound className="h-4 w-4" />}
               empty="目前没有调查员进入这里。"
             >
@@ -258,9 +277,9 @@ export function RoomWorldStage({
             </PresencePanel>
 
             <PresencePanel
-              title="在场 NPC"
+              title="在这里的人物"
               icon={<UserRound className="h-4 w-4" />}
-              empty="守秘人尚未让 NPC 在这里出现。"
+              empty="KP 还没有让其他人物在这里出现。"
             >
               {presentNpcs.map((npc) => (
                 <div key={npc.id} className="rounded-lg border border-amber-900/40 bg-amber-950/20 p-3">
@@ -273,7 +292,7 @@ export function RoomWorldStage({
             </PresencePanel>
 
             <PresencePanel
-              title="地点线索与手记"
+              title="这里公开的线索与手记"
               icon={<FileText className="h-4 w-4" />}
               empty="守秘人尚未在这里公开线索或手记。"
             >

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -374,7 +375,12 @@ def to_canonical_package(
         for scene_id in handout.scene_ids:
             handouts_by_scene.setdefault(scene_id, []).append(handout.id)
     overview = package.overview[:50_000]
-    summary = (package.overview or normalized_text)[:8_000]
+    source_summary = re.sub(
+        r"(?m)^<!-- coc-room-pdf-page:\d+ -->\s*",
+        "",
+        normalized_text,
+    ).strip()
+    summary = (package.overview or source_summary)[:8_000]
     authors = [package.metadata.author[:160]] if package.metadata.author else []
     language = package.metadata.language or "zh-CN"
     if len(language) < 2:

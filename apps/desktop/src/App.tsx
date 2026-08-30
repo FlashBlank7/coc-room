@@ -1,45 +1,140 @@
-import { useEffect, useRef, useState } from "react";
-import { BookOpen, DoorOpen, MessageSquare, Settings, UserRound, Wifi } from "lucide-react";
-import type { ParticipantV1, RoomCommandV1, RoomEventV1 } from "@coc-room/protocol";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { BookOpen, Home, MessageSquare, Settings, UserRound } from "lucide-react";
+import {
+  createRoomWorldStateV2,
+  coc7CharacterSchema,
+  deriveRoomWorldStateFromViewsV2,
+  type ParticipantV1,
+  type AssetDescriptorV1,
+  type RoomCommandV1,
+  type RoomEventV1,
+  type RoomEventViewV2,
+  type RoomWorldStateV2,
+  type SeatV2,
+  type Coc7Character,
+} from "@coc-room/protocol";
 import { getRepository, type RoomRecord } from "./data/repository";
-import { RoomSession } from "./network/RoomSession";
+import type { RoomSession } from "./network/RoomSession";
+import type { RoomSessionV2, V2AuthenticationState } from "./network/RoomSessionV2";
 import type { ConnectionPath } from "./network/RoomTransport";
 import { useAppStore, type AppView } from "./store/app-store";
 import { LobbyView } from "./views/LobbyView";
-import { RoomView } from "./views/RoomView";
-import { ModulesView } from "./views/ModulesView";
-import { SettingsView } from "./views/SettingsView";
-import { CharactersView } from "./views/CharactersView";
 import { cn } from "./lib/cn";
 import { isRoomHostAvailable } from "./lib/room-availability";
+import { hasManagedAssetStore, managedAssetStoreKind } from "./lib/asset-store";
+import type { RoomAssetCoordinator } from "./network/RoomAssetCoordinator";
+import type {
+  NpcInteractionBroker,
+  NpcInteractionJobStatusV1,
+  NpcShadowReplyV1,
+} from "./ai/npc-interaction-broker";
+import type { RoomAiJobCoordinator } from "./ai/room-ai-job-coordinator";
 
-const navigation: Array<{ id: AppView; label: string; icon: typeof DoorOpen }> = [
-  { id: "lobby", label: "大厅", icon: DoorOpen },
-  { id: "room", label: "跑团房间", icon: MessageSquare },
-  { id: "characters", label: "角色卡", icon: UserRound },
-  { id: "modules", label: "模组库", icon: BookOpen },
+// The lobby is the only unconditional first screen. Preparation, character
+// management, settings, and both room generations are fetched when the user
+// actually opens them, keeping their editors/canvases/package tooling out of
+// the startup request without changing the in-app navigation model or HMR.
+const RoomView = lazy(async () => ({ default: (await import("./views/RoomView")).RoomView }));
+const RoomViewV2 = lazy(async () => ({ default: (await import("./views/RoomViewV2")).RoomViewV2 }));
+const ModulesView = lazy(async () => ({ default: (await import("./views/ModulesView")).ModulesView }));
+const SettingsView = lazy(async () => ({ default: (await import("./views/SettingsView")).SettingsView }));
+const CharactersView = lazy(async () => ({ default: (await import("./views/CharactersView")).CharactersView }));
+
+interface HostCharacterDraftReview {
+  jobId: string;
+  requesterSeatId: string;
+  requesterName: string;
+  character: Coc7Character;
+}
+
+type AppHydrationState =
+  | { status: "loading" }
+  | { status: "ready" }
+  | { status: "failed"; message: string };
+
+interface PendingConnectionAttempt {
+  id: number;
+  disposed: boolean;
+  session?: { stop(): void };
+  assetCoordinator?: RoomAssetCoordinator;
+  npcBroker?: NpcInteractionBroker;
+  aiCoordinator?: RoomAiJobCoordinator;
+}
+
+class SupersededConnectionAttemptError extends Error {
+  constructor() {
+    super("房间连接已由更新的操作接替");
+    this.name = "AbortError";
+  }
+}
+
+function disposePendingConnectionAttempt(attempt: PendingConnectionAttempt | undefined): void {
+  if (!attempt || attempt.disposed) return;
+  attempt.disposed = true;
+  attempt.npcBroker?.shutdown();
+  attempt.aiCoordinator?.shutdown();
+  attempt.assetCoordinator?.dispose();
+  attempt.session?.stop();
+}
+
+const navigation: Array<{ id: AppView; label: string; icon: typeof Home }> = [
+  { id: "lobby", label: "开始", icon: Home },
+  { id: "room", label: "调查现场", icon: MessageSquare },
+  { id: "characters", label: "我的调查员", icon: UserRound },
+  { id: "modules", label: "KP 备团", icon: BookOpen },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
 export function App() {
+  const webDevelopmentMode = managedAssetStoreKind() === "web-development";
   const activeView = useAppStore((state) => state.activeView);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const currentRoom = useAppStore((state) => state.currentRoom);
+  const connectionPhase = useAppStore((state) => state.connectionPhase);
+  const visibleNavigation = navigation
+    .filter(({ id }) => id !== "room" || (currentRoom && connectionPhase !== "connecting"))
+    .filter(({ id }) => id !== "modules" || !currentRoom || currentRoom.localRole === "host")
+    .map((item) => item.id === "lobby" && currentRoom && connectionPhase !== "connecting" ? { ...item, label: "大厅" } : item);
   const participants = useAppStore((state) => state.participants);
   const paths = useAppStore((state) => state.paths);
   const relayConnected = useAppStore((state) => state.relayConnected);
+  const connectionError = useAppStore((state) => state.connectionError);
+  const setConnectionError = useAppStore((state) => state.setConnectionError);
+  const beginConnection = useAppStore((state) => state.beginConnection);
   const enterRoom = useAppStore((state) => state.enterRoom);
   const leaveRoomState = useAppStore((state) => state.leaveRoom);
+  const [hydration, setHydration] = useState<AppHydrationState>({ status: "loading" });
+  const [hydrationAttempt, setHydrationAttempt] = useState(0);
   const [session, setSession] = useState<RoomSession>();
+  const [sessionV2, setSessionV2] = useState<RoomSessionV2>();
+  const [viewsV2, setViewsV2] = useState<RoomEventViewV2[]>([]);
+  const [worldV2, setWorldV2] = useState<RoomWorldStateV2>(() => createRoomWorldStateV2());
+  const [seatsV2, setSeatsV2] = useState<SeatV2[]>([]);
+  const [authenticationV2, setAuthenticationV2] = useState<V2AuthenticationState>("waiting");
   const [isViewingLocalRecord, setIsViewingLocalRecord] = useState(false);
   const sessionRef = useRef<RoomSession>();
-  const roomPaused = Boolean(
-    currentRoom &&
-      !isViewingLocalRecord &&
-      !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId]),
-  );
+  const sessionV2Ref = useRef<RoomSessionV2>();
+  const assetCoordinatorRef = useRef<RoomAssetCoordinator>();
+  const npcBrokerRef = useRef<NpcInteractionBroker>();
+  const aiCoordinatorRef = useRef<RoomAiJobCoordinator>();
+  const connectionAttemptIdRef = useRef(0);
+  const pendingConnectionAttemptRef = useRef<PendingConnectionAttempt>();
+  const [npcJobStatuses, setNpcJobStatuses] = useState<NpcInteractionJobStatusV1[]>([]);
+  const [npcShadowReplies, setNpcShadowReplies] = useState<NpcShadowReplyV1[]>([]);
+  const [requestCharacterDraft, setRequestCharacterDraft] = useState<((prompt: string, playerName: string) => Promise<Coc7Character>)>();
+  const [hostCharacterDrafts, setHostCharacterDrafts] = useState<HostCharacterDraftReview[]>([]);
+  const [resolveRoomAsset, setResolveRoomAsset] = useState<((asset: AssetDescriptorV1) => Promise<string>)>();
+  const roomPaused = Boolean(currentRoom && !isViewingLocalRecord && (
+    (currentRoom.protocolVersion ?? 1) === 2
+      ? currentRoom.localRole === "player" && (
+          authenticationV2 === "failed" || paths[currentRoom.hostPeerId] === "offline"
+        )
+      : !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId])
+  ));
 
   useEffect(() => {
+    let active = true;
+    setHydration({ status: "loading" });
     void getRepository().then(async (repository) => {
       const [rooms, modules, relayUrl, parserProvider, codexModel, deepseekModel] = await Promise.all([
         repository.listRooms(),
@@ -49,126 +144,410 @@ export function App() {
         repository.getSetting("codexModel"),
         repository.getSetting("deepseekModel"),
       ]);
-      useAppStore.getState().setRooms(rooms);
-      useAppStore.getState().setModules(modules.map((item) => item.package));
-      if (relayUrl) useAppStore.getState().setRelayUrl(relayUrl);
-      if (parserProvider === "codex" || parserProvider === "deepseek") {
-        useAppStore.getState().setParserProvider(parserProvider);
-      }
-      if (codexModel !== undefined) useAppStore.getState().setCodexModel(codexModel);
-      if (deepseekModel) useAppStore.getState().setDeepseekModel(deepseekModel);
-    }).catch((error) => useAppStore.getState().setConnectionError(String(error)));
-    return () => sessionRef.current?.stop();
+      if (!active) return;
+      const state = useAppStore.getState();
+      state.setRooms(rooms);
+      state.setModules(modules.map((item) => item.package));
+      if (relayUrl) state.setRelayUrl(relayUrl);
+      if (parserProvider === "codex" || parserProvider === "deepseek") state.setParserProvider(parserProvider);
+      if (codexModel !== undefined) state.setCodexModel(codexModel);
+      if (deepseekModel) state.setDeepseekModel(deepseekModel);
+      setHydration({ status: "ready" });
+    }).catch((error) => {
+      if (active) setHydration({ status: "failed", message: error instanceof Error ? error.message : String(error) });
+    });
+    return () => {
+      active = false;
+    };
+  }, [hydrationAttempt]);
+
+  useEffect(() => {
+    return () => {
+      disposePendingConnectionAttempt(pendingConnectionAttemptRef.current);
+      pendingConnectionAttemptRef.current = undefined;
+      const liveSession = sessionRef.current;
+      const liveSessionV2 = sessionV2Ref.current;
+      const liveNpcBroker = npcBrokerRef.current;
+      const liveAiCoordinator = aiCoordinatorRef.current;
+      const liveAssetCoordinator = assetCoordinatorRef.current;
+      sessionRef.current = undefined;
+      sessionV2Ref.current = undefined;
+      npcBrokerRef.current = undefined;
+      aiCoordinatorRef.current = undefined;
+      assetCoordinatorRef.current = undefined;
+      liveNpcBroker?.shutdown();
+      liveAiCoordinator?.shutdown();
+      liveAssetCoordinator?.dispose();
+      liveSession?.stop();
+      liveSessionV2?.stop();
+      useAppStore.getState().leaveRoom();
+    };
   }, []);
 
-  const connect = async (room: RoomRecord, nickname: string) => {
-    sessionRef.current?.stop();
+  if (hydration.status !== "ready") {
+    return <AppStartupScreen hydration={hydration} onRetry={() => setHydrationAttempt((attempt) => attempt + 1)} />;
+  }
+
+  const stopLiveRuntime = () => {
+    const liveSession = sessionRef.current;
+    const liveSessionV2 = sessionV2Ref.current;
+    const liveNpcBroker = npcBrokerRef.current;
+    const liveAiCoordinator = aiCoordinatorRef.current;
+    const liveAssetCoordinator = assetCoordinatorRef.current;
     sessionRef.current = undefined;
+    sessionV2Ref.current = undefined;
+    npcBrokerRef.current = undefined;
+    aiCoordinatorRef.current = undefined;
+    assetCoordinatorRef.current = undefined;
+    liveNpcBroker?.shutdown();
+    liveAiCoordinator?.shutdown();
+    liveAssetCoordinator?.dispose();
+    liveSession?.stop();
+    liveSessionV2?.stop();
+  };
+
+  const clearSessionPresentation = (roomId?: string) => {
+    setRequestCharacterDraft(undefined);
+    setHostCharacterDrafts([]);
+    setNpcJobStatuses([]);
+    setNpcShadowReplies([]);
+    setResolveRoomAsset(undefined);
     setSession(undefined);
-    useAppStore.getState().setConnectionError(undefined);
-    const repository = await getRepository();
-    const next = new RoomSession({ room, displayName: nickname, relayUrl: room.relayUrl, repository });
-    let active = false;
-    let latestEvents: RoomEventV1[] = [];
-    let latestParticipants: ParticipantV1[] = [];
-    let latestRelayConnected = false;
-    const latestPaths: Record<string, ConnectionPath> = {};
-    next.onEvents = (events) => {
-      latestEvents = events;
-      if (active && sessionRef.current === next) {
-        const state = useAppStore.getState();
-        state.setEvents(events);
-        const lastSeq = events.at(-1)?.sequence ?? 0;
-        state.setRooms(state.rooms.map((savedRoom) =>
-          savedRoom.id === room.id ? { ...savedRoom, lastSeq } : savedRoom));
+    setSessionV2(undefined);
+    setViewsV2([]);
+    setWorldV2(createRoomWorldStateV2(roomId));
+    setSeatsV2([]);
+  };
+
+  const connect = async (room: RoomRecord, nickname: string) => {
+    const attempt: PendingConnectionAttempt = {
+      id: connectionAttemptIdRef.current + 1,
+      disposed: false,
+    };
+    connectionAttemptIdRef.current = attempt.id;
+    const previousPendingAttempt = pendingConnectionAttemptRef.current;
+    pendingConnectionAttemptRef.current = attempt;
+    disposePendingConnectionAttempt(previousPendingAttempt);
+    stopLiveRuntime();
+    clearSessionPresentation(room.id);
+    setAuthenticationV2(room.localRole === "host" ? "authenticated" : "waiting");
+    beginConnection();
+
+    const assertAttemptOwner = () => {
+      if (pendingConnectionAttemptRef.current !== attempt || attempt.disposed) {
+        throw new SupersededConnectionAttemptError();
       }
     };
-    next.onPresence = (participants) => {
-      latestParticipants = participants;
-      if (active && sessionRef.current === next) useAppStore.getState().setParticipants(participants);
-    };
-    next.onPathChange = (peerId, path) => {
-      latestPaths[peerId] = path;
-      if (active && sessionRef.current === next) useAppStore.getState().setPath(peerId, path);
-    };
-    next.onRelayStateChange = (connected) => {
-      latestRelayConnected = connected;
-      if (active && sessionRef.current === next) {
-        const state = useAppStore.getState();
-        state.setRelayConnected(connected);
-        if (connected) state.setConnectionError(undefined);
-      }
-    };
-    next.onError = (message) => {
-      if (active && sessionRef.current === next) useAppStore.getState().setConnectionError(message);
-    };
+
+    let repository: Awaited<ReturnType<typeof getRepository>> | undefined;
     try {
+      repository = await getRepository();
+      assertAttemptOwner();
+
+      if ((room.protocolVersion ?? 1) === 2) {
+        const [
+          { RoomSessionV2: RoomSessionV2Runtime },
+          { RoomAiJobCoordinator: RoomAiJobCoordinatorRuntime },
+        ] = await Promise.all([
+          import("./network/RoomSessionV2"),
+          import("./ai/room-ai-job-coordinator"),
+        ]);
+        assertAttemptOwner();
+        const next = new RoomSessionV2Runtime({ room, displayName: nickname, relayUrl: room.relayUrl, repository });
+        attempt.session = next;
+        let active = false;
+        const settings = useAppStore.getState();
+        const aiProvider = settings.parserProvider;
+        const aiModel = aiProvider === "codex" ? settings.codexModel : settings.deepseekModel;
+        const characterDraftExecutor = next.isHost
+          ? new (await import("./ai/tauri-character-draft-executor")).TauriCharacterDraftExecutor()
+          : undefined;
+        assertAttemptOwner();
+        const aiCoordinator = new RoomAiJobCoordinatorRuntime({
+          session: next,
+          provider: aiProvider,
+          model: aiModel,
+          ...(characterDraftExecutor ? { executor: characterDraftExecutor } : {}),
+          onHostStatus: (seat, status) => {
+            if (!active || status.status !== "completed") return;
+            const candidate = status.result && typeof status.result === "object"
+              ? (status.result as { character?: unknown }).character
+              : undefined;
+            const parsed = coc7CharacterSchema.safeParse(candidate);
+            if (!parsed.success) return;
+            setHostCharacterDrafts((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), {
+              jobId: status.jobId,
+              requesterSeatId: seat.seatId,
+              requesterName: seat.displayName,
+              character: parsed.data,
+            }].slice(-16));
+          },
+        });
+        attempt.aiCoordinator = aiCoordinator;
+        next.onUnhandledWireMessage = (fromSeat, message) => {
+          aiCoordinator.handleWireMessage(fromSeat, message);
+        };
+        let coordinator: RoomAssetCoordinator | undefined;
+        let latestViews: RoomEventViewV2[] = [];
+        let latestWorld = createRoomWorldStateV2(room.id);
+        let latestSeats: SeatV2[] = [];
+        let latestAuthentication: V2AuthenticationState = room.localRole === "host" ? "authenticated" : "waiting";
+        let latestRelayConnected = false;
+        let npcBroker: NpcInteractionBroker | undefined;
+        let npcObservedThrough = 0;
+        const latestPaths: Record<string, ConnectionPath> = {};
+        next.onViews = (views) => {
+          latestViews = views;
+          if (active && sessionV2Ref.current === next) setViewsV2(views);
+        };
+        next.onWorld = (world) => {
+          latestWorld = world;
+          if (npcBroker) {
+            for (const view of latestViews) {
+              if (view.view === "full" && view.event.sequence > npcObservedThrough) npcBroker.observeEvent(view.event);
+            }
+            npcObservedThrough = Math.max(npcObservedThrough, world.lastSequence);
+          }
+          if (active && sessionV2Ref.current === next) {
+            setWorldV2(world);
+            const state = useAppStore.getState();
+            state.setRooms(state.rooms.map((savedRoom) => savedRoom.id === room.id
+              ? { ...savedRoom, lastSeq: world.lastSequence }
+              : savedRoom));
+          }
+        };
+        next.onPresence = (seats) => {
+          latestSeats = seats;
+          if (active && sessionV2Ref.current === next) setSeatsV2(seats);
+        };
+        next.onAuthenticationState = (state) => {
+          latestAuthentication = state;
+          if (active && sessionV2Ref.current === next) setAuthenticationV2(state);
+        };
+        next.onPathChange = (peerId, path) => {
+          latestPaths[peerId] = path;
+          if (active && sessionV2Ref.current === next) useAppStore.getState().setPath(peerId, path);
+        };
+        next.onRelayStateChange = (connected) => {
+          latestRelayConnected = connected;
+          if (active && sessionV2Ref.current === next) useAppStore.getState().setRelayConnected(connected);
+        };
+        next.onCommandRejected = (_commandId, message) => {
+          if (active && sessionV2Ref.current === next) useAppStore.getState().setConnectionError(message);
+        };
+        next.onError = (message) => {
+          if (active && sessionV2Ref.current === next) useAppStore.getState().setConnectionError(message);
+        };
+
+        await next.start();
+        assertAttemptOwner();
+        if (hasManagedAssetStore()) {
+          const { RoomAssetCoordinator: RoomAssetCoordinatorRuntime } = await import("./network/RoomAssetCoordinator");
+          assertAttemptOwner();
+          coordinator = new RoomAssetCoordinatorRuntime(next, (event) => {
+            if (active && sessionV2Ref.current === next && event.kind === "error") {
+              useAppStore.getState().setConnectionError(event.message);
+            }
+          });
+          attempt.assetCoordinator = coordinator;
+        }
+        if (next.isHost) {
+          const {
+            NpcInteractionBroker: NpcInteractionBrokerRuntime,
+            TauriNpcReplyProvider: TauriNpcReplyProviderRuntime,
+          } = await import("./ai/npc-interaction-broker");
+          assertAttemptOwner();
+          npcObservedThrough = latestWorld.lastSequence;
+          npcBroker = new NpcInteractionBrokerRuntime({
+            getWorld: () => latestWorld,
+            provider: new TauriNpcReplyProviderRuntime(),
+            publish: (proposal) => next.submit(proposal),
+            onStatus: (status) => {
+              if (!active || sessionV2Ref.current !== next) return;
+              setNpcJobStatuses((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), status].slice(-32));
+              if (status.status === "failed") {
+                const npcSession = latestWorld.npcSessions.get(status.sessionId);
+                if (npcSession) {
+                  void next.submit({
+                    type: "system.notice",
+                    audience: npcSession.audience,
+                    payload: { message: status.message, level: "warning" },
+                  }).catch((error) => next.onError?.(error instanceof Error ? error.message : String(error)));
+                }
+              }
+            },
+            onShadowReply: (reply) => {
+              if (!active || sessionV2Ref.current !== next) return;
+              setNpcShadowReplies((current) => [...current.filter(({ jobId }) => jobId !== reply.jobId), reply].slice(-16));
+            },
+          });
+          attempt.npcBroker = npcBroker;
+          npcBroker.primeHistory(latestViews.flatMap((view) => view.view === "full" ? [view.event] : []));
+        }
+        const refreshedRooms = await repository.listRooms();
+        assertAttemptOwner();
+
+        pendingConnectionAttemptRef.current = undefined;
+        attempt.disposed = true;
+        attempt.session = undefined;
+        attempt.aiCoordinator = undefined;
+        attempt.assetCoordinator = undefined;
+        attempt.npcBroker = undefined;
+        sessionV2Ref.current = next;
+        aiCoordinatorRef.current = aiCoordinator;
+        assetCoordinatorRef.current = coordinator;
+        npcBrokerRef.current = npcBroker;
+        active = true;
+        setRequestCharacterDraft(() => (prompt: string, playerName: string) => aiCoordinator.requestCharacterDraft(prompt, playerName));
+        if (coordinator) setResolveRoomAsset(() => (asset: AssetDescriptorV1) => coordinator.resolve(asset));
+        setViewsV2(latestViews);
+        setWorldV2(latestWorld);
+        setSeatsV2(latestSeats);
+        setAuthenticationV2(latestAuthentication);
+        setIsViewingLocalRecord(false);
+        setSessionV2(next);
+        useAppStore.getState().setRooms(refreshedRooms);
+        enterRoom(room);
+        useAppStore.getState().setRelayConnected(latestRelayConnected);
+        for (const [peerId, path] of Object.entries(latestPaths)) useAppStore.getState().setPath(peerId, path);
+        return;
+      }
+
+      const { RoomSession: RoomSessionRuntime } = await import("./network/RoomSession");
+      assertAttemptOwner();
+      const next = new RoomSessionRuntime({ room, displayName: nickname, relayUrl: room.relayUrl, repository });
+      attempt.session = next;
+      let active = false;
+      let latestEvents: RoomEventV1[] = [];
+      let latestParticipants: ParticipantV1[] = [];
+      let latestRelayConnected = false;
+      const latestPaths: Record<string, ConnectionPath> = {};
+      next.onEvents = (events) => {
+        latestEvents = events;
+        if (active && sessionRef.current === next) {
+          const state = useAppStore.getState();
+          state.setEvents(events);
+          const lastSeq = events.at(-1)?.sequence ?? 0;
+          state.setRooms(state.rooms.map((savedRoom) => savedRoom.id === room.id ? { ...savedRoom, lastSeq } : savedRoom));
+        }
+      };
+      next.onPresence = (participants) => {
+        latestParticipants = participants;
+        if (active && sessionRef.current === next) useAppStore.getState().setParticipants(participants);
+      };
+      next.onPathChange = (peerId, path) => {
+        latestPaths[peerId] = path;
+        if (active && sessionRef.current === next) useAppStore.getState().setPath(peerId, path);
+      };
+      next.onRelayStateChange = (connected) => {
+        latestRelayConnected = connected;
+        if (active && sessionRef.current === next) {
+          const state = useAppStore.getState();
+          state.setRelayConnected(connected);
+          if (connected) state.setConnectionError(undefined);
+        }
+      };
+      next.onError = (message) => {
+        if (active && sessionRef.current === next) useAppStore.getState().setConnectionError(message);
+      };
+
       await next.start();
-      useAppStore.getState().setRooms(await repository.listRooms());
-      enterRoom(room);
+      assertAttemptOwner();
+      const refreshedRooms = await repository.listRooms();
+      assertAttemptOwner();
+
+      pendingConnectionAttemptRef.current = undefined;
+      attempt.disposed = true;
+      attempt.session = undefined;
       sessionRef.current = next;
       active = true;
+      setIsViewingLocalRecord(false);
+      setSession(next);
+      useAppStore.getState().setRooms(refreshedRooms);
+      enterRoom(room);
       useAppStore.getState().setEvents(latestEvents);
       useAppStore.getState().setParticipants(latestParticipants);
       useAppStore.getState().setRelayConnected(latestRelayConnected);
       for (const [peerId, path] of Object.entries(latestPaths)) useAppStore.getState().setPath(peerId, path);
-      setIsViewingLocalRecord(false);
-      setSession(next);
     } catch (error) {
-      next.stop();
-      // A failed replacement connection must not leave the previous room
-      // looking active while its session has already been stopped. Keep all
-      // persisted rooms available for recovery in the lobby.
-      try {
-        useAppStore.getState().setRooms(await repository.listRooms());
-      } catch {
-        // Preserve the original connection error if refreshing records fails.
-      }
-      useAppStore.getState().leaveRoom();
+      const stillOwner = pendingConnectionAttemptRef.current === attempt;
+      disposePendingConnectionAttempt(attempt);
+      if (!stillOwner) throw new SupersededConnectionAttemptError();
+
+      pendingConnectionAttemptRef.current = undefined;
+      clearSessionPresentation();
+      setAuthenticationV2("waiting");
       setIsViewingLocalRecord(false);
-      setSession(undefined);
+      leaveRoomState();
       const message = error instanceof Error ? error.message : String(error);
       useAppStore.getState().setConnectionError(message);
+      if (repository) {
+        try {
+          const refreshedRooms = await repository.listRooms();
+          if (connectionAttemptIdRef.current === attempt.id && useAppStore.getState().connectionPhase === "idle") {
+            useAppStore.getState().setRooms(refreshedRooms);
+          }
+        } catch {
+          // The original connection error is the actionable failure.
+        }
+      }
+      if (connectionAttemptIdRef.current !== attempt.id) throw new SupersededConnectionAttemptError();
       throw error;
     }
   };
 
   const openLocalRecord = async (room: RoomRecord) => {
+    connectionAttemptIdRef.current += 1;
+    const pendingAttempt = pendingConnectionAttemptRef.current;
+    pendingConnectionAttemptRef.current = undefined;
+    disposePendingConnectionAttempt(pendingAttempt);
     const repository = await getRepository();
-    const events = await repository.listEvents(room.id);
-    sessionRef.current?.stop();
-    sessionRef.current = undefined;
-    setSession(undefined);
+    const isV2 = (room.protocolVersion ?? 1) === 2;
+    const events = isV2 ? [] : await repository.listEvents(room.id);
+    const localViewsV2 = isV2 ? await repository.listEventViewsV2(room.id) : [];
+    stopLiveRuntime();
+    clearSessionPresentation();
     useAppStore.getState().setConnectionError(undefined);
-    enterRoom(room);
+    enterRoom(room, "idle");
     useAppStore.getState().setEvents(events);
+    setViewsV2(localViewsV2);
+    setWorldV2(isV2 ? deriveRoomWorldStateFromViewsV2(localViewsV2) : createRoomWorldStateV2());
+    setSeatsV2([]);
+    setAuthenticationV2("waiting");
     setIsViewingLocalRecord(true);
   };
 
   const leave = () => {
-    sessionRef.current?.stop();
-    sessionRef.current = undefined;
-    setSession(undefined);
+    connectionAttemptIdRef.current += 1;
+    const pendingAttempt = pendingConnectionAttemptRef.current;
+    pendingConnectionAttemptRef.current = undefined;
+    disposePendingConnectionAttempt(pendingAttempt);
+    stopLiveRuntime();
+    clearSessionPresentation();
     setIsViewingLocalRecord(false);
     leaveRoomState();
   };
 
-  const relayDegraded = Boolean(currentRoom && !isViewingLocalRecord && !relayConnected);
-  const connectionLabel = isViewingLocalRecord
+  const relayDegraded = Boolean(connectionPhase === "live" && currentRoom && !isViewingLocalRecord && !relayConnected);
+  const connectionLabel = connectionPhase === "connecting"
+    ? "正在连接房间…"
+    : isViewingLocalRecord
     ? "本地记录（只读）"
-    : roomPaused
+    : connectionPhase === "live" && roomPaused
       ? "房主离线 · 房间暂停"
       : relayDegraded
         ? paths[currentRoom?.hostPeerId ?? ""] === "direct"
-          ? "直连可用 · 中继重连中"
-          : "中继重连中 · 事件保存在本机"
-        : currentRoom
+          ? "仍可正常游玩 · 正在恢复备用连接"
+          : "连接不稳定 · 正在自动恢复"
+        : currentRoom && connectionPhase === "live"
           ? "房间已连接"
-          : "未连接";
+          : currentRoom
+            ? "尚未连接房间"
+          : "尚未进入调查";
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#101317] text-ink">
-      <aside className="flex w-48 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 px-3 py-4">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 px-3 py-4 md:flex">
         <div className="mb-7 flex items-center gap-3 px-1">
           <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-brass/40 bg-brass/10 font-serif text-xl text-brass">秘</div>
           <div className="min-w-0">
@@ -176,17 +555,20 @@ export function App() {
             <div className="text-[10px] uppercase tracking-[.18em] text-zinc-600">CoC Room</div>
           </div>
         </div>
+        {currentRoom && <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+          <div className="mb-1 flex items-center gap-2"><span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${currentRoom.localRole === "host" ? "bg-brass/15 text-brass" : "bg-sky-950 text-sky-300"}`}>{currentRoom.localRole === "host" ? "KP" : "调查员"}</span><span className="truncate text-xs font-medium text-zinc-300">{currentRoom.name}</span></div>
+          <p className="text-[10px] leading-4 text-zinc-600">{connectionLabel}</p>
+        </div>}
         <nav aria-label="主导航" className="grid w-full gap-1">
-          {navigation.map(({ id, label, icon: Icon }) => {
-            const disabled = (id === "room" || id === "characters") && !currentRoom;
+          {visibleNavigation.map(({ id, label, icon: Icon }) => {
             return (
               <button
                 key={id}
                 title={label}
-                disabled={disabled}
+                aria-current={activeView === id ? "page" : undefined}
                 onClick={() => setActiveView(id)}
                 className={cn(
-                  "flex h-11 items-center gap-3 rounded-lg px-3 text-left text-sm text-zinc-500 transition hover:bg-zinc-800 hover:text-ink disabled:opacity-20",
+                  "flex h-11 items-center gap-3 rounded-lg px-3 text-left text-sm text-zinc-500 transition hover:bg-zinc-800 hover:text-ink",
                   activeView === id && "bg-zinc-800 text-brass",
                 )}
               >
@@ -196,19 +578,99 @@ export function App() {
             );
           })}
         </nav>
-        <div className="mt-auto flex items-center gap-2 px-3 text-[10px] text-zinc-600">
-          <Wifi className={cn("h-4 w-4", currentRoom && !isViewingLocalRecord && !roomPaused && !relayDegraded && "text-emerald-500", (roomPaused || relayDegraded) && "text-amber-400")} />
-          <span>{connectionLabel} · v0.1</span>
+        <div className="mt-auto grid gap-2">
+          {webDevelopmentMode && <details className="rounded-md border border-amber-900/40 bg-amber-950/10 p-2 text-[10px] leading-4 text-amber-300">
+            <summary className="cursor-pointer">本机保存提醒</summary>
+            <p className="mt-1 text-amber-300/70">当前记录只保存在这个浏览器；清除浏览器数据会一并删除。</p>
+          </details>}
         </div>
       </aside>
-      <main className="min-w-0 flex-1">
-        {activeView === "lobby" && <LobbyView onConnect={connect} onOpenLocalRecord={openLocalRecord} />}
-        {activeView === "room" && <RoomView session={session} readOnly={isViewingLocalRecord} onLeave={leave} />}
-        {activeView === "characters" && <CharactersView session={session} />}
-        {activeView === "modules" && <ModulesView session={session} />}
-        {activeView === "settings" && <SettingsView />}
+      <main className="min-w-0 flex-1 pb-16 md:pb-0">
+        <Suspense fallback={<AppViewLoading />}>
+          {activeView === "lobby" && <LobbyView onConnect={connect} onOpenLocalRecord={openLocalRecord} />}
+          {activeView === "room" && currentRoom && (currentRoom.protocolVersion ?? 1) === 2
+            ? <RoomViewV2
+                room={currentRoom}
+                session={sessionV2}
+                views={viewsV2}
+                world={worldV2}
+                seats={seatsV2}
+                paths={paths}
+                authenticationState={authenticationV2}
+                readOnly={isViewingLocalRecord}
+                connectionError={connectionError}
+                setConnectionError={setConnectionError}
+                resolveAsset={resolveRoomAsset}
+                npcJobStatuses={npcJobStatuses}
+                npcShadowReplies={npcShadowReplies}
+                onDismissNpcShadow={(jobId) => setNpcShadowReplies((current) => current.filter((reply) => reply.jobId !== jobId))}
+                onLeave={leave}
+              />
+            : activeView === "room" && <RoomView session={session} readOnly={isViewingLocalRecord} onLeave={leave} />}
+          {activeView === "characters" && <CharactersView
+            session={sessionV2 ?? session}
+            worldV2={worldV2}
+            requestCharacterDraft={requestCharacterDraft}
+            hostCharacterDrafts={hostCharacterDrafts}
+            onDismissHostCharacterDraft={(jobId) => setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId))}
+          />}
+          {activeView === "modules" && <ModulesView session={sessionV2 ?? session} />}
+          {activeView === "settings" && <SettingsView />}
+        </Suspense>
       </main>
+      <nav aria-label="主导航" className={cn("fixed inset-x-0 bottom-0 z-50 grid h-16 border-t border-zinc-800 bg-zinc-950/95 px-1 backdrop-blur md:hidden", visibleNavigation.length === 4 ? "grid-cols-4" : "grid-cols-5")}>
+        {visibleNavigation.map(({ id, label, icon: Icon }) => {
+          return <button key={id} type="button" aria-current={activeView === id ? "page" : undefined} onClick={() => setActiveView(id)} className={cn("grid place-items-center content-center gap-1 text-[10px] text-zinc-500", activeView === id && "text-brass")}><Icon className="h-5 w-5" /><span>{label}</span></button>;
+        })}
+      </nav>
     </div>
+  );
+}
+
+function AppViewLoading() {
+  return <div role="status" className="grid h-full min-h-48 place-items-center px-6 text-sm text-zinc-500">正在打开这部分资料…</div>;
+}
+
+function AppStartupScreen({ hydration, onRetry }: { hydration: Exclude<AppHydrationState, { status: "ready" }>; onRetry(): void }) {
+  const failed = hydration.status === "failed";
+  return (
+    <main className="grid h-screen place-items-center bg-[#101317] p-6 text-ink">
+      <section
+        role={failed ? "alert" : "status"}
+        aria-busy={!failed}
+        className="w-full max-w-lg rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl"
+      >
+        <p className="text-xs font-semibold uppercase tracking-[.22em] text-brass">CoC Room</p>
+        <h1 className="mt-3 font-serif text-2xl">{failed ? "暂时打不开本机调查资料" : "正在打开你的调查资料"}</h1>
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          {failed
+            ? "房间和设置还没有读取完成。你可以重新读取；在此之前不会连接房间或使用默认网络设置。"
+            : "正在读取本机保存的房间与设置。完成前不会连接网络，请稍候。"}
+        </p>
+        {failed && (
+          <>
+            <button
+              type="button"
+              className="mt-5 inline-flex h-10 items-center rounded-md bg-brass px-4 text-sm font-semibold text-zinc-950 hover:bg-amber-300"
+              onClick={onRetry}
+            >
+              重新读取
+            </button>
+            <button
+              type="button"
+              className="ml-2 inline-flex h-10 items-center rounded-md border border-zinc-700 px-4 text-sm font-semibold text-zinc-300 hover:bg-zinc-900"
+              onClick={() => window.location.reload()}
+            >
+              重新加载应用
+            </button>
+            <details className="mt-4 rounded-md border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-500">
+              <summary className="cursor-pointer text-zinc-400">查看技术信息</summary>
+              <p className="mt-2 break-words">{hydration.message}</p>
+            </details>
+          </>
+        )}
+      </section>
+    </main>
   );
 }
 

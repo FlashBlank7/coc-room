@@ -11,11 +11,15 @@ from coc_module_parser.client import (
     InvalidStructureError,
     ProviderResponseError,
     SequenceExtractor,
+    codex_evidence_output_schema,
+    codex_world_output_schema,
 )
 from coc_module_parser.cache import CACHE_VERSION, CacheIdentity
 from coc_module_parser.models import (
     CharacterV1,
     ClueV1,
+    CodexEvidenceFragmentV1,
+    CodexWorldFragmentV1,
     FragmentMetadataV1,
     HandoutV1,
     LocationV1,
@@ -25,10 +29,64 @@ from coc_module_parser.models import (
     SceneV1,
     SourceRefV1,
 )
-from coc_module_parser.workflow import ModuleParser
+from coc_module_parser.workflow import (
+    CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT,
+    ModuleParser,
+)
 
 
 SOURCE = "# 雾中车站\n\n## 月台\nNPC：林先生\n线索：一张旧车票\n检定：侦查（困难）"
+
+
+class StagedSequenceExtractor:
+    name = "codex-staged-test"
+    model = "gpt-test"
+    base_url = "local://codex-test"
+    extraction_prompt_version = "staged-test-v1"
+    cacheable = True
+    cache_max_output_tokens = 0
+    max_output_tokens = 16_000
+    supports_staged_codex = True
+
+    def __init__(self, outcomes: list[tuple[str, object]]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[str] = []
+        self.usage: dict[str, int] = {}
+
+    @staticmethod
+    def output_schema() -> dict[str, object]:
+        return ModuleFragmentV1.model_json_schema(mode="validation")
+
+    @staticmethod
+    def stage_output_schema(stage: str) -> dict[str, object]:
+        return (
+            codex_world_output_schema()
+            if stage == "world"
+            else codex_evidence_output_schema()
+        )
+
+    def extract_stage(self, _chunk: object, *, stage: str, **kwargs: object) -> object:
+        progress = kwargs.get("progress")
+        expected_stage, outcome = self.outcomes.pop(0)
+        assert stage == expected_stage
+        self.calls.append(stage)
+        if callable(progress):
+            progress("started", {"elapsed_seconds": 0.0})
+        if isinstance(outcome, Exception):
+            raise outcome
+        self.usage = {
+            "completed_turns": 1,
+            "input_tokens": 100 if stage == "world" else 80,
+            "output_tokens": 20 if stage == "world" else 15,
+        }
+        if callable(progress):
+            progress("completed", {"elapsed_seconds": 1.0, "usage": self.usage})
+        return outcome
+
+    def take_last_usage(self) -> dict[str, int]:
+        usage = self.usage
+        self.usage = {}
+        return usage
 
 
 def test_deterministic_workflow_runs_without_network() -> None:
@@ -39,6 +97,322 @@ def test_deterministic_workflow_runs_without_network() -> None:
     assert result.module.scenes[0].npc_ids == [result.module.npcs[0].id]
     assert result.module.clues[0].scene_ids == [result.module.scenes[0].id]
     assert result.module.chapters == []
+
+
+def test_live_codex_segments_dense_multilingual_text_by_utf8_load() -> None:
+    dense_source = "月" * 8_000
+    progress: list[dict[str, object]] = []
+    state = ModuleParser._segment(
+        {
+            "config": ParseConfig(
+                source_text=dense_source,
+                provider="codex",
+                model="gpt-test",
+            ),
+            "normalized_text": dense_source,
+            "reporter": lambda _stage, _fraction, _message, details: (
+                progress.append(details) if details else None
+            ),
+        }
+    )
+
+    assert state["chunk_max_chars"] == 3_000
+    assert max(len(chunk.text.encode("utf-8")) for chunk in state["chunks"]) <= (
+        CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT
+    )
+    assert progress[-1]["codex_utf8_soft_limit_applied"] is True
+    assert progress[-1]["codex_source_chunk_utf8_soft_limit"] == (
+        CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT
+    )
+
+
+def test_live_codex_keeps_configured_cap_for_latin_text_within_byte_budget() -> None:
+    latin_source = "a" * 8_000
+    state = ModuleParser._segment(
+        {
+            "config": ParseConfig(
+                source_text=latin_source,
+                provider="codex",
+                model="gpt-test",
+            ),
+            "normalized_text": latin_source,
+            "reporter": lambda *_args: None,
+        }
+    )
+
+    assert state["chunk_max_chars"] == 6_000
+
+
+def test_live_codex_combines_two_validated_stages_and_reuses_stage_cache(
+    tmp_path: Path,
+) -> None:
+    source = "test"
+    source_ref = SourceRefV1(
+        chunk_id="chunk-0001", start=0, end=4, excerpt=source
+    )
+    world = CodexWorldFragmentV1(
+        scenes=[
+            SceneV1(
+                id="scene:raw",
+                title="Archive visit",
+                location_ids=["Archive"],
+                handout_ids=["Letter"],
+                source_refs=[source_ref],
+            )
+        ],
+        locations=[
+            LocationV1(
+                id="location:raw",
+                name="Archive",
+                description="A concealed mechanism is behind the shelves.",
+                player_description="Dusty shelves rise beneath a cracked skylight.",
+                source_refs=[source_ref],
+            )
+        ],
+        npcs=[
+            NPCV1(
+                id="npc:raw",
+                name="Keeper",
+                player_description="An ink-stained keeper waits at the desk.",
+                character=CharacterV1(characteristics={"INT": 80}),
+                source_refs=[source_ref],
+            )
+        ],
+    )
+    evidence = CodexEvidenceFragmentV1(
+        clues=[
+            ClueV1(
+                id="clue:raw",
+                title="Ledger",
+                content="The ledger identifies the cult.",
+                handout_text="A list of unfamiliar names.",
+                scene_ids=["Archive visit"],
+                source_refs=[source_ref],
+            )
+        ],
+        handouts=[
+            HandoutV1(
+                id="handout:raw",
+                title="Letter",
+                content="Complete player-facing letter.",
+                scene_ids=["Archive visit"],
+                source_refs=[source_ref],
+            )
+        ],
+    )
+    config = ParseConfig(
+        source_text=source,
+        provider="codex",
+        model="gpt-test",
+        max_retries=0,
+        cache_dir=tmp_path,
+    )
+    progress: list[dict[str, object]] = []
+    first = StagedSequenceExtractor([("world", world), ("evidence", evidence)])
+
+    result = ModuleParser(first).parse(
+        config,
+        reporter=lambda _stage, _fraction, _message, details: (
+            progress.append(details) if details else None
+        ),
+    )
+
+    assert first.calls == ["world", "evidence"]
+    assert result.extraction_attempts == 2
+    assert result.validated_fragment_count == 1
+    assert result.provider_usage.completed_turns == 2
+    assert result.provider_usage.input_tokens == 180
+    assert result.provider_usage.output_tokens == 35
+    assert result.module.locations[0].player_description == (
+        "Dusty shelves rise beneath a cracked skylight."
+    )
+    assert result.module.npcs[0].player_description == (
+        "An ink-stained keeper waits at the desk."
+    )
+    assert result.module.clues[0].handout_text == "A list of unfamiliar names."
+    assert result.module.handouts[0].content == "Complete player-facing letter."
+    assert result.module.scenes[0].handout_ids == [result.module.handouts[0].id]
+    assert all(
+        item.source_refs == [source_ref]
+        for item in (
+            result.module.scenes
+            + result.module.locations
+            + result.module.npcs
+            + result.module.clues
+            + result.module.handouts
+        )
+    )
+    assert {
+        details["codex_stage"]
+        for details in progress
+        if details.get("event") == "codex_started"
+    } == {"world", "evidence"}
+
+    cache_payloads = [
+        json.loads(path.read_text("utf-8")) for path in tmp_path.rglob("*.json")
+    ]
+    assert {payload["stage"] for payload in cache_payloads} == {"world", "evidence"}
+    assert {
+        payload["identity"]["extraction_stage"] for payload in cache_payloads
+    } == {"world", "evidence"}
+    assert len({payload["identity"]["schema_sha256"] for payload in cache_payloads}) == 2
+
+    replay = StagedSequenceExtractor([])
+    replayed = ModuleParser(replay).parse(config)
+    assert replay.calls == []
+    assert replayed.extraction_attempts == 0
+    assert replayed.validated_fragment_count == 1
+    assert replayed.module.model_dump(mode="json") == result.module.model_dump(mode="json")
+
+
+def test_live_codex_evidence_timeout_never_merges_cached_world_stage(
+    tmp_path: Path,
+) -> None:
+    world = CodexWorldFragmentV1(
+        locations=[LocationV1(id="location:raw", name="Never partially merged")]
+    )
+    timeout = ProviderResponseError(
+        "slow evidence stage", retryable=False, code="CODEX_TIMEOUT"
+    )
+    config = ParseConfig(
+        source_text="test",
+        provider="codex",
+        model="gpt-test",
+        max_retries=0,
+        cache_dir=tmp_path,
+    )
+    first = StagedSequenceExtractor([("world", world), ("evidence", timeout)])
+
+    partial = ModuleParser(first).parse(config)
+
+    assert first.calls == ["world", "evidence"]
+    assert partial.extraction_attempts == 2
+    assert partial.validated_fragment_count == 0
+    assert partial.module.locations == []
+    assert partial.status == "needs_review"
+    assert any(issue.code == "CODEX_TIMEOUT" for issue in partial.issues)
+    cache_payloads = [
+        json.loads(path.read_text("utf-8")) for path in tmp_path.rglob("*.json")
+    ]
+    assert [payload["stage"] for payload in cache_payloads] == ["world"]
+
+    evidence = CodexEvidenceFragmentV1(
+        clues=[ClueV1(id="clue:raw", title="Recovered", content="Recovered")]
+    )
+    resumed = StagedSequenceExtractor([("evidence", evidence)])
+    complete = ModuleParser(resumed).parse(config)
+
+    assert resumed.calls == ["evidence"]
+    assert complete.extraction_attempts == 1
+    assert complete.validated_fragment_count == 1
+    assert [item.name for item in complete.module.locations] == ["Never partially merged"]
+    assert [item.title for item in complete.module.clues] == ["Recovered"]
+
+
+def test_live_codex_stall_returns_repairable_partial_without_more_calls(
+    tmp_path: Path,
+) -> None:
+    world = CodexWorldFragmentV1(
+        locations=[LocationV1(id="location:raw", name="Cached world stage")]
+    )
+    stalled = ProviderResponseError(
+        "sanitized repeated error event",
+        retryable=False,
+        code="CODEX_CLI_STALLED",
+    )
+    extractor = StagedSequenceExtractor(
+        [("world", world), ("evidence", stalled)]
+    )
+
+    result = ModuleParser(extractor).parse(
+        ParseConfig(
+            source_text="x" * 8_000,
+            provider="codex",
+            model="gpt-test",
+            max_retries=0,
+            cache_dir=tmp_path,
+        )
+    )
+
+    assert extractor.calls == ["world", "evidence"]
+    assert result.status == "needs_review"
+    assert result.validated_fragment_count == 0
+    assert result.module.locations == []
+    assert any(issue.code == "CODEX_CLI_STALLED" for issue in result.issues)
+    cached = [json.loads(path.read_text("utf-8")) for path in tmp_path.rglob("*.json")]
+    assert [payload["stage"] for payload in cached] == ["world"]
+
+
+def test_live_codex_budget_does_not_start_an_unfinishable_two_stage_chunk() -> None:
+    extractor = StagedSequenceExtractor([])
+    result = ModuleParser(extractor).parse(
+        ParseConfig(
+            source_text="test",
+            provider="codex",
+            model="gpt-test",
+            max_codex_attempts=1,
+        )
+    )
+
+    assert extractor.calls == []
+    assert result.extraction_attempts == 0
+    assert result.validated_fragment_count == 0
+    assert any(issue.code == "CODEX_CALL_LIMIT" for issue in result.issues)
+
+
+def test_first_chunk_probe_populates_the_same_stage_cache_used_by_full_parse(
+    tmp_path: Path,
+) -> None:
+    source = "x" * 8_000
+    base = ParseConfig(
+        source_text=source,
+        provider="codex",
+        model="gpt-test",
+        max_retries=0,
+        max_chunk_chars=6_000,
+        chunk_overlap_chars=250,
+        codex_timeout_fallback_chunk_chars=6_000,
+        codex_timeout_fallback_overlap_chars=250,
+        cache_dir=tmp_path,
+    )
+    probe_extractor = StagedSequenceExtractor(
+        [
+            (
+                "world",
+                CodexWorldFragmentV1(
+                    scenes=[SceneV1(id="scene:first", title="First chunk")]
+                ),
+            ),
+            ("evidence", CodexEvidenceFragmentV1()),
+        ]
+    )
+    probe = ModuleParser(probe_extractor).parse(
+        base.model_copy(update={"codex_probe_first_chunk": True})
+    )
+
+    assert probe_extractor.calls == ["world", "evidence"]
+    assert probe.validated_fragment_count == 1
+
+    full_extractor = StagedSequenceExtractor(
+        [
+            (
+                "world",
+                CodexWorldFragmentV1(
+                    scenes=[SceneV1(id="scene:second", title="Second chunk")]
+                ),
+            ),
+            ("evidence", CodexEvidenceFragmentV1()),
+        ]
+    )
+    full = ModuleParser(full_extractor).parse(base)
+
+    assert full_extractor.calls == ["world", "evidence"]
+    assert full.extraction_attempts == 2
+    assert full.validated_fragment_count == 2
+    assert {scene.title for scene in full.module.scenes} == {
+        "First chunk",
+        "Second chunk",
+    }
 
 
 def test_deterministic_mock_extracts_independent_handout_without_chapters() -> None:
@@ -96,6 +470,164 @@ def test_codex_chunk_limit_fails_before_any_provider_call() -> None:
 
     assert failure.value.code == "CODEX_INPUT_TOO_LARGE"
     assert extractor.calls == 0
+
+
+def test_first_codex_timeout_resegments_once_without_duplicate_fragments() -> None:
+    timeout = ProviderResponseError(
+        "slow structured output",
+        retryable=False,
+        code="CODEX_TIMEOUT",
+    )
+    fragments = [
+        ModuleFragmentV1(
+            scenes=[SceneV1(id=f"scene:{index}", title=f"Part {index}")]
+        )
+        for index in range(1, 4)
+    ]
+    extractor = SequenceExtractor([timeout, *fragments])
+    progress: list[tuple[str, dict[str, object] | None]] = []
+
+    result = ModuleParser(extractor).parse(
+        ParseConfig(
+            source_text="x" * 8_000,
+            provider="codex",
+            model="explicit-test-model",
+            max_chunk_chars=12_000,
+            chunk_overlap_chars=0,
+            codex_timeout_fallback_chunk_chars=6_000,
+            codex_timeout_fallback_overlap_chars=0,
+            max_retries=0,
+        ),
+        reporter=lambda stage, _fraction, _message, details: progress.append(
+            (stage, details)
+        ),
+    )
+
+    assert extractor.calls == 4
+    assert result.extraction_attempts == 4
+    assert result.status == "ready_for_review"
+    assert {scene.title for scene in result.module.scenes} == {
+        "Part 1",
+        "Part 2",
+        "Part 3",
+    }
+    assert any(issue.code == "CODEX_TIMEOUT_RESEGMENTED" for issue in result.issues)
+    assert any(
+        details and details.get("event") == "codex_timeout_resegmented"
+        for stage, details in progress
+        if stage == "extract"
+    )
+
+
+def test_workflow_forwards_codex_lifecycle_heartbeats_and_aggregates_usage() -> None:
+    class ObservableExtractor:
+        name = "observable-codex"
+        model = "gpt-test"
+        extraction_prompt_version = "observable-v1"
+        cacheable = False
+        max_output_tokens = 16_000
+
+        def __init__(self) -> None:
+            self.usage: dict[str, int] = {}
+
+        @staticmethod
+        def output_schema() -> dict[str, object]:
+            return ModuleFragmentV1.model_json_schema(mode="validation")
+
+        def extract(self, _chunk: object, **kwargs: object) -> ModuleFragmentV1:
+            progress = kwargs["progress"]
+            assert callable(progress)
+            progress("started", {"elapsed_seconds": 0.0})
+            progress("waiting", {"elapsed_seconds": 15.0})
+            self.usage = {
+                "completed_turns": 1,
+                "input_tokens": 100,
+                "output_tokens": 25,
+            }
+            progress("completed", {"elapsed_seconds": 16.0, "usage": self.usage})
+            return ModuleFragmentV1()
+
+        def take_last_usage(self) -> dict[str, int]:
+            usage = self.usage
+            self.usage = {}
+            return usage
+
+    reported: list[dict[str, object]] = []
+    result = ModuleParser(ObservableExtractor()).parse(
+        ParseConfig(source_text="# Test", provider="codex", model="gpt-test", mock=True),
+        reporter=lambda _stage, _fraction, _message, details: (
+            reported.append(details) if details else None
+        ),
+    )
+
+    assert [
+        details["event"]
+        for details in reported
+        if isinstance(details.get("event"), str)
+        and str(details["event"]).startswith("codex_")
+    ] == ["codex_started", "codex_waiting", "codex_completed"]
+    assert result.provider_usage.completed_turns == 1
+    assert result.provider_usage.input_tokens == 100
+    assert result.provider_usage.output_tokens == 25
+
+
+def test_codex_timeout_resume_reuses_split_plan_and_validated_child_cache(
+    tmp_path: Path,
+) -> None:
+    timeout = lambda: ProviderResponseError(
+        "slow structured output",
+        retryable=False,
+        code="CODEX_TIMEOUT",
+    )
+    config = ParseConfig(
+        source_text="x" * 8_000,
+        provider="codex",
+        model="explicit-test-model",
+        max_chunk_chars=12_000,
+        chunk_overlap_chars=0,
+        codex_timeout_fallback_chunk_chars=6_000,
+        codex_timeout_fallback_overlap_chars=0,
+        max_retries=0,
+        cache_dir=tmp_path,
+    )
+    first = SequenceExtractor(
+        [
+            timeout(),
+            ModuleFragmentV1(
+                scenes=[SceneV1(id="scene:one", title="Cached child")]
+            ),
+            timeout(),
+        ]
+    )
+
+    partial = ModuleParser(first).parse(config)
+
+    assert first.calls == 3
+    assert partial.status == "needs_review"
+    assert any(issue.code == "CODEX_TIMEOUT" for issue in partial.issues)
+    assert len(list((tmp_path / "plans").rglob("*.json"))) == 1
+
+    resumed = SequenceExtractor(
+        [
+            ModuleFragmentV1(
+                scenes=[SceneV1(id="scene:two", title="Resumed child 2")]
+            ),
+            ModuleFragmentV1(
+                scenes=[SceneV1(id="scene:three", title="Resumed child 3")]
+            ),
+        ]
+    )
+    result = ModuleParser(resumed).parse(config)
+
+    assert resumed.calls == 2
+    assert result.extraction_attempts == 2
+    assert result.status == "ready_for_review"
+    assert {scene.title for scene in result.module.scenes} == {
+        "Cached child",
+        "Resumed child 2",
+        "Resumed child 3",
+    }
+    assert any(issue.code == "CODEX_SPLIT_PLAN_RESTORED" for issue in result.issues)
 
 
 def test_codex_attempt_budget_returns_a_partial_draft_without_extra_calls() -> None:
@@ -378,7 +910,7 @@ def test_cache_identity_includes_extraction_prompt_version(tmp_path: Path) -> No
         "privacy-prompt-v1",
         "privacy-prompt-v2",
     }
-    assert CACHE_VERSION == "module-fragment-cache-v4-player-visible-descriptions"
+    assert CACHE_VERSION == "module-fragment-cache-v5-codex-staged"
 
 
 def test_player_description_schema_cache_version_cannot_reuse_v3_entries() -> None:

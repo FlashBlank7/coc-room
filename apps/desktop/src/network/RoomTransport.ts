@@ -1,5 +1,6 @@
 import {
   MAX_RELAY_FRAME_BYTES,
+  MAX_RELAY_MESSAGE_BYTES,
   SAFE_RELAY_FRAME_BYTES,
   RelayFragmentReassembler,
   createRelayFragments,
@@ -22,9 +23,14 @@ type ServerMessage = RelayServerEnvelopeV1;
 interface PeerLink {
   connection?: RTCPeerConnection;
   channel?: RTCDataChannel;
+  assetChannel?: RTCDataChannel;
   pendingCandidates: RTCIceCandidateInit[];
   path: ConnectionPath;
 }
+
+const DIRECT_MESSAGE_BYTES = 60 * 1024;
+const DIRECT_BUFFER_HIGH_WATER = 1024 * 1024;
+const DIRECT_BUFFER_LOW_WATER = 256 * 1024;
 
 export interface RoomTransportOptions {
   roomId: string;
@@ -79,6 +85,7 @@ export class RoomTransport {
     this.socket = undefined;
     for (const link of this.links.values()) {
       link.channel?.close();
+      link.assetChannel?.close();
       link.connection?.close();
     }
     this.links.clear();
@@ -94,9 +101,19 @@ export class RoomTransport {
   sendToPeer(peerId: string, message: RoomWireMessage): boolean {
     const link = this.links.get(peerId);
     const serialized = JSON.stringify(message);
-    if (link?.channel?.readyState === "open") {
+    const serializedBytes = frameByteLength(serialized);
+    if (serializedBytes > MAX_RELAY_MESSAGE_BYTES) {
+      this.onError?.("Peer message exceeds the 8 MiB transport limit");
+      return false;
+    }
+    const directChannel = isAssetMessage(message) ? link?.assetChannel : link?.channel;
+    if (
+      directChannel?.readyState === "open" &&
+      serializedBytes <= DIRECT_MESSAGE_BYTES &&
+      directChannel.bufferedAmount <= DIRECT_BUFFER_HIGH_WATER
+    ) {
       try {
-        link.channel.send(serialized);
+        directChannel.send(serialized);
         this.setPath(peerId, "direct");
         return true;
       } catch {
@@ -247,6 +264,8 @@ export class RoomTransport {
     if (initiator) {
       const channel = connection.createDataChannel("coc-room-events", { ordered: true });
       this.attachChannel(peerId, link, channel);
+      const assetChannel = connection.createDataChannel("coc-room-assets-v1", { ordered: false });
+      this.attachChannel(peerId, link, assetChannel);
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
       if (!this.sendSocket({ kind: "signal", targetPeerId: peerId, data: { type: "offer", description: offer } })) {
@@ -261,9 +280,18 @@ export class RoomTransport {
   }
 
   private attachChannel(peerId: string, link: PeerLink, channel: RTCDataChannel): void {
-    link.channel = channel;
-    channel.onopen = () => this.setPath(peerId, "direct");
+    const isAssetChannel = channel.label === "coc-room-assets-v1";
+    if (isAssetChannel) link.assetChannel = channel;
+    else link.channel = channel;
+    channel.bufferedAmountLowThreshold = DIRECT_BUFFER_LOW_WATER;
+    channel.onopen = () => {
+      if (!isAssetChannel) this.setPath(peerId, "direct");
+    };
     channel.onclose = () => {
+      if (isAssetChannel) {
+        if (link.assetChannel === channel) link.assetChannel = undefined;
+        return;
+      }
       if (link.channel !== channel) return;
       if (this.relayConnected && this.relayPeerIds.has(peerId)) {
         this.setPath(peerId, "relay");
@@ -520,4 +548,9 @@ export class RoomTransport {
 
 function frameByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function isAssetMessage(message: RoomWireMessage): boolean {
+  return message.kind === "asset.request" || message.kind === "asset.chunk" ||
+    message.kind === "asset.ack" || message.kind === "asset.cancel" || message.kind === "asset.error";
 }

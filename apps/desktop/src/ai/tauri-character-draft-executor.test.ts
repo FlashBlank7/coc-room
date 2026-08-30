@@ -1,0 +1,85 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { TauriCharacterDraftExecutor } from "./tauri-character-draft-executor";
+
+describe("TauriCharacterDraftExecutor", () => {
+  afterEach(() => Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__"));
+
+  it("sends only the closed character-draft request", async () => {
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const executor = new TauriCharacterDraftExecutor(async (command, args) => {
+      calls.push({ command, args });
+      return [{ type: "result", result: { character: { name: "余弦" } } }];
+    });
+
+    await expect(executor.executeCharacterDraft(input(), new AbortController().signal))
+      .resolves.toEqual({ name: "余弦" });
+    expect(calls[0]?.command).toBe("run_character_draft");
+    expect(Object.keys(calls[0]?.args.request as Record<string, unknown>)).toEqual([
+      "id", "action", "provider", "model", "prompt", "playerName", "ownerSeatId",
+    ]);
+    expect(JSON.stringify(calls[0])).not.toContain("path");
+    expect(JSON.stringify(calls[0])).not.toContain("tools");
+    expect(JSON.stringify(calls[0])).not.toContain("roomContext");
+  });
+
+  it("cancels the native process tree when the host coordinator aborts", async () => {
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    const commands: string[] = [];
+    const executor = new TauriCharacterDraftExecutor((command) => {
+      commands.push(command);
+      if (command === "cancel_character_draft") return Promise.resolve(true);
+      return new Promise(() => undefined);
+    });
+    const controller = new AbortController();
+    const operation = executor.executeCharacterDraft(input(), controller.signal);
+    controller.abort(new Error("stop"));
+
+    await expect(operation).rejects.toThrow("stop");
+    await Promise.resolve();
+    expect(commands).toEqual(["run_character_draft", "cancel_character_draft"]);
+  });
+
+  it("does not turn provider errors into a fabricated character", async () => {
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    const executor = new TauriCharacterDraftExecutor(async () => ([{
+      type: "error",
+      error: { message: "possibly sensitive upstream error" },
+    }]));
+    await expect(executor.executeCharacterDraft(input(), new AbortController().signal))
+      .rejects.toThrow("角色草稿提供者失败，未生成替代内容");
+  });
+
+  it("uses the fixed web-development action without exposing native controls", async () => {
+    Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
+    const invokeNative = vi.fn();
+    const runWeb = vi.fn(async () => ([{ type: "result", result: { character: { name: "余弦" } } }]));
+    const executor = new TauriCharacterDraftExecutor(invokeNative, runWeb);
+    const signal = new AbortController().signal;
+
+    await expect(executor.executeCharacterDraft(input(), signal)).resolves.toEqual({ name: "余弦" });
+    expect(invokeNative).not.toHaveBeenCalled();
+    expect(runWeb).toHaveBeenCalledWith("character-draft", {
+      id: input().jobId,
+      provider: "codex",
+      model: "",
+      prompt: input().prompt,
+      playerName: "玩家甲",
+      ownerSeatId: "seat-player",
+    }, signal);
+    expect(JSON.stringify(runWeb.mock.calls[0])).not.toMatch(/apiKey|path|command|tools|timeout|baseUrl|executable/i);
+  });
+});
+
+function input() {
+  return {
+    jobId: "00000000-0000-4000-8000-000000000101",
+    task: "character-draft" as const,
+    provider: "codex" as const,
+    model: "",
+    prompt: "一位研究民俗的年轻记者",
+    playerName: "玩家甲",
+    ownerSeatId: "seat-player",
+  };
+}

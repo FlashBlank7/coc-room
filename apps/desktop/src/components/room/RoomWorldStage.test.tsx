@@ -58,7 +58,8 @@ describe("RoomWorldStage", () => {
     expect(screen.queryByText("周启明")).toBeNull();
     expect(screen.queryByText("未在场人物")).toBeNull();
     expect(screen.getByTestId("location-backdrop").getAttribute("style")).toContain("gradient");
-    expect((screen.getByRole("button", { name: /林若岚 已在此地/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /林若岚 已在观止剧场/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("林若岚 正在这里。");
   });
 
   it("lets a player inspect a public location and enter it with their own character", () => {
@@ -81,8 +82,10 @@ describe("RoomWorldStage", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看地点：蝶园" }));
     expect(onSelectLocation).toHaveBeenCalledWith("location-garden");
     expect(screen.getByRole("heading", { name: "蝶园" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("林若岚 目前在观止剧场；你正在查看蝶园");
+    expect(screen.getByText(/房间里的所有人都会看到林若岚来到了蝶园/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "让 林若岚 进入此地" }));
+    fireEvent.click(screen.getByRole("button", { name: "林若岚前往蝶园" }));
     expect(onEnterLocation).toHaveBeenCalledWith(own, locations[1]);
   });
 
@@ -106,7 +109,7 @@ describe("RoomWorldStage", () => {
     fireEvent.change(screen.getByLabelText("选择进入地点的调查员"), {
       target: { value: second.id },
     });
-    fireEvent.click(screen.getByRole("button", { name: "让 许文彬 进入此地" }));
+    fireEvent.click(screen.getByRole("button", { name: "许文彬前往蝶园" }));
     expect(onEnterLocation).toHaveBeenCalledWith(second, locations[1]);
   });
 

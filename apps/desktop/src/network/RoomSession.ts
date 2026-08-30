@@ -49,10 +49,27 @@ export interface RoomSessionOptions {
 
 const MAX_ACTIVE_SYNC_TRANSFERS = 2;
 const SYNC_TRANSFER_TTL_MS = 2 * 60 * 1_000;
+const MAX_SYNC_PAGE_EVENTS = 500;
+const MAX_SYNC_PAGE_BYTES = 4 * 1024 * 1024;
+const GAP_REPAIR_DEBOUNCE_MS = 25;
 
 interface ActiveSyncTransfer {
   readonly collector: SyncChunkCollector;
   lastUpdatedAt: number;
+}
+
+interface PendingHostSync {
+  readonly requestId: string;
+  readonly pages: readonly (readonly RoomEventV1[])[];
+  nextPageIndex: number;
+  lastSentPageIndex?: number;
+  lastUpdatedAt: number;
+}
+
+interface PendingCommandConfirmation {
+  readonly resolve: () => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: ReturnType<typeof globalThis.setTimeout>;
 }
 
 export class RoomSession {
@@ -63,6 +80,10 @@ export class RoomSession {
   private readonly syncCollectors = new Map<string, ActiveSyncTransfer>();
   private readonly participants = new Map<string, ParticipantV1>();
   private readonly pendingCommands = new Map<string, RoomCommandV1>();
+  private readonly pendingCommandConfirmations = new Map<string, PendingCommandConfirmation>();
+  private readonly pendingHostSyncs = new Map<string, PendingHostSync>();
+  private activeSyncRequestId?: string;
+  private gapRepairTimer?: ReturnType<typeof globalThis.setTimeout>;
   private hostPath?: ConnectionPath;
   private commandCommitTail: Promise<void> = Promise.resolve();
 
@@ -111,12 +132,7 @@ export class RoomSession {
       }
       this.onPresence?.(canonicalParticipants);
       if (!this.isHost && canonicalParticipants.some((peer) => peer.peerId === options.room.hostPeerId)) {
-        const syncSent = this.transport.sendToHost({
-          kind: "sync.request",
-          requestId: globalThis.crypto.randomUUID(),
-          lastSequence: this.replica.lastContiguousSequence,
-        });
-        if (!syncSent) this.onError?.("中继尚未恢复，暂时无法请求历史补发");
+        this.requestSync(true);
         this.resendPendingCommands();
       }
     };
@@ -149,6 +165,16 @@ export class RoomSession {
   stop(): void {
     this.transport.stop();
     this.syncCollectors.clear();
+    this.pendingHostSyncs.clear();
+    this.activeSyncRequestId = undefined;
+    if (this.gapRepairTimer !== undefined) globalThis.clearTimeout(this.gapRepairTimer);
+    this.gapRepairTimer = undefined;
+    for (const [commandId, pending] of this.pendingCommandConfirmations) {
+      globalThis.clearTimeout(pending.timer);
+      pending.reject(new Error("房间连接已关闭，修改没有获得房主确认"));
+      this.pendingCommandConfirmations.delete(commandId);
+      this.pendingCommands.delete(commandId);
+    }
   }
 
   async submit<Type extends RoomCommandV1["type"]>(
@@ -178,6 +204,39 @@ export class RoomSession {
     }
   }
 
+  /**
+   * Legacy V1 compatibility path for editors that must not clear a local
+   * recovery copy until the authoritative event comes back from the host.
+   */
+  async submitConfirmed<Type extends RoomCommandV1["type"]>(
+    type: Type,
+    payload: CommandOfType<Type>["payload"],
+    commandId = globalThis.crypto.randomUUID(),
+    timeoutMs = 30_000,
+  ): Promise<void> {
+    if (this.isHost) return this.submit(type, payload, commandId);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
+      throw new RangeError("命令确认超时必须在 1 到 120 秒之间");
+    }
+    if (this.pendingCommandConfirmations.has(commandId)) throw new Error("命令 ID 正在等待确认");
+    await new Promise<void>((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.pendingCommandConfirmations.delete(commandId);
+        this.pendingCommands.delete(commandId);
+        reject(new Error("等待房主确认超时，修改仍保留在本机草稿中"));
+      }, timeoutMs);
+      this.pendingCommandConfirmations.set(commandId, { resolve, reject, timer });
+      void this.submit(type, payload, commandId).catch((cause) => {
+        const pending = this.pendingCommandConfirmations.get(commandId);
+        if (!pending) return;
+        globalThis.clearTimeout(pending.timer);
+        this.pendingCommandConfirmations.delete(commandId);
+        this.pendingCommands.delete(commandId);
+        pending.reject(cause instanceof Error ? cause : new Error(String(cause)));
+      });
+    });
+  }
+
   private async handleWireMessage(fromPeerId: string, wire: RoomWireMessage): Promise<void> {
     switch (wire.kind) {
       case "command": {
@@ -197,6 +256,7 @@ export class RoomSession {
       }
       case "sync.request": {
         if (!this.isHost) return;
+        if (!this.participants.has(fromPeerId)) throw new Error("同步请求来自未认证的房间成员");
         const request = syncRequestSchema.parse({
           protocolVersion: 1,
           type: "sync.request",
@@ -205,11 +265,14 @@ export class RoomSession {
           lastSequence: wire.lastSequence,
         });
         const events = await this.options.repository.listEvents(this.options.room.id, request.lastSequence);
-        const chunks = createSyncChunks(events, {
-          roomId: this.options.room.id,
+        const state: PendingHostSync = {
           requestId: request.requestId,
-        });
-        for (const chunk of chunks) this.transport.sendToPeer(fromPeerId, { kind: "sync.chunk", chunk });
+          pages: paginateSyncEvents(events),
+          nextPageIndex: 0,
+          lastUpdatedAt: Date.now(),
+        };
+        this.pendingHostSyncs.set(hostSyncKey(fromPeerId, request.requestId), state);
+        this.sendNextSyncPage(fromPeerId, state);
         break;
       }
       case "sync.chunk": {
@@ -237,6 +300,30 @@ export class RoomSession {
         if (events) {
           for (const event of events) await this.acceptEvent(event);
           this.syncCollectors.delete(chunk.transferId);
+          this.transport.sendToHost({
+            kind: "sync.ack",
+            requestId: chunk.requestId,
+            transferId: chunk.transferId,
+            pageIndex: chunk.pageIndex,
+            lastSequence: this.replica.lastContiguousSequence,
+          });
+          if (chunk.pageIndex + 1 >= chunk.pageCount && this.activeSyncRequestId === chunk.requestId) {
+            this.activeSyncRequestId = undefined;
+            if (this.replica.missingSequences().length > 0) this.scheduleGapRepair();
+          }
+        }
+        break;
+      }
+      case "sync.ack": {
+        if (!this.isHost) return;
+        const key = hostSyncKey(fromPeerId, wire.requestId);
+        const state = this.pendingHostSyncs.get(key);
+        if (state === undefined || state.lastSentPageIndex !== wire.pageIndex) return;
+        state.lastUpdatedAt = Date.now();
+        if (state.nextPageIndex >= state.pages.length) {
+          this.pendingHostSyncs.delete(key);
+        } else {
+          this.sendNextSyncPage(fromPeerId, state);
         }
         break;
       }
@@ -274,9 +361,18 @@ export class RoomSession {
     try {
       await this.options.repository.saveEvent(event);
       const result = this.replica.apply(event);
-      if (event.causedByCommandId) this.pendingCommands.delete(event.causedByCommandId);
+      if (event.causedByCommandId) {
+        this.pendingCommands.delete(event.causedByCommandId);
+        const pending = this.pendingCommandConfirmations.get(event.causedByCommandId);
+        if (pending) {
+          globalThis.clearTimeout(pending.timer);
+          this.pendingCommandConfirmations.delete(event.causedByCommandId);
+          pending.resolve();
+        }
+      }
       if (result.status === "applied") {
         this.onEvents?.(this.replica.orderedEvents());
+        if (!this.isHost && this.replica.missingSequences().length > 0) this.scheduleGapRepair();
       }
     } catch (error) {
       try {
@@ -317,5 +413,81 @@ export class RoomSession {
         this.syncCollectors.delete(transferId);
       }
     }
+    for (const [key, transfer] of this.pendingHostSyncs) {
+      if (now - transfer.lastUpdatedAt >= SYNC_TRANSFER_TTL_MS) {
+        this.pendingHostSyncs.delete(key);
+      }
+    }
   }
+
+  private requestSync(force = false): void {
+    if (this.isHost || (!force && this.activeSyncRequestId !== undefined)) return;
+    const requestId = globalThis.crypto.randomUUID();
+    this.activeSyncRequestId = requestId;
+    const sent = this.transport.sendToHost({
+      kind: "sync.request",
+      requestId,
+      lastSequence: this.replica.lastContiguousSequence,
+    });
+    if (!sent) {
+      this.activeSyncRequestId = undefined;
+      this.onError?.("中继尚未恢复，暂时无法请求历史补发");
+    }
+  }
+
+  private scheduleGapRepair(): void {
+    if (this.isHost || this.activeSyncRequestId !== undefined || this.gapRepairTimer !== undefined) return;
+    this.gapRepairTimer = globalThis.setTimeout(() => {
+      this.gapRepairTimer = undefined;
+      this.requestSync();
+    }, GAP_REPAIR_DEBOUNCE_MS);
+  }
+
+  private sendNextSyncPage(peerId: string, state: PendingHostSync): void {
+    const pageIndex = state.nextPageIndex;
+    const events = state.pages[pageIndex];
+    if (events === undefined) return;
+    const chunks = createSyncChunks(events, {
+      roomId: this.options.room.id,
+      requestId: state.requestId,
+      pageIndex,
+      pageCount: state.pages.length,
+    });
+    let sent = true;
+    for (const chunk of chunks) {
+      if (!this.transport.sendToPeer(peerId, { kind: "sync.chunk", chunk })) {
+        sent = false;
+        break;
+      }
+    }
+    state.lastUpdatedAt = Date.now();
+    if (!sent) {
+      this.onError?.(`暂时无法向 ${peerId} 发送同步页；对方重连后会重新请求`);
+      return;
+    }
+    state.lastSentPageIndex = pageIndex;
+    state.nextPageIndex = pageIndex + 1;
+  }
+}
+
+function hostSyncKey(peerId: string, requestId: string): string {
+  return `${peerId}:${requestId}`;
+}
+
+function paginateSyncEvents(events: readonly RoomEventV1[]): readonly (readonly RoomEventV1[])[] {
+  const pages: RoomEventV1[][] = [];
+  let page: RoomEventV1[] = [];
+  let pageBytes = 2;
+  for (const event of events) {
+    const eventBytes = new TextEncoder().encode(JSON.stringify(event)).byteLength + (page.length === 0 ? 0 : 1);
+    if (page.length > 0 && (page.length >= MAX_SYNC_PAGE_EVENTS || pageBytes + eventBytes > MAX_SYNC_PAGE_BYTES)) {
+      pages.push(page);
+      page = [];
+      pageBytes = 2;
+    }
+    page.push(event);
+    pageBytes += eventBytes;
+  }
+  if (page.length > 0 || pages.length === 0) pages.push(page);
+  return pages;
 }

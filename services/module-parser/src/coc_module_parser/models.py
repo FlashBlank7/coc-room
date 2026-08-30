@@ -371,6 +371,28 @@ class ModuleFragmentV1(StrictModel):
     _extensions = field_validator("extensions")(_validate_extensions)
 
 
+class CodexWorldFragmentV1(StrictModel):
+    """Strict first-stage Codex output for world and narrative entities."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    metadata: FragmentMetadataV1 = Field(default_factory=FragmentMetadataV1)
+    overview_notes: list[str] = Field(default_factory=list)
+    scenes: list[SceneV1] = Field(default_factory=list)
+    locations: list[LocationV1] = Field(default_factory=list)
+    npcs: list[NPCV1] = Field(default_factory=list)
+
+
+class CodexEvidenceFragmentV1(StrictModel):
+    """Strict second-stage Codex output for playable evidence and relationships."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    clues: list[ClueV1] = Field(default_factory=list)
+    handouts: list[HandoutV1] = Field(default_factory=list, max_length=5_000)
+    suggested_checks: list[SuggestedCheckV1] = Field(default_factory=list)
+    keeper_notes: list[KeeperNoteV1] = Field(default_factory=list)
+    relations: list[EntityRelationV1] = Field(default_factory=list)
+
+
 class IssueSeverity(str, Enum):
     INFO = "info"
     WARNING = "warning"
@@ -388,11 +410,24 @@ class ParseIssueV1(StrictModel):
     source_ref: SourceRefV1 | None = None
 
 
+class ProviderUsageV1(StrictModel):
+    """Provider token accounting observed from completed machine-readable turns."""
+
+    completed_turns: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
+    cache_write_input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_output_tokens: int = Field(default=0, ge=0)
+
+
 class ParseResultV1(StrictModel):
     status: Literal["ready_for_review", "needs_review"]
     module: ModulePackageV1
     issues: list[ParseIssueV1] = Field(default_factory=list)
     extraction_attempts: int = Field(ge=0)
+    validated_fragment_count: int = Field(default=0, ge=0)
+    provider_usage: ProviderUsageV1 = Field(default_factory=ProviderUsageV1)
 
 
 class ParseConfig(StrictModel):
@@ -412,6 +447,16 @@ class ParseConfig(StrictModel):
     max_output_tokens: int = Field(default=16_000, ge=1_000, le=64_000)
     max_codex_chunks: int = Field(default=64, ge=1, le=128)
     max_codex_attempts: int = Field(default=96, ge=1, le=192)
+    codex_timeout_seconds: float = Field(default=900.0, ge=30.0, le=1_800.0)
+    codex_heartbeat_seconds: float = Field(default=15.0, ge=5.0, le=60.0)
+    codex_auto_shrink_on_timeout: bool = True
+    codex_timeout_fallback_chunk_chars: int = Field(
+        default=6_000, ge=1_000, le=50_000
+    )
+    codex_timeout_fallback_overlap_chars: int = Field(
+        default=250, ge=0, le=10_000
+    )
+    codex_probe_first_chunk: bool = False
     cache_dir: Path | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -419,6 +464,14 @@ class ParseConfig(StrictModel):
     def validate_chunking(self) -> ParseConfig:
         if self.chunk_overlap_chars >= self.max_chunk_chars:
             raise ValueError("chunk_overlap_chars must be smaller than max_chunk_chars")
+        if (
+            self.codex_timeout_fallback_overlap_chars
+            >= self.codex_timeout_fallback_chunk_chars
+        ):
+            raise ValueError(
+                "codex_timeout_fallback_overlap_chars must be smaller than "
+                "codex_timeout_fallback_chunk_chars"
+            )
         if not self.mock and self.provider == "deepseek" and self.api_key is None:
             raise ValueError("api_key is required for the DeepSeek provider")
         if not self.mock and self.provider == "deepseek" and not self.model.strip():

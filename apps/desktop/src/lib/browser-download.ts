@@ -4,7 +4,18 @@
  * some browser engines and can produce an empty download.
  */
 export function downloadTextInBrowser(name: string, content: string, type: string): void {
-  const url = URL.createObjectURL(new Blob([content], { type }));
+  downloadBlobInBrowser(name, new Blob([content], { type }));
+}
+
+export function downloadBytesInBrowser(name: string, content: Uint8Array, type: string): void {
+  // Copy into an ArrayBuffer owned by this Blob. Some DOM type definitions do
+  // not accept a Uint8Array backed by SharedArrayBuffer even though browsers do.
+  const bytes = new Uint8Array(content);
+  downloadBlobInBrowser(name, new Blob([bytes.buffer], { type }));
+}
+
+function downloadBlobInBrowser(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
   const revoke = URL.revokeObjectURL.bind(URL);
   const anchor = document.createElement("a");
   anchor.href = url;

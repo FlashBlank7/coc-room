@@ -17,6 +17,9 @@ import {
 
 import { cn } from "../../lib/cn";
 import { getModuleParserProvenance } from "../../lib/module-parser";
+import { buildPreparationReview } from "./module-entity-browser-helpers";
+
+export { buildPreparationReview } from "./module-entity-browser-helpers";
 
 type Category =
   | "overview"
@@ -101,11 +104,9 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
       <header className="rounded-xl border border-amber-900/50 bg-amber-950/20 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-[.25em] text-brass">Module contents</p>
+            <p className="text-xs uppercase tracking-[.25em] text-brass">KP 备团资料</p>
             <h2 className="mt-1 font-serif text-2xl text-ink">{modulePackage.metadata.title}</h2>
-            <p className="mt-1 text-xs text-zinc-500">
-              修订 {modulePackage.revision} · {modulePackage.metadata.language}
-            </p>
+            <p className="mt-1 text-xs text-zinc-500">先确认开场、关键人物和核心线索，再进入房间开团。</p>
           </div>
           <KeeperBadge label="守秘人视图 · 请勿向玩家共享屏幕" />
         </div>
@@ -148,7 +149,7 @@ export function ModuleEntityBrowser({ modulePackage }: { modulePackage: ModulePa
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索名称、正文、ID 或原文摘要"
+            placeholder="搜索名称、正文或原文摘要"
             className="h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 pl-9 pr-3 text-sm text-ink outline-none transition placeholder:text-zinc-600 focus:border-brass"
           />
         </label>
@@ -288,6 +289,7 @@ function OverviewCards({
   onSelectEntity: (category: Category, entityId: string) => void;
 }) {
   const parserProvenance = getModuleParserProvenance(modulePackage);
+  const preparationReview = buildPreparationReview(modulePackage);
   const stats = [
     ["场景", modulePackage.scenes.length],
     ["地点", modulePackage.locations.length],
@@ -314,6 +316,29 @@ function OverviewCards({
 
   return (
     <>
+      <article aria-label="开团前检查" className="rounded-xl border border-brass/40 bg-brass/5 p-5">
+        <SectionHeading icon={<ShieldAlert className="h-4 w-4" />} title="开团前检查" />
+        <p className="mt-2 text-sm leading-6 text-zinc-400">AI 只负责整理，不知道你准备怎样主持。开团前请快速确认下面三件事；黄色提醒不会阻止保存。</p>
+        <div className="mt-4 grid gap-2">
+          {preparationReview.map((item) => (
+            <div key={item.label} className={cn(
+              "flex items-start gap-3 rounded-lg border px-3 py-2.5",
+              item.ready ? "border-emerald-900/50 bg-emerald-950/15" : "border-amber-900/60 bg-amber-950/20",
+            )}>
+              <span className={cn(
+                "mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-xs font-bold",
+                item.ready ? "bg-emerald-900/70 text-emerald-200" : "bg-amber-900/70 text-amber-200",
+              )}>{item.ready ? "✓" : "!"}</span>
+              <div>
+                <p className={cn("text-sm font-medium", item.ready ? "text-emerald-200" : "text-amber-200")}>{item.label}</p>
+                <p className="mt-0.5 text-xs leading-5 text-zinc-400">{item.message}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-xs text-zinc-500">发现遗漏时，点击上方“检查并修正”。保存前不必把每一项都补满，只要足够支持你的开场即可。</p>
+      </article>
+
       <article className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
         <div className="flex flex-wrap gap-2">
           {stats.map(([label, value]) => (
@@ -340,9 +365,7 @@ function OverviewCards({
         )}
         <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
           <MetadataRow label="作者" value={modulePackage.metadata.authors.join("、") || "未注明"} />
-          <MetadataRow label="模块 ID" value={modulePackage.moduleId} code />
-          <MetadataRow label="建立时间" value={formatDate(modulePackage.metadata.createdAt)} />
-          <MetadataRow label="更新时间" value={formatDate(modulePackage.metadata.updatedAt)} />
+          <MetadataRow label="来源" value={modulePackage.metadata.source || modulePackage.sourceDocuments.map((source) => source.name).join("、") || "未注明"} />
         </dl>
       </article>
 
@@ -389,22 +412,30 @@ function OverviewCards({
         </div>
       </article>
 
-      <article aria-label="解析来源" className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
-        <SectionHeading icon={<Sparkles className="h-4 w-4" />} title="解析来源" />
-        {!parserProvenance ? (
-          <p className="mt-3 text-sm text-zinc-500">来源未记录</p>
-        ) : (
-          <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-            <MetadataRow label="解析服务" value={formatParserProvider(parserProvenance.provider)} />
-            <MetadataRow label="模型" value={parserProvenance.model} code />
-            <MetadataRow label="解析时间" value={formatDate(parserProvenance.parsedAt)} />
-            <MetadataRow label="状态" value={formatParserStatus(parserProvenance.status)} />
-            <MetadataRow label="调用次数" value={parserProvenance.usage.calls?.toString() ?? "未记录"} />
-            <MetadataRow label="原始来源" value={parserProvenance.sourceName} />
-            <MetadataRow label="解析问题" value={`${parserProvenance.issues.length} 条`} />
-          </dl>
-        )}
-      </article>
+      <details aria-label="整理记录（高级）" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+        <summary className="flex cursor-pointer items-center gap-2 text-xs font-medium text-zinc-500 hover:text-zinc-300">
+          <Sparkles className="h-4 w-4" />整理记录与技术信息
+        </summary>
+        <dl className="mt-4 grid gap-3 border-t border-zinc-800 pt-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
+          <MetadataRow label="内部编号" value={modulePackage.moduleId} code />
+          <MetadataRow label="历史版本" value={`第 ${modulePackage.revision} 版`} />
+          <MetadataRow label="建立时间" value={formatDate(modulePackage.metadata.createdAt)} />
+          <MetadataRow label="更新时间" value={formatDate(modulePackage.metadata.updatedAt)} />
+          {!parserProvenance ? (
+            <MetadataRow label="AI 整理记录" value="旧模组或手工导入，未留下记录" />
+          ) : (
+            <>
+              <MetadataRow label="整理服务" value={formatParserProvider(parserProvenance.provider)} />
+              <MetadataRow label="模型" value={parserProvenance.model} code />
+              <MetadataRow label="整理时间" value={formatDate(parserProvenance.parsedAt)} />
+              <MetadataRow label="检查状态" value={formatParserStatus(parserProvenance.status)} />
+              <MetadataRow label="调用次数" value={parserProvenance.usage.calls?.toString() ?? "未记录"} />
+              <MetadataRow label="原始来源" value={parserProvenance.sourceName} />
+              <MetadataRow label="待留意事项" value={`${parserProvenance.issues.length} 条`} />
+            </>
+          )}
+        </dl>
+      </details>
 
       {modulePackage.chapters.length > 0 && (
         <article className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
@@ -414,31 +445,30 @@ function OverviewCards({
               .sort((left, right) => left.order - right.order)
               .map((chapter) => (
                 <div key={chapter.id} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <h4 className="font-medium text-ink">{chapter.title}</h4>
-                    <EntityId>{chapter.id}</EntityId>
-                  </div>
+                  <h4 className="font-medium text-ink">{chapter.title}</h4>
                   {chapter.notes && <RichText className="mt-2 text-xs">{chapter.notes}</RichText>}
-                  <RelatedIds label="场景 ID" ids={chapter.sceneIds} entityNames={entityNames} />
+                  <RelatedIds label="包含场景" ids={chapter.sceneIds} entityNames={entityNames} />
                 </div>
               ))}
           </div>
         </article>
       )}
 
-      <article className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-5">
-        <SectionHeading icon={<FileText className="h-4 w-4" />} title="来源文档" />
-        <div className="mt-3 grid gap-2">
+      <details className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+        <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-300">查看原始文件记录</summary>
+        <div className="mt-3 grid gap-2 border-t border-zinc-800 pt-3">
           {modulePackage.sourceDocuments.length === 0 && <p className="text-sm text-zinc-500">没有来源文档记录。</p>}
           {modulePackage.sourceDocuments.map((source) => (
             <div key={source.id} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-sm">
               <div className="font-medium text-zinc-200">{source.name}</div>
-              <div className="mt-1 break-all font-mono text-[11px] text-zinc-500">{source.id}</div>
-              <div className="mt-1 text-xs text-zinc-500">{source.mediaType}</div>
+              <details className="mt-2 text-[11px] text-zinc-600">
+                <summary className="cursor-pointer">技术定位</summary>
+                <div className="mt-1 break-all font-mono">{source.id} · {source.mediaType}</div>
+              </details>
             </div>
           ))}
         </div>
-      </article>
+      </details>
     </>
   );
 }
@@ -457,11 +487,11 @@ function SceneCard({
       <RichText>{scene.description}</RichText>
       {scene.synopsis && <DetailBlock label="场景摘要" text={scene.synopsis} />}
       <div className="grid gap-2 sm:grid-cols-2">
-        <RelatedIds label="地点 ID" ids={scene.locationIds} entityNames={entityNames} />
-        <RelatedIds label="NPC ID" ids={scene.npcIds} entityNames={entityNames} />
-        <RelatedIds label="线索 ID" ids={scene.clueIds} entityNames={entityNames} />
-        <RelatedIds label="手记 ID" ids={scene.handoutIds} entityNames={entityNames} />
-        <RelatedIds label="检定 ID" ids={scene.suggestedCheckIds} entityNames={entityNames} />
+        <RelatedIds label="发生地点" ids={scene.locationIds} entityNames={entityNames} />
+        <RelatedIds label="出场人物" ids={scene.npcIds} entityNames={entityNames} />
+        <RelatedIds label="可能发现的线索" ids={scene.clueIds} entityNames={entityNames} />
+        <RelatedIds label="可能展示的手记" ids={scene.handoutIds} entityNames={entityNames} />
+        <RelatedIds label="可能要求的检定" ids={scene.suggestedCheckIds} entityNames={entityNames} />
       </div>
       {scene.keeperNotes && (
         <SecretBlock label="场景主持人笔记">
@@ -485,7 +515,7 @@ function LocationCard({
       <SecretBlock label="守秘人地点说明">
         <RichText>{location.description}</RichText>
       </SecretBlock>
-      <PlayerVisibleBlock text={location.playerDescription} empty="尚未填写地点的玩家可见说明；填写并保存新修订后才能发布。" />
+      <PlayerVisibleBlock text={location.playerDescription} empty="尚未填写地点的玩家可见说明；点击“检查并修正”，补充并保存后才能一键公开。" />
       {location.aliases.length > 0 && <TagList label="别名" values={location.aliases} />}
       <SourceReferences references={location.sourceRefs} sourceNames={sourceNames} />
     </EntityCard>
@@ -498,7 +528,7 @@ function NpcCard({ npc, sourceNames }: { npc: ModuleNpc; sourceNames: ReadonlyMa
       <SecretBlock label="守秘人 NPC 说明">
         <RichText>{npc.description}</RichText>
       </SecretBlock>
-      <PlayerVisibleBlock text={npc.playerDescription} empty="尚未填写 NPC 的玩家可见说明；填写并保存新修订后才能发布。" />
+      <PlayerVisibleBlock text={npc.playerDescription} empty="尚未填写人物的玩家可见说明；点击“检查并修正”，补充并保存后才能一键公开。" />
       {npc.motivation && <DetailBlock label="动机" text={npc.motivation} secret />}
       {npc.traits.length > 0 && <TagList label="特征" values={npc.traits} />}
       {npc.character && (
@@ -523,7 +553,7 @@ function PlayerVisibleBlock({ text, empty }: { text?: string; empty: string }) {
     <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3">
       <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-emerald-300">
         <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-        玩家可见快照
+        玩家会看到
       </div>
       {text?.trim() ? <RichText>{text}</RichText> : <p className="text-xs leading-5 text-zinc-500">{empty}</p>}
     </div>
@@ -615,7 +645,7 @@ function KeeperNoteCard({
       <SecretBlock label="主持人笔记">
         <RichText>{note.content}</RichText>
       </SecretBlock>
-      <RelatedIds label="关联实体 ID" ids={note.relatedEntityIds} entityNames={entityNames} />
+      <RelatedIds label="关联资料" ids={note.relatedEntityIds} entityNames={entityNames} />
       <SourceReferences references={note.sourceRefs} sourceNames={sourceNames} />
     </EntityCard>
   );
@@ -633,9 +663,9 @@ function RelationCard({
   return (
     <EntityCard id={relation.id} title={relation.kind} keeper>
       <div className="grid gap-2 sm:grid-cols-[1fr_auto_1fr] sm:items-center">
-        <RelationEndpoint label="来源实体 ID" id={relation.fromEntityId} entityNames={entityNames} />
+        <RelationEndpoint label="关系起点" id={relation.fromEntityId} entityNames={entityNames} />
         <Waypoints className="hidden h-4 w-4 text-brass sm:block" aria-hidden="true" />
-        <RelationEndpoint label="目标实体 ID" id={relation.toEntityId} entityNames={entityNames} />
+        <RelationEndpoint label="关系终点" id={relation.toEntityId} entityNames={entityNames} />
       </div>
       {relation.description && <DetailBlock label="关系说明" text={relation.description} />}
       <SourceReferences references={relation.sourceRefs} sourceNames={sourceNames} />
@@ -672,7 +702,6 @@ function EntityCard({
             {headerExtra}
           </div>
           {subtitle && <p className="mt-1 text-xs text-brass">{subtitle}</p>}
-          <div className="mt-2"><EntityId>{id}</EntityId></div>
         </div>
         {keeper && <KeeperBadge />}
       </header>
@@ -688,10 +717,6 @@ function KeeperBadge({ label = "守秘人内容" }: { label?: string }) {
       {label}
     </span>
   );
-}
-
-function EntityId({ children }: { children: string }) {
-  return <code className="break-all rounded bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-500">{children}</code>;
 }
 
 function RelatedIds({
@@ -725,17 +750,17 @@ function SourceReferences({
   return (
     <details className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
       <summary className="cursor-pointer text-xs font-medium text-zinc-400">
-        原文定位 · {references.length} 处
+        核对原文 · {references.length} 处
       </summary>
       <div className="mt-2 grid gap-2">
         {references.map((reference, index) => (
           <div key={`${reference.sourceId}-${reference.start}-${reference.end}-${index}`} className="border-l-2 border-brass/40 pl-3">
-            <div className="text-[11px] text-zinc-400">
-              <span className="text-zinc-300">{sourceNames.get(reference.sourceId) ?? "未知来源"}</span>
-              <span> · 字符 {reference.start}–{reference.end}</span>
-            </div>
-            <div className="mt-0.5 break-all font-mono text-[10px] text-zinc-600">{reference.sourceId}</div>
+            <div className="text-[11px] text-zinc-300">{sourceNames.get(reference.sourceId) ?? "未知来源"}</div>
             {reference.excerpt && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-500">{reference.excerpt}</p>}
+            <details className="mt-1 text-[10px] text-zinc-600">
+              <summary className="cursor-pointer">技术定位</summary>
+              <div className="mt-0.5 break-all font-mono">{reference.sourceId} · 字符 {reference.start}–{reference.end}</div>
+            </details>
           </div>
         ))}
       </div>
@@ -829,9 +854,11 @@ function RelationEndpoint({
 function EntityReference({ id, entityNames }: { id: string; entityNames: ReadonlyMap<string, string> }) {
   const name = entityNames.get(id);
   return (
-    <span className="inline-flex max-w-full flex-col gap-1 rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1.5">
-      {name && <span className="text-xs text-zinc-300">{name}</span>}
-      <code className="break-all text-[10px] text-zinc-500">{id}</code>
+    <span title={id} className={cn(
+      "inline-flex max-w-full rounded-md border px-2 py-1.5 text-xs",
+      name ? "border-zinc-800 bg-zinc-950/60 text-zinc-300" : "border-amber-900/60 bg-amber-950/20 text-amber-300",
+    )}>
+      {name ?? "找不到对应资料（请检查）"}
     </span>
   );
 }
@@ -860,7 +887,7 @@ function RichText({ children, className }: { children: string; className?: strin
 function EmptyResult({ query }: { query: string }) {
   return (
     <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-10 text-center text-sm text-zinc-500">
-      {query ? `没有与“${query}”匹配的内容。` : "这个分类暂时没有内容。"}
+      {query ? `没有与“${query}”匹配的内容。` : "AI 没有整理出这个分类的内容。如果原文里应该有，请点击“检查并修正”补上。"}
     </div>
   );
 }

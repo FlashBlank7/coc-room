@@ -316,6 +316,53 @@ describe("RoomSession", () => {
     expect(transport.sentToHost.map((message) => message.kind)).toEqual(["sync.request"]);
   });
 
+  it("keeps a confirmed editor submission pending until the authoritative event returns", async () => {
+    const repository = new MemoryRepository();
+    const transport = new FakeTransport();
+    const session = createSession("player", repository, transport);
+    await session.start();
+    transport.emitPresence([HOST, PLAYER]);
+
+    let settled = false;
+    const confirmation = session.submitConfirmed("chat.send", { message: "keep local draft", format: "plain" })
+      .then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    const sent = transport.sentToHost.find((message) => message.kind === "command");
+    if (!sent || sent.kind !== "command") throw new Error("expected a player command");
+
+    const event = roomEventSchema.parse({
+      protocolVersion: 1,
+      roomId: ROOM_ID,
+      eventId: crypto.randomUUID(),
+      sequence: 1,
+      sender: PLAYER,
+      occurredAt: "2026-08-30T00:00:00.000Z",
+      causedByCommandId: sent.command.commandId,
+      type: "chat.message",
+      payload: sent.command.payload,
+    });
+    await transport.deliver(HOST_PEER_ID, { kind: "event", event });
+    await confirmation;
+
+    expect(settled).toBe(true);
+    expect(await repository.listEvents(ROOM_ID)).toEqual([event]);
+  });
+
+  it("rejects an unconfirmed editor submission when the session closes", async () => {
+    const repository = new MemoryRepository();
+    const transport = new FakeTransport();
+    const session = createSession("player", repository, transport);
+    await session.start();
+    transport.emitPresence([HOST, PLAYER]);
+
+    const confirmation = session.submitConfirmed("chat.send", { message: "must remain recoverable", format: "plain" });
+    await Promise.resolve();
+    session.stop();
+
+    await expect(confirmation).rejects.toThrow("没有获得房主确认");
+  });
+
   it("rejects player commands while the host is absent and resumes after presence returns", async () => {
     const repository = new MemoryRepository();
     const transport = new FakeTransport();
@@ -375,6 +422,82 @@ describe("RoomSession", () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it("does not project past a sequence gap and immediately schedules one repair request", async () => {
+    vi.useFakeTimers();
+    try {
+      const repository = new MemoryRepository();
+      const transport = new FakeTransport();
+      const session = createSession("player", repository, transport);
+      const snapshots: RoomEventV1[][] = [];
+      session.onEvents = (events) => snapshots.push(structuredClone(events));
+      await session.start();
+
+      const outOfOrder = roomEventSchema.parse({
+        protocolVersion: 1,
+        roomId: ROOM_ID,
+        eventId: "acee8cfb-c6d5-4c3f-b001-97e7df6faef7",
+        sequence: 2,
+        sender: HOST,
+        occurredAt: "2026-08-27T00:00:02.000Z",
+        type: "chat.message",
+        payload: { message: "must wait for #1", format: "plain" },
+      });
+      await transport.deliver(HOST_PEER_ID, { kind: "event", event: outOfOrder });
+
+      expect(snapshots.at(-1)).toEqual([]);
+      expect(transport.sentToHost).toEqual([]);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(transport.sentToHost).toEqual([
+        expect.objectContaining({ kind: "sync.request", lastSequence: 0 }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends at most 500 history events per acknowledged synchronization page", async () => {
+    const repository = new MemoryRepository();
+    await repository.saveRoom(roomRecord("host"));
+    for (let sequence = 1; sequence <= 501; sequence += 1) {
+      await repository.saveEvent(roomEventSchema.parse({
+        protocolVersion: 1,
+        roomId: ROOM_ID,
+        eventId: `50000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+        sequence,
+        sender: HOST,
+        occurredAt: "2026-08-27T00:00:00.000Z",
+        type: "chat.message",
+        payload: { message: `history ${sequence}`, format: "plain" },
+      }));
+    }
+    const transport = new FakeTransport();
+    const session = createSession("host", repository, transport);
+    await session.start();
+    transport.emitPresence([HOST, PLAYER]);
+
+    const requestId = "60000000-0000-4000-8000-000000000001";
+    await transport.deliver(PLAYER_PEER_ID, { kind: "sync.request", requestId, lastSequence: 0 });
+    const firstPage = transport.sentToPeers
+      .map(({ message }) => message)
+      .filter((message): message is Extract<RoomWireMessage, { kind: "sync.chunk" }> => message.kind === "sync.chunk");
+    expect(firstPage.length).toBeGreaterThan(0);
+    expect(new Set(firstPage.map(({ chunk }) => chunk.pageIndex))).toEqual(new Set([0]));
+    expect(new Set(firstPage.map(({ chunk }) => chunk.pageCount))).toEqual(new Set([2]));
+
+    const transferId = firstPage[0]!.chunk.transferId;
+    await transport.deliver(PLAYER_PEER_ID, {
+      kind: "sync.ack",
+      requestId,
+      transferId,
+      pageIndex: 0,
+      lastSequence: 500,
+    });
+    const allPages = transport.sentToPeers
+      .map(({ message }) => message)
+      .filter((message): message is Extract<RoomWireMessage, { kind: "sync.chunk" }> => message.kind === "sync.chunk");
+    expect(allPages.some(({ chunk }) => chunk.pageIndex === 1)).toBe(true);
   });
 });
 

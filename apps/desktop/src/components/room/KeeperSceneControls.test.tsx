@@ -18,15 +18,17 @@ describe("KeeperSceneControls", () => {
     expect(screen.getByText("开幕场景")).toBeTruthy();
     expect(screen.getByText("调查员在剧场第一次见到演员。")).toBeTruthy();
 
-    const npcDirectory = screen.getByLabelText("在观止剧场发布 NPC");
-    expect(within(npcDirectory).getByText("关联 NPC · 1")).toBeTruthy();
-    expect(within(npcDirectory).getByText("其他 NPC · 2")).toBeTruthy();
+    const npcDirectory = screen.getByLabelText("在观止剧场展示人物");
+    expect(within(npcDirectory).getByText("本场人物 · 1")).toBeTruthy();
+    expect(within(npcDirectory).getByText("其他人物 · 2")).toBeTruthy();
     expect(within(npcDirectory).getByText("花小路")).toBeTruthy();
     expect(within(npcDirectory).getByText("木村晃")).toBeTruthy();
     expect(within(npcDirectory).getByText("无公开稿人物")).toBeTruthy();
-    expect(screen.getByText(/持久同步给全体成员/)).toBeTruthy();
+    expect(screen.getByText(/所有玩家都会收到并保存在自己的记录里/)).toBeTruthy();
+    expect(screen.queryByText(/持久同步|精确修订/)).toBeNull();
+    expect((screen.getByText("查看模组版本").closest("details") as HTMLDetailsElement).open).toBe(false);
 
-    fireEvent.change(within(npcDirectory).getByLabelText("筛选 NPC"), {
+    fireEvent.change(within(npcDirectory).getByLabelText("搜索人物"), {
       target: { value: "木村" },
     });
     expect(within(npcDirectory).getByText("木村晃")).toBeTruthy();
@@ -39,7 +41,7 @@ describe("KeeperSceneControls", () => {
 
     expect(screen.getByText("KP 私密：这里其实是绑架现场。")).toBeTruthy();
     expect(screen.getByText("玩家公开：帷幕后传来木板轻响。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "向全房间公开地点" }));
+    fireEvent.click(screen.getByRole("button", { name: "向所有玩家展示这个地点" }));
 
     expect(onPublishLocation).toHaveBeenCalledWith({
       id: "location-theater",
@@ -56,8 +58,8 @@ describe("KeeperSceneControls", () => {
     fireEvent.click(screen.getByRole("button", { name: "选择地点：无名庭院" }));
     const card = screen.getByLabelText("地点发布：无名庭院");
     expect(within(card).getByText("KP 私密：庭院地下埋着遗体。")).toBeTruthy();
-    expect(within(card).getByText(/不会使用上方守秘人资料作为后备文本/)).toBeTruthy();
-    expect((within(card).getByRole("button", { name: "向全房间公开地点" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(card).getByText(/KP 私密资料绝不会自动发出/)).toBeTruthy();
+    expect((within(card).getByRole("button", { name: "向所有玩家展示这个地点" }) as HTMLButtonElement).disabled).toBe(true);
     expect(onPublishLocation).not.toHaveBeenCalled();
   });
 
@@ -73,7 +75,7 @@ describe("KeeperSceneControls", () => {
       onPublishNpc,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "发布 NPC：花小路" }));
+    fireEvent.click(screen.getByRole("button", { name: "让花小路在这里出现" }));
     expect(onPublishNpc).toHaveBeenCalledWith(publicLocation, {
       id: "npc-hana",
       name: "花小路",
@@ -81,9 +83,9 @@ describe("KeeperSceneControls", () => {
     });
     expect(JSON.stringify(onPublishNpc.mock.calls[0])).not.toContain("知道凶手身份");
 
-    const unavailable = screen.getByRole("button", { name: "发布 NPC：无公开稿人物" }) as HTMLButtonElement;
+    const unavailable = screen.getByRole("button", { name: "让无公开稿人物在这里出现" }) as HTMLButtonElement;
     expect(unavailable.disabled).toBe(true);
-    expect(unavailable.title).toContain("玩家可见描述");
+    expect(unavailable.title).toContain("玩家看到的人物描述");
   });
 
   it("marks an NPC already at the location and disables duplicate publication", () => {
@@ -102,9 +104,9 @@ describe("KeeperSceneControls", () => {
       onPublishNpc,
     });
 
-    const button = screen.getByRole("button", { name: "发布 NPC：花小路" }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: "让花小路在这里出现" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    expect(button.textContent).toContain("已在此地");
+    expect(button.textContent).toContain("已在这里");
     fireEvent.click(button);
     expect(onPublishNpc).not.toHaveBeenCalled();
   });
@@ -117,7 +119,7 @@ describe("KeeperSceneControls", () => {
       onPublishLocation,
     });
 
-    const button = screen.getByRole("button", { name: "向全房间公开地点" }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: "向所有玩家展示这个地点" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.title).toBe("房主离线，无法发布");
     expect(screen.getByText("房主离线，无法发布")).toBeTruthy();

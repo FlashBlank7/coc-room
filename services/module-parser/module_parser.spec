@@ -9,12 +9,13 @@ project_dir = Path(SPECPATH).resolve()
 datas = []
 binaries = []
 hiddenimports = []
-for package in ("langgraph", "pydantic", "docx", "httpx"):
+for package in ("langgraph", "pydantic", "docx", "httpx", "pypdf", "pypdfium2"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
 hiddenimports += collect_submodules("langgraph")
+hiddenimports += ["PIL.Image", "PIL.PngImagePlugin"]
 
 a = Analysis(
     [str(project_dir / "src" / "coc_module_parser" / "__main__.py")],

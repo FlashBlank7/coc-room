@@ -7,6 +7,8 @@ import { roomEventSchema } from "./schemas/room.js";
 export const DEFAULT_SYNC_CHUNK_BYTES = 32 * 1024;
 export const MAX_SYNC_CHUNKS = 10_000;
 export const DEFAULT_MAX_SYNC_TRANSFER_ENCODED_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_SYNC_PAGE_EVENTS = 500;
+export const DEFAULT_SYNC_PAGE_BYTES = 4 * 1024 * 1024;
 
 export const syncRequestSchema = z
   .object({
@@ -25,6 +27,8 @@ export const syncChunkSchema = z
     roomId: roomIdSchema,
     requestId: z.string().uuid(),
     transferId: z.string().uuid(),
+    pageIndex: z.number().int().nonnegative().default(0),
+    pageCount: z.number().int().positive().max(MAX_SYNC_CHUNKS).default(1),
     chunkIndex: z.number().int().nonnegative(),
     chunkCount: z.number().int().positive().max(MAX_SYNC_CHUNKS),
     payloadEncoding: z.literal("base64-json-utf8"),
@@ -40,6 +44,13 @@ export const syncChunkSchema = z
         message: "chunkIndex must be less than chunkCount",
       });
     }
+    if (chunk.pageIndex >= chunk.pageCount) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pageIndex"],
+        message: "pageIndex must be less than pageCount",
+      });
+    }
   });
 
 export type SyncRequestV1 = z.infer<typeof syncRequestSchema>;
@@ -51,6 +62,8 @@ export interface CreateSyncChunksOptions {
   readonly transferId?: string;
   readonly createTransferId?: () => string;
   readonly maxChunkBytes?: number;
+  readonly pageIndex?: number;
+  readonly pageCount?: number;
 }
 
 export function createSyncChunks(
@@ -70,6 +83,11 @@ export function createSyncChunks(
   }
 
   const transferId = options.transferId ?? options.createTransferId?.() ?? createUuid();
+  const pageIndex = options.pageIndex ?? 0;
+  const pageCount = options.pageCount ?? 1;
+  if (!Number.isInteger(pageIndex) || !Number.isInteger(pageCount) || pageCount <= 0 || pageIndex < 0 || pageIndex >= pageCount) {
+    throw new RangeError("pageIndex/pageCount describe an invalid synchronization page");
+  }
   const bytes = new TextEncoder().encode(JSON.stringify(events));
   const checksum = fnv1a32(bytes);
   const byteChunks: Uint8Array[] = [];
@@ -90,6 +108,8 @@ export function createSyncChunks(
       roomId: options.roomId,
       requestId: options.requestId,
       transferId,
+      pageIndex,
+      pageCount,
       chunkIndex,
       chunkCount: byteChunks.length,
       payloadEncoding: "base64-json-utf8",
@@ -115,6 +135,8 @@ export function assembleSyncChunks(candidateChunks: readonly SyncChunkV1[]): Roo
       chunk.roomId !== first.roomId ||
       chunk.requestId !== first.requestId ||
       chunk.transferId !== first.transferId ||
+      chunk.pageIndex !== first.pageIndex ||
+      chunk.pageCount !== first.pageCount ||
       chunk.chunkCount !== first.chunkCount ||
       chunk.checksum !== first.checksum
     ) {
@@ -163,7 +185,7 @@ export function assembleSyncChunks(candidateChunks: readonly SyncChunkV1[]): Roo
 /** Collects an out-of-order transfer and returns events exactly once when complete. */
 export class SyncChunkCollector {
   private chunks = new Map<number, SyncChunkV1>();
-  private metadata?: Pick<SyncChunkV1, "roomId" | "requestId" | "transferId" | "chunkCount" | "checksum">;
+  private metadata?: Pick<SyncChunkV1, "roomId" | "requestId" | "transferId" | "pageIndex" | "pageCount" | "chunkCount" | "checksum">;
   private completed = false;
   private encodedBytes = 0;
   private readonly maxEncodedBytes: number;
@@ -203,6 +225,8 @@ export class SyncChunkCollector {
       chunk.roomId !== this.metadata.roomId ||
       chunk.requestId !== this.metadata.requestId ||
       chunk.transferId !== this.metadata.transferId ||
+      chunk.pageIndex !== this.metadata.pageIndex ||
+      chunk.pageCount !== this.metadata.pageCount ||
       chunk.chunkCount !== this.metadata.chunkCount ||
       chunk.checksum !== this.metadata.checksum
     ) {

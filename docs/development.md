@@ -4,10 +4,21 @@
 
 ## 1. 准备环境
 
-安装：
+网页 UI、房间网络和 Worker 的日常开发只需安装：
 
 - Node.js 22
 - pnpm 9.15.4
+
+仓库根目录的 `.node-version` 固定为已验证的 Node 22 版本。若机器上同时装有多个 Node，请先确认 `node --version` 为 22.x；双端网页启动器也会在旧版本上提前停止并给出明确提示，避免把运行时不兼容误判成业务 Bug。
+
+网页中运行真实 Codex/DeepSeek 模组解析时，额外需要：
+
+- Python 3.12 与 uv（用于现有 JSONL 解析器）
+- Codex 路径：已安装并执行过 `codex login`
+- DeepSeek 路径：可选，只从 Windows Credential Manager 读取 Key
+
+只有验证或打包 Tauri 桌面能力时才需要：
+
 - Rust stable 与 `x86_64-pc-windows-msvc`
 - Python 3.12
 - uv
@@ -18,9 +29,14 @@
 ```powershell
 corepack enable
 corepack prepare pnpm@9.15.4 --activate
+pnpm install --frozen-lockfile
+```
+
+需要桌面端时再补充：
+
+```powershell
 rustup toolchain install stable
 rustup target add x86_64-pc-windows-msvc
-pnpm install --frozen-lockfile
 
 Push-Location services/module-parser
 uv sync --locked --extra dev --python 3.12
@@ -29,25 +45,81 @@ Pop-Location
 
 ## 2. 本地开发
 
-启动 Worker 本地运行时：
+先看结论：修界面和房间逻辑不需要反复编译、安装桌面包。开发时保持一个进程运行，保存文件后由 Vite 把变化直接送进浏览器或正在打开的 Tauri WebView。
+
+| 正在修改的内容 | 使用入口 | 保存后的反馈 | 是否重新构建 sidecar / NSIS |
+| --- | --- | --- | --- |
+| React、TypeScript、CSS、共享协议、房间逻辑 | `pnpm dev` | 浏览器热更新；改动边界允许时保留组件状态 | 否 |
+| 网页安全桥或 Python 解析器源码 | 保持 `pnpm dev`；Vite 必要时自动重启，或手动重启该进程 | 页面重载或下一次解析任务读取新代码 | 否 |
+| 同样的前端改动，但需要顺便验证 SQLite、原生文件框或桌面资源库 | 首次 `pnpm dev:tauri:first`，以后保持 `pnpm dev:tauri` 运行 | Tauri 窗口内热更新 | 否 |
+| Rust 命令或 Rust 依赖 | `pnpm dev:tauri` | Cargo 增量编译并重启原生进程 | 不构建 NSIS |
+| Python 解析器源码 | 网页路径直接用 `pnpm dev`；桌面内嵌版本才重新运行 `pnpm prepare:windows` | 网页桥重启后读取源码；桌面版更新 sidecar 后重启 | 仅桌面内嵌版本需要 |
+| 安装包、签名和发布配置 | `pnpm build:windows` | 生成 NSIS 安装包 | 是，只在发布验收时 |
+
+换句话说，当前大量 UI/交互 Bug 应在网页模式里连续修；只有接近阶段验收时才打开桌面壳检查原生边界。真实 Codex/DeepSeek、DOCX 和 PDF 解析也能从网页开发页调用本地安全桥，所以不需要为了获得热更新而把登录令牌或 API Key 交给网页 JavaScript。
+
+默认采用 web-first 工作流。一条命令会先构建共享协议，然后并行启动协议监视、Vite 和 Wrangler 本地中继，并自动打开浏览器：
 
 ```powershell
-pnpm dev:relay
+pnpm dev
 ```
 
-它默认监听 `http://127.0.0.1:8787`。另开终端启动纯前端预览：
+网页监听 `http://127.0.0.1:1420`，中继监听 `http://127.0.0.1:8787`。React、样式以及共享协议源码改动会进入 Vite 热更新，不会触发 Rust、sidecar 或安装包编译。
+
+中继已经在其他终端运行时，可以只启动网页和共享协议监视：
 
 ```powershell
-pnpm dev:desktop
+pnpm dev:web:ui
 ```
 
-纯前端预览用内存仓库和模拟解析，不能验证 SQLite、凭据管理、系统文件对话框或真实 sidecar。`dev:desktop` 会先构建共享协议，再同时监视协议和 UI。验证完整桌面路径：
+`pnpm dev:desktop` 是 `dev:web:ui` 的兼容别名。若 1420 被占用，可给独立网页进程设置其他端口，例如：
 
 ```powershell
-pnpm dev:tauri
+$env:COC_ROOM_WEB_PORT = "1421"
+pnpm dev:web:ui
+```
+
+双端联调可用一个跨平台命令同时启动协议监视、本地中继、KP 页面和玩家页面：
+
+```powershell
+pnpm dev:web:duo
+```
+
+默认 KP 为 `http://127.0.0.1:1420`，玩家为 `http://127.0.0.1:1421`，两端共用 `http://127.0.0.1:8787` 中继。端口属于浏览器 Origin 的一部分，因此两个页面各自使用独立 IndexedDB；这比在同一 Origin 开两个标签更接近真实 KP/玩家的数据隔离。只有 KP Vite 进程注册本地 AI 安全桥，玩家页不注入桥令牌也不提供桥路由；玩家在房间内申请角色草稿时仍通过房间消息交给 KP 执行。这个边界由启动时的进程环境决定，URL 中的 `duoRole` 只用于显示联调标签，不参与授权。启动器不用 shell 专属的环境变量语法，按一次 Ctrl+C 会清理两个 Vite、Wrangler/workerd 和协议监视进程。它只启动开发能力，不会自动调用 Codex、DeepSeek 或 Python 解析器。
+
+端口被占用时可运行 `pnpm dev:web:duo --help` 查看跨平台参数；不打开浏览器可追加 `--no-open`。仓库的轻量 smoke 会自动选择三个临时端口，只读取两个开发页并检查本地中继，不执行 AI 请求：
+
+```powershell
+pnpm smoke:web-duo
+```
+
+纯网页模式会在右下角显示能力提示，并在 React 渲染失败时提供可恢复的错误页面。它把房间、模组、角色与设置持久化到浏览器 IndexedDB，并提供显式清空入口。单端 `pnpm dev` 与双端联调的 KP 页可以把 TXT/Markdown、DOCX、PDF 和安全 ZIP 从网页文件选择器交给本地桥，再调用与桌面端相同的 Python JSONL 解析器；双端联调的玩家页不具备这项本机能力。React、解析 UI 和桥接代码改动都不需要重新编译 Tauri。
+
+本地桥是 Vite 开发服务器的同源中间件，只绑定既有的 `127.0.0.1` 开发页。它只公开状态、模组解析、PDF 页预览、角色草稿、NPC 属性草稿和受限上下文 NPC 回复六条固定路由；这不是可配置的 Codex 代理。每条路由都要求精确 Origin、Host、same-origin Fetch Metadata，以及每次 Vite 启动时随机生成的 256-bit 开发会话令牌。令牌只注入当前开发页的 HTML 并通过自定义请求头返回，不进入 URL、Cookie、IndexedDB、localStorage、生产构建或日志；重启 Vite 后旧页面的令牌立即失效。不接受浏览器提供的 action、本机路径、API Key、提供者地址、命令、Shell、工具、可执行文件或超时配置。上传文件先校验长度和 SHA-256，只写入系统临时目录；响应禁用缓存。
+
+真实解析采用桥内固定的 45 分钟总任务上限和 60 秒无合法 JSONL 空闲上限。Codex 工作流每 15 秒发出的、能够解析且 `request_id` 匹配的进度心跳会重置空闲计时，但不会延长总上限；乱码、截断 JSON 或错误任务 ID 不算活动。Codex JSONL 的通用 `error` 事件不会被猜测为某一种网络故障；它只作为不含正文的安全状态上报。单次报错后 45 秒没有新 CLI 事件，或 CLI 持续重复报错 120 秒仍未恢复到正常 turn/item 进度时，子进程会以 `CODEX_CLI_STALLED` 回收，避免让 KP 等到总超时；明确的 `turn.failed` 始终优先于超时和退出码分类。角色/NPC 三条短任务使用固定 120 秒总上限、256 KiB 输出上限和唯一终态校验，不接受浏览器调整。浏览器点击“停止整理”、取消请求、关闭/刷新页面或连接异常断开时，桥会终止整个 Python/Codex 子进程树，等待终止完成后再清理该任务的临时文件；取消后的迟到响应不能写入草稿或资料库。上述时限和取消行为不能由网页请求覆盖。桥不会在生产构建中启用。真实解析若一个有效分块都没有生成，只返回错误，不允许空壳模组进入资料库；有部分有效内容时才进入 `needs_review` 人工复核。
+
+网页仍不能验证 SQLite、原生系统文件对话框或桌面托管资源库。相关功能达到阶段验收点时再运行完整桌面路径：
+
+```powershell
+pnpm dev:tauri:first # 首次准备 sidecar 并启动
 ```
 
 `prepare:windows` 会构建共享协议，调用 `scripts/build.ps1` 以锁定依赖执行 PyInstaller 单文件构建，并将带 Tauri target triple 的 sidecar 放到正确位置。可执行文件是构建产物，不应提交。
+
+`pnpm dev:tauri:first` 负责首次准备；之后日常桌面壳验收直接运行 `pnpm dev:tauri`，不会重复执行 PyInstaller。进程保持运行时，React、TypeScript 和 CSS 修复仍由 Vite 热更新，不会重打 NSIS。修改 Rust 命令、Cargo/Tauri 配置或 Python sidecar 本体时才需要重新运行 `pnpm prepare:windows` 或等待对应的原生重编译/重启。日常界面、协议与房间逻辑调试仍优先使用 `pnpm dev`。
+
+不安装 Rust/Python 也可以快速验证网页运行模式提示和错误边界：
+
+```powershell
+pnpm smoke:web
+```
+
+已经准备 Python 解析环境后，可用一条 smoke 命令实际启动一个临时端口上的 Vite 与安全桥，并依次验证开发会话令牌、同源拒绝、HMR WebSocket、桥状态和离线 mock 结构化解析；脚本最后会关闭 Vite，并确认桥随同一进程停止。它不会启动 Tauri、Rust、真实 Codex/DeepSeek 调用或浏览器窗口：
+
+```powershell
+pnpm smoke:web-bridge
+```
 
 ## 3. Worker 自部署
 
@@ -92,12 +164,31 @@ uv run pytest
 Pop-Location
 ```
 
-桌面端默认使用本机 Codex CLI。先登录，再在“设置 → 模组解析服务”检测状态：
+桌面端默认使用本机 Codex CLI。先登录，再在“设置 → AI 文字服务”检测状态：
 
 ```powershell
 codex login
 codex login status
 ```
+
+网页开发模式也复用同一份 Codex CLI 登录，不复制登录令牌。先准备解析器环境，然后保持 `pnpm dev` 运行即可在模组库中直接选择 DOCX/PDF/ZIP 或粘贴文本并真实解析：
+
+```powershell
+Push-Location services/module-parser
+uv sync --locked --extra dev --python 3.12
+Pop-Location
+pnpm dev
+```
+
+DeepSeek Key 不经过网页 JavaScript、IndexedDB、localStorage、URL、命令行参数或日志。请用隐藏输入将轮换后的 Key 写入与 Tauri 共用的 Windows Credential Manager 条目：
+
+```powershell
+pnpm ai:key:set
+pnpm ai:key:status
+# 不再使用时：pnpm ai:key:delete
+```
+
+此前在聊天、终端历史或其他明文位置出现过的 Key 视为已经暴露，必须先去 DeepSeek 控制台轮换；不要把旧 Key 再写入凭据管理器。网页只查询“是否存在”这一布尔状态，实际 Key 由一次性 Python 包装进程在内存中读取并通过 stdin 边界注入解析任务。
 
 本地生成一个可导入草稿时，也可使用开发辅助脚本。Codex 登录完全由 CLI 管理，应用不会读取登录令牌；正文经 stdin 传给一次性 `codex exec` 任务：
 
@@ -114,18 +205,23 @@ Pop-Location
 
 辅助脚本只写入通过完整 Schema 校验的 `ModulePackageV1`。底层 JSONL sidecar 会产生零到多条 `progress`，最后恰好一条 `result` 或 `error`。Codex 会使用 ChatGPT/Codex 账户额度，DeepSeek 会产生 API 费用；先用 `--mock` 验证输入。缓存不保存凭据，但会以未加密 JSON 保存已校验的分块抽取结果，因此应把它视为房主私密模组数据；可在应用退出后删除系统应用缓存中的 `module-parser` 目录来清空。
 
-## 5. 沉浸式房间首切片
+若输入是“一个 PDF 加若干静态图片”的安全 ZIP，正文抽取与网页里的 PDF 选页预览会复用同一套归档校验；预览不会绕过校验去打开任意 ZIP 成员。解析失败时辅助脚本只报告稳定错误码且不写模组文件，不把原文、提供者私有报错或 Python traceback 当成诊断信息打印。ZIP 内的图片目前只返回去路径的安全元数据，仍需 KP 在房间中明确选择、预览并绑定；界面不会声称它们已经成为背景图。
+
+## 5. V2 沉浸式房间边界
 
 开发房间世界功能时必须保持以下边界：
 
-- KP 控制面板只能加载 `module.switched` 指定的本机精确修订，不能自动使用同一模组的最新修订代替。
-- 地点和 NPC 发布只能从 `playerDescription` 构造最小快照，绝不能回退到 `description` 或附带 NPC 身份、动机、特征、数值、关系、场景说明、守秘人笔记和原文定位。
-- 地点必须先公开才能进入、发布 NPC 或关联地点内容；玩家只能移动自己的角色。相关规则既要在 command 提交时验证，也要在从旧事件重建房主序列时验证。
-- `deriveRoomWorldState` 只能消费已经确认的 `RoomEventV1`。模组切换会清空模组绑定的世界投影，但不会删除角色卡或历史事件。
-- 当前所有世界事件都进入同一个连续序列并同步给全员。不要添加只在 React 中隐藏的“定向可见”，那仍会把正文写入其他成员的 SQLite。
-- 当前背景实现只能使用内置 CSS 渐变。没有图片上传、资源目录、二进制事件字段或资源分块协议；新增这些能力前应另行设计大小上限、内容校验、持久化、重连补取和公开授权。
+- V1 房间只允许查看和导出，不能原地升级；新的席位、受众、画板、资源和 NPC 会话只进入 V2。
+- KP 控制面板只能加载 `module.switched` 指定的本机精确修订，不能自动用同一模组的最新修订代替。解析草稿、正式模组和已在房间启用的版本是三个不同状态。
+- 地点、NPC、场景和线索发布只能从 KP 明确选择的玩家可见字段构造最小快照，绝不能回退到守秘人描述，也不能附带动机、数值、关系、主持人笔记和原文定位。
+- 所有持久操作都先成为房主确认的 `RoomEventV2`，再由 `deriveRoomWorldStateV2` 投影。玩家提交命令时不能直接修改权威世界；地图拖拽可以先显示本地预览，但确认失败或超时必须回退并说明原因。
+- 定向内容使用 `AudienceV2`。无权席位只能收到不含事件类型、正文和资源哈希的脱敏占位头；只在 React 中隐藏正文不构成保密。测试必须同时检查玩家世界投影、SQLite/IndexedDB、日志和导出。
+- 图片和音频只在事件中保存 `AssetDescriptorV1`。实际字节进入 SHA-256 内容寻址资源库，并在席位先获得引用事件后才允许通过资源 DataChannel 或 WSS 回退请求。禁止把 Base64 或二进制正文塞进房间事件。
+- 场景画板、地图画板和线索板彼此独立。NPC 与地点不建立所有权关系，同一 NPC 可以有多个表现棋子；把线索放到画板不会改变线索实体的受众或归属。
+- 角色草稿、模组解析草稿和 AI 生成结果都必须停留在本地审核态；只有显式保存、启用或发布后才能形成正式记录。网页刷新恢复点不能自动发布，也不能跨房间或席位复用。
+- NPC 自动互动只能读取 NPC 卡、KP 显式挂载的最多 12 条资料，以及当前面板最近 40 条且最多 24,000 字符的消息；请求中不得出现房间快照、完整模组、文件路径、数据库或工具入口。
 
-协议测试应覆盖精确修订、发布顺序、角色所有权、模组切换后的投影清理、乱序输入的 sequence 归并，以及公开快照中不含 KP 私密字段。桌面组件测试应分别覆盖 KP 发布控制、调查员进入地点、只读记录重建和默认渐变背景。
+协议与桌面测试应覆盖精确修订、全局连续序号、受众脱敏、重连补发、角色所有权、资源授权、地图乐观提交回退、模组/角色草稿恢复，以及公开快照中不含 KP 私密字段。完整旅程测试还应验证地点与 NPC 发布、一次真实房主骰点、KP 叙述交接、多人拾取同一线索和单一公共线索板项目。
 
 ## 6. 检查与测试
 
@@ -147,9 +243,9 @@ Pop-Location
 - 真实 Codex 调用依赖当前 Windows 用户自己的 CLI 登录并消耗其 Codex 额度，默认 CI 不运行。
 - GitHub 的真实 DeepSeek 冒烟工作流只能通过 `workflow_dispatch` 手工执行，并要求 `DEEPSEEK_API_KEY` Secret；普通 push/PR CI 不读取该 Secret。
 
-普通 `pnpm test` 中的 `RoomSession.live.test.ts` 默认跳过，因为它需要一个已启动的 Worker。CI 会启动本地 `workerd` 并设置 `COC_ROOM_LIVE_RELAY_URL`，让两个真实 `RoomSession` 通过 WebSocket 强制中继，验证聊天、骰子、模组切换、大型 UTF-8 揭示、离线事件和重连补发；这两个会话仍使用内存仓库，不是 SQLite 桌面 E2E。
+普通 `pnpm test` 中的 `RoomSession.live.test.ts` 和 `RoomSessionV2.live.test.ts` 默认跳过，因为它们需要一个已启动的 Worker。CI 会启动本地 `workerd` 并设置 `COC_ROOM_LIVE_RELAY_URL`：V1 验证聊天、骰子、模组切换、大型 UTF-8 揭示、离线事件和重连补发；V2 另外验证独立席位 HMAC 认证、定向秘密只落脱敏头、资源哈希不泄漏，以及同一席位换 peer 后补发。这些会话仍使用内存仓库，不是 SQLite 桌面 E2E。
 
-Windows job 还会为每种模式分别启动两个独立的发布构建桌面进程（各自使用真实 WebView2），通过临时 rendezvous 文件交换房间凭据。基础传输冒烟分别验证浏览器 `RTCPeerConnection` / DataChannel 直连和本地 Worker 强制中继，并逐字校验大型中文与 emoji 载荷；完整会话冒烟则让两端各自使用独立 SQLite，验证房主排序、系统安全随机骰、重复命令幂等、离线事件、重连补发和最终事件日志一致。存储模式另行验证 SQLite 重读、Markdown/无脚本自包含 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。NSIS 阶段会静默安装后再次执行存储、导出和 sidecar 检查，再验证卸载。
+Windows job 还会为每种模式分别启动两个独立的发布构建桌面进程（各自使用真实 WebView2），通过临时 rendezvous 文件交换房间凭据。基础传输冒烟分别验证浏览器 `RTCPeerConnection` / DataChannel 直连和本地 Worker 强制中继，并逐字校验大型中文与 emoji 载荷；完整会话冒烟则让两端各自使用独立 SQLite，验证房主排序、系统安全随机骰、重复命令幂等、离线事件、重连补发和最终事件日志一致。存储模式另行验证 SQLite 重读、Markdown/无脚本离线 HTML 文件导出、打包后的 mock Python sidecar，以及测试房间清理。V2 网页记录只从当前席位的完整事件视图收集资源：安全大小内的本机图片与音频会转为 `data:` 嵌入，缺失、校验失败或超过 16 MiB 单音频/32 MiB 总量上限的媒体会在记录中明确标注，脱敏占位永远不会触发资源读取。NSIS 阶段会静默安装后再次执行存储、导出和 sidecar 检查，再验证卸载。
 
 ## 7. Windows x64 NSIS 构建
 

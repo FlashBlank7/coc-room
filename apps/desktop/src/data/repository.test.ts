@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ModulePackageV1 } from "@coc-room/protocol";
+import type { ModulePackageV1, RoomEventV2 } from "@coc-room/protocol";
 import { MemoryRepository, type RoomRecord } from "./repository";
 
 describe("MemoryRepository", () => {
@@ -66,6 +66,20 @@ describe("MemoryRepository", () => {
     expect(await repository.listRooms()).toEqual([
       expect.objectContaining({ lastSeq: 12, createdAt: "2026-01-01T00:00:00.000Z" }),
     ]);
+  });
+
+  it("never rewrites a persisted room between V1 and V2", async () => {
+    const repository = new MemoryRepository();
+    const v1 = roomRecord("room-protocol-v1");
+    const v2 = { ...roomRecord("room-protocol-v2"), protocolVersion: 2 as const };
+    await repository.saveRoom(v1);
+    await repository.saveRoom(v2);
+
+    await expect(repository.saveRoom({ ...v1, protocolVersion: 2 })).rejects.toThrow(/不可原地改写/);
+    await expect(repository.saveRoom({ ...v2, protocolVersion: 1 })).rejects.toThrow(/不可原地改写/);
+    const saved = await repository.listRooms();
+    expect(saved.find(({ id }) => id === v1.id)?.protocolVersion ?? 1).toBe(1);
+    expect(saved.find(({ id }) => id === v2.id)?.protocolVersion).toBe(2);
   });
 
   it("deletes a room and all of its local events without touching other rooms", async () => {
@@ -150,7 +164,166 @@ describe("MemoryRepository", () => {
     firstRead[0]!.package.metadata.title = "mutated outside repository";
     expect((await repository.listModules())[0]?.package.metadata.title).toBe("module-newer-test");
   });
+
+  it("saves, overwrites, restores and deletes module drafts outside the published library", async () => {
+    const repository = new MemoryRepository();
+    const module = modulePackage("module-draft-test", 1, "2026-03-01T00:00:00.000Z");
+    await repository.saveModuleDraft({
+      draftId: "active-editor",
+      package: module,
+      sourceText: "first source",
+      sourceName: "first.md",
+      warnings: ["first warning"],
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    module.metadata.title = "mutated input";
+
+    expect((await repository.getModuleDraft("active-editor"))?.package.metadata.title).toBe("module-draft-test");
+    await repository.saveModuleDraft({
+      draftId: "active-editor",
+      package: {
+        ...modulePackage("module-draft-test", 1, "2026-03-02T00:00:00.000Z"),
+        overview: "recovered editor state",
+      },
+      sourceText: "updated source",
+      sourceName: "updated.md",
+      warnings: ["review clue reference"],
+      updatedAt: "2026-03-02T00:00:00.000Z",
+    });
+
+    const restored = await repository.getModuleDraft("active-editor");
+    expect(restored).toMatchObject({
+      draftId: "active-editor",
+      sourceText: "updated source",
+      sourceName: "updated.md",
+      warnings: ["review clue reference"],
+      package: { overview: "recovered editor state" },
+    });
+    restored!.package.overview = "mutated read";
+    restored!.warnings.push("mutated read");
+    expect(await repository.getModuleDraft("active-editor")).toMatchObject({
+      warnings: ["review clue reference"],
+      package: { overview: "recovered editor state" },
+    });
+    expect(await repository.listModules()).toEqual([]);
+
+    await repository.deleteModuleDraft("active-editor");
+    expect(await repository.getModuleDraft("active-editor")).toBeUndefined();
+    expect(await repository.listModuleDrafts()).toEqual([]);
+  });
+
+  it("persists an unauthorized V2 event only as a payload-free redacted cursor", async () => {
+    const repository = new MemoryRepository();
+    const room = { ...roomRecord("room-v2-redacted"), protocolVersion: 2 as const };
+    await repository.saveRoom(room);
+    const redacted = {
+      view: "redacted" as const,
+      protocolVersion: 2 as const,
+      roomId: room.id,
+      eventId: "904900ab-c0a6-4dc2-ada6-969d06cbb83d",
+      sequence: 1,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    expect(await repository.saveEventViewV2(redacted)).toBe("inserted");
+    expect(await repository.saveEventViewV2(redacted)).toBe("duplicate");
+    const serialized = JSON.stringify(await repository.listEventViewsV2(room.id));
+    expect(serialized).not.toContain("chat.message");
+    expect(serialized).not.toContain("诱饵秘密");
+    expect(await repository.listAuthorityEventsV2(room.id)).toEqual([]);
+  });
+
+  it("allows a redacted V2 cursor to be upgraded once but never downgraded", async () => {
+    const repository = new MemoryRepository();
+    const room = { ...roomRecord("room-v2-upgrade"), protocolVersion: 2 as const };
+    const event = roomEventV2(room.id);
+    await repository.saveRoom(room);
+    await repository.saveEventViewV2({
+      view: "redacted",
+      protocolVersion: 2,
+      roomId: room.id,
+      eventId: event.eventId,
+      sequence: event.sequence,
+      occurredAt: event.occurredAt,
+    });
+
+    expect(await repository.saveEventViewV2({ view: "full", event })).toBe("upgraded");
+    await expect(repository.saveEventViewV2({
+      view: "redacted",
+      protocolVersion: 2,
+      roomId: room.id,
+      eventId: event.eventId,
+      sequence: event.sequence,
+      occurredAt: event.occurredAt,
+    })).rejects.toThrow(/不能被修改或降级/);
+  });
+
+  it("keeps the V2 authority log host-only and idempotent", async () => {
+    const repository = new MemoryRepository();
+    const room = { ...roomRecord("room-v2-host"), protocolVersion: 2 as const, localRole: "host" as const };
+    const event = roomEventV2(room.id);
+    await repository.saveRoom(room);
+
+    expect(await repository.saveAuthorityEventV2(event)).toBe(true);
+    expect(await repository.saveAuthorityEventV2(event)).toBe(false);
+    expect(await repository.listAuthorityEventsV2(room.id)).toEqual([event]);
+    expect(await repository.listEventViewsV2(room.id)).toEqual([{ view: "full", event }]);
+  });
+
+  it("persists exact asset grants per stable seat without authorizing descriptor guesses", async () => {
+    const repository = new MemoryRepository();
+    const room = { ...roomRecord("room-v2-asset-grants"), protocolVersion: 2 as const, localRole: "host" as const };
+    await repository.saveRoom(room);
+    const asset = {
+      schemaVersion: 1 as const,
+      assetId: `sha256:${"a".repeat(64)}` as const,
+      mediaType: "audio/mpeg" as const,
+      byteLength: 12_345,
+    };
+    await repository.saveAssetGrantV2({
+      roomId: room.id,
+      seatId: "seat-alice",
+      asset,
+      grantedSequence: 7,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    // Replayed sync pages are idempotent even if the observation time changes.
+    await repository.saveAssetGrantV2({
+      roomId: room.id,
+      seatId: "seat-alice",
+      asset,
+      grantedSequence: 7,
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    expect(await repository.hasAssetGrantV2(room.id, "seat-alice", asset)).toBe(true);
+    expect(await repository.hasAssetGrantV2(room.id, "seat-bob", asset)).toBe(false);
+    expect(await repository.hasAssetGrantV2(room.id, "seat-alice", {
+      ...asset,
+      mediaType: "audio/ogg",
+    })).toBe(false);
+  });
 });
+
+function roomEventV2(roomId: string): RoomEventV2 {
+  return {
+    protocolVersion: 2,
+    roomId,
+    eventId: "904900ab-c0a6-4dc2-ada6-969d06cbb83d",
+    sequence: 1,
+    sender: {
+      seatId: "seat-host",
+      role: "host",
+      displayName: "KP",
+      peerId: "host-12345678",
+      extensions: {},
+    },
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    audience: { kind: "seats", seatIds: ["seat-authorized"] },
+    type: "chat.message",
+    payload: { message: "诱饵秘密", format: "plain" },
+  };
+}
 
 function modulePackage(moduleId: string, revision: number, updatedAt: string): ModulePackageV1 {
   return {

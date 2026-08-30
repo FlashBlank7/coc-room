@@ -47,7 +47,7 @@ describe("ModuleEntityBrowser", () => {
     render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
     fireEvent.click(screen.getByRole("tab", { name: /NPC/ }));
 
-    const search = screen.getByPlaceholderText("搜索名称、正文、ID 或原文摘要");
+    const search = screen.getByPlaceholderText("搜索名称、正文或原文摘要");
     fireEvent.change(search, { target: { value: "无人匹配" } });
     expect(screen.queryByRole("heading", { name: "映夜太夫" })).toBeNull();
     expect(screen.getByText(/没有与“无人匹配”匹配的内容/)).toBeTruthy();
@@ -67,24 +67,24 @@ describe("ModuleEntityBrowser", () => {
     expect(screen.getByText("守秘人线索说明")).toBeTruthy();
     expect(screen.getAllByText("守秘人内容").length).toBeGreaterThan(0);
     expect(screen.getByText("尚无玩家可见文本，不能直接公开。")).toBeTruthy();
-    expect(screen.getByText("原文定位 · 1 处")).toBeTruthy();
+    expect(screen.getByText("核对原文 · 1 处")).toBeTruthy();
   });
 
-  it("shows readable names beside related IDs and provides a handout category", () => {
+  it("shows human-readable relationship endpoints without requiring internal IDs", () => {
     render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
 
     fireEvent.click(screen.getByRole("tab", { name: /关系/ }));
     expect(screen.getByText("映夜太夫")).toBeTruthy();
     expect(screen.getByText("橘弥生")).toBeTruthy();
-    expect(screen.getByText("npc:eiya")).toBeTruthy();
-    expect(screen.getByText("npc:yayoi")).toBeTruthy();
+    expect(screen.queryByText("npc:eiya")).toBeNull();
+    expect(screen.queryByText("npc:yayoi")).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: /文字手记/ }));
     expect(screen.getByRole("heading", { name: "染血的俳句" })).toBeTruthy();
     expect(screen.getByText("蝶自血泊中醒来。")).toBeTruthy();
   });
 
-  it("shows DeepSeek provenance in the overview", () => {
+  it("keeps DeepSeek provenance in a collapsed technical record", () => {
     const modulePackage = createModulePackage();
     modulePackage.extensions["org.coc-room.parser"] = {
       provider: "deepseek",
@@ -97,7 +97,7 @@ describe("ModuleEntityBrowser", () => {
     };
 
     render(<ModuleEntityBrowser modulePackage={modulePackage} />);
-    const provenance = screen.getByLabelText("解析来源");
+    const provenance = screen.getByLabelText("整理记录（高级）");
 
     expect(within(provenance).getByText("DeepSeek API")).toBeTruthy();
     expect(within(provenance).getByText("deepseek-v4-flash")).toBeTruthy();
@@ -105,13 +105,29 @@ describe("ModuleEntityBrowser", () => {
     expect(within(provenance).getByText("观止-见世之蝶.docx")).toBeTruthy();
     expect(within(provenance).getByText("3")).toBeTruthy();
     expect(within(provenance).getByText("1 条")).toBeTruthy();
-    expect(within(provenance).getByText(/2026/)).toBeTruthy();
+    expect(within(provenance).getAllByText(/2026/).length).toBeGreaterThan(0);
   });
 
-  it("explains that provenance is unavailable for an older imported package", () => {
+  it("explains an older package without putting provenance in the main reading path", () => {
     render(<ModuleEntityBrowser modulePackage={createModulePackage()} />);
 
-    expect(within(screen.getByLabelText("解析来源")).getByText("来源未记录")).toBeTruthy();
+    const record = screen.getByLabelText("整理记录（高级）");
+    expect(record.hasAttribute("open")).toBe(false);
+    expect(within(record).getByText("旧模组或手工导入，未留下记录")).toBeTruthy();
+  });
+
+  it("turns extraction gaps into a three-question keeper readiness check", () => {
+    const modulePackage = createModulePackage();
+    modulePackage.locations[0] = { ...modulePackage.locations[0]!, playerDescription: "" };
+
+    render(<ModuleEntityBrowser modulePackage={modulePackage} />);
+
+    const review = screen.getByLabelText("开团前检查");
+    expect(within(review).getByText("开场从哪里开始")).toBeTruthy();
+    expect(within(review).getByText("会遇见谁、去往哪里")).toBeTruthy();
+    expect(within(review).getByText("调查能发现什么")).toBeTruthy();
+    expect(within(review).getByText(/有 2 项还没有玩家可见介绍/)).toBeTruthy();
+    expect(within(review).getByText(/有 1 条线索或手记尚无玩家版正文/)).toBeTruthy();
   });
 });
 

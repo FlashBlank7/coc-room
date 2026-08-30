@@ -408,7 +408,13 @@ export class EventReplica {
   }
 
   orderedEvents(): RoomEventV1[] {
-    return [...this.bySequence.values()].sort((left, right) => left.sequence - right.sequence);
+    // Never expose buffered events beyond a gap to projections. A later event
+    // can depend on state introduced by the missing sequence, so rendering it
+    // early would create a view that cannot be reproduced from the authority
+    // log. Buffered events become visible as soon as the gap is repaired.
+    return [...this.bySequence.values()]
+      .filter((event) => event.sequence <= this.contiguousSequence)
+      .sort((left, right) => left.sequence - right.sequence);
   }
 
   missingSequences(upTo = this.highestSequence()): number[] {

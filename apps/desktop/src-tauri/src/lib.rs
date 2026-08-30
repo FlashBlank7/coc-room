@@ -1,3 +1,8 @@
+mod assets;
+mod codex_image;
+mod npc_reply;
+mod seat_credentials;
+
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,6 +57,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const KEYRING_SERVICE: &str = "org.coc-room.desktop";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const MAX_SOURCE_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_PDF_SOURCE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
@@ -300,21 +306,25 @@ struct ModuleParseRequest {
     action: String,
     source_text: Option<String>,
     source_path: Option<String>,
-    source_name: String,
-    provider: String,
-    model: String,
+    source_name: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    page_numbers: Option<Vec<u16>>,
+    pdf_visual_page_numbers: Option<Vec<u16>>,
     mock: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct SidecarParseRequest<'a> {
     id: &'a str,
-    action: &'static str,
+    action: &'a str,
     source_text: Option<&'a str>,
     source_path: Option<&'a str>,
-    source_name: &'a str,
-    provider: &'a str,
-    model: &'a str,
+    source_name: Option<&'a str>,
+    provider: Option<&'a str>,
+    model: Option<&'a str>,
+    page_numbers: Option<&'a [u16]>,
+    pdf_visual_page_numbers: Option<&'a [u16]>,
     mock: bool,
     api_key: Option<&'a str>,
     codex_executable: Option<&'a str>,
@@ -930,7 +940,7 @@ async fn select_module_source(
     let selected = app
         .dialog()
         .file()
-        .add_filter("模组文本", &["txt", "md", "docx", "zip"])
+        .add_filter("模组文本或 PDF", &["txt", "md", "docx", "pdf", "zip"])
         .blocking_pick_file();
     let Some(selected) = selected else {
         return Ok(None);
@@ -978,7 +988,8 @@ async fn run_module_parser(
         .as_deref()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or(&request.source_name)
+        .or(request.source_name.as_deref())
+        .unwrap_or("module")
         .to_string();
 
     let cache_dir = app
@@ -990,7 +1001,9 @@ async fn run_module_parser(
         .map_err(|error| format!("无法创建模组解析缓存目录: {error}"))?;
     let cache_dir_text = path_to_string(&cache_dir)?;
 
-    let codex_executable = if !mock && request.provider == "codex" {
+    let provider = request.provider.as_deref();
+    let model = request.model.as_deref();
+    let codex_executable = if !mock && provider == Some("codex") {
         let executable = find_codex_executable()
             .ok_or_else(|| "未找到 Codex CLI；请先安装 Codex 或 OpenAI VS Code 扩展".to_string())?;
         let status = inspect_codex_executable(&executable).await;
@@ -1008,7 +1021,7 @@ async fn run_module_parser(
         .as_deref()
         .map(path_to_string)
         .transpose()?;
-    let api_key = if mock || request.provider != "deepseek" {
+    let api_key = if mock || provider != Some("deepseek") {
         None
     } else {
         Some(Zeroizing::new(
@@ -1020,12 +1033,14 @@ async fn run_module_parser(
     let serialized = {
         let sidecar_request = SidecarParseRequest {
             id: &request.id,
-            action: "parse_module",
+            action: &request.action,
             source_text: request.source_text.as_deref(),
             source_path: source_path_text.as_deref(),
-            source_name: &source_name,
-            provider: &request.provider,
-            model: &request.model,
+            source_name: Some(&source_name),
+            provider,
+            model,
+            page_numbers: request.page_numbers.as_deref(),
+            pdf_visual_page_numbers: request.pdf_visual_page_numbers.as_deref(),
             mock,
             api_key: api_key.as_deref().map(String::as_str),
             codex_executable: codex_executable_text.as_deref(),
@@ -1196,13 +1211,39 @@ fn sidecar_exit_summary(stderr_bytes: usize) -> &'static str {
 }
 
 fn validate_parse_request(request: &ModuleParseRequest) -> Result<(), String> {
-    if request.action != "parse_module" {
+    if !matches!(
+        request.action.as_str(),
+        "parse_module" | "render_pdf_pages" | "inspect_pdf_pages"
+    ) {
         return Err("不支持的模组解析操作".to_string());
     }
     if request.id.is_empty() || request.id.len() > 200 {
         return Err("解析任务 ID 长度无效".to_string());
     }
-    if request.source_text.is_some() == request.source_path.is_some() {
+    if request.action != "parse_module" {
+        if request.source_text.is_some()
+            || request.source_path.is_none()
+            || request.pdf_visual_page_numbers.is_some()
+        {
+            return Err("PDF 页面检查必须提供已授权 PDF 路径".to_string());
+        }
+        let pages = request
+            .page_numbers
+            .as_deref()
+            .ok_or_else(|| "PDF 页面检查缺少页码".to_string())?;
+        let unique = pages.iter().copied().collect::<HashSet<_>>();
+        if pages.is_empty()
+            || pages.len() > 4
+            || unique.len() != pages.len()
+            || pages.iter().any(|page| !(1..=300).contains(page))
+        {
+            return Err("PDF 页面检查页码必须是 1 到 300 内的 1–4 个不重复页码".to_string());
+        }
+        return Ok(());
+    }
+    if request.page_numbers.is_some()
+        || request.source_text.is_some() == request.source_path.is_some()
+    {
         return Err("必须且只能提供文本或已授权文件路径之一".to_string());
     }
     if request
@@ -1212,19 +1253,46 @@ fn validate_parse_request(request: &ModuleParseRequest) -> Result<(), String> {
     {
         return Err("模组文本为空或超过 500 万字符".to_string());
     }
-    if request.source_name.is_empty()
-        || request.source_name.len() > 260
-        || request.source_name.chars().any(char::is_control)
+    let source_name = request
+        .source_name
+        .as_deref()
+        .ok_or_else(|| "模组来源名称无效".to_string())?;
+    if source_name.is_empty()
+        || source_name.len() > 260
+        || source_name.chars().any(char::is_control)
     {
         return Err("模组来源名称无效".to_string());
     }
-    if !matches!(request.provider.as_str(), "codex" | "deepseek") {
+    let provider = request
+        .provider
+        .as_deref()
+        .ok_or_else(|| "不支持的模组解析服务".to_string())?;
+    if !matches!(provider, "codex" | "deepseek") {
         return Err("不支持的模组解析服务".to_string());
     }
-    if (request.provider == "deepseek" && request.model.is_empty())
-        || request.model.len() > 100
-        || !request
-            .model
+    if let Some(pages) = request.pdf_visual_page_numbers.as_deref() {
+        let unique = pages.iter().copied().collect::<HashSet<_>>();
+        let is_pdf_path = request.source_path.as_deref().is_some_and(|path| {
+            Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+        });
+        if provider != "codex"
+            || request.mock.unwrap_or(false)
+            || !is_pdf_path
+            || pages.is_empty()
+            || pages.len() > 4
+            || unique.len() != pages.len()
+            || pages.iter().any(|page| !(1..=300).contains(page))
+        {
+            return Err("PDF 视觉解析仅支持 Codex 对已授权 PDF 的 1–4 个不重复页码".to_string());
+        }
+    }
+    let model = request.model.as_deref().unwrap_or("");
+    if (provider == "deepseek" && model.is_empty())
+        || model.len() > 100
+        || !model
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
     {
@@ -1240,16 +1308,28 @@ fn inspect_module_source(path: &Path) -> Result<PathBuf, String> {
     let metadata = canonical
         .metadata()
         .map_err(|_| "无法读取所选模组文件信息".to_string())?;
-    if !metadata.is_file() || metadata.len() > MAX_SOURCE_FILE_BYTES {
-        return Err("模组来源必须是 25 MiB 以内的普通文件".to_string());
+    if !metadata.is_file() {
+        return Err("模组来源必须是普通文件".to_string());
     }
     let extension = canonical
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "模组文件缺少受支持的扩展名".to_string())?;
-    if !matches!(extension.as_str(), "txt" | "md" | "docx" | "zip") {
-        return Err("只支持 TXT、Markdown、DOCX 或单文档 ZIP".to_string());
+    if !matches!(extension.as_str(), "txt" | "md" | "docx" | "pdf" | "zip") {
+        return Err("只支持 TXT、Markdown、DOCX、PDF 或单文档 ZIP".to_string());
+    }
+    let size_limit = if extension == "pdf" {
+        MAX_PDF_SOURCE_FILE_BYTES
+    } else {
+        MAX_SOURCE_FILE_BYTES
+    };
+    if metadata.len() > size_limit {
+        return Err(if extension == "pdf" {
+            "PDF 模组来源不能超过 50 MiB".to_string()
+        } else {
+            "模组来源不能超过 25 MiB".to_string()
+        });
     }
     Ok(canonical)
 }
@@ -1275,11 +1355,37 @@ pub fn run() {
             sql: include_str!("../migrations/0002_module_revision_history.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "content addressed assets boards and room seats",
+            sql: include_str!("../migrations/0003_assets_boards_and_seats.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "protocol v2 seats authority and redacted projections",
+            sql: include_str!("../migrations/0004_protocol_v2.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "persist exact asset grants and resumable downloads",
+            sql: include_str!("../migrations/0005_asset_transfer_persistence.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 6,
+            description: "persist unfinished module editor drafts",
+            sql: include_str!("../migrations/0006_module_drafts.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
         .manage(AuthorizedModuleSources::default())
         .manage(ModuleParserExecutionGate::default())
+        .manage(codex_image::CodexImageExecutionState::default())
+        .manage(npc_reply::NpcReplyExecutionState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -1292,6 +1398,12 @@ pub fn run() {
             save_deepseek_key,
             has_deepseek_key,
             delete_deepseek_key,
+            seat_credentials::save_room_seat_secret,
+            seat_credentials::compute_room_seat_proof,
+            seat_credentials::save_room_seat_verifier,
+            seat_credentials::compute_expected_seat_proof,
+            seat_credentials::register_room_seat_verifier,
+            seat_credentials::verify_room_seat_proof,
             codex_status,
             network_smoke_config,
             publish_network_smoke_rendezvous,
@@ -1299,18 +1411,40 @@ pub fn run() {
             network_smoke_database,
             finish_network_smoke,
             write_storage_smoke_exports,
+            assets::select_and_import_asset,
+            assets::import_asset_bytes,
+            assets::import_received_asset,
+            assets::persist_asset_download_chunk,
+            assets::load_asset_download,
+            assets::discard_asset_download,
+            assets::list_unreferenced_assets,
+            assets::add_asset_reference,
+            assets::delete_unreferenced_asset,
+            assets::resolve_asset_path,
+            assets::read_asset_chunk,
+            assets::verify_managed_asset,
+            codex_image::codex_image_capabilities,
+            codex_image::run_codex_image_job,
+            codex_image::cancel_codex_image_job,
+            npc_reply::run_npc_reply,
+            npc_reply::cancel_npc_reply,
+            npc_reply::run_character_draft,
+            npc_reply::cancel_character_draft,
+            npc_reply::run_npc_stats_draft,
+            npc_reply::cancel_npc_stats_draft,
             select_module_source,
             run_module_parser
         ])
         .setup(|app| {
+            codex_image::recover_stale_image_executor_state(app.handle())
+                .map_err(std::io::Error::other)?;
+            assets::initialize_asset_store(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(debug_assertions)]
             {
                 app.get_webview_window("main")
                     .expect("main window")
                     .open_devtools();
             }
-            #[cfg(not(debug_assertions))]
-            let _ = app;
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -1340,9 +1474,11 @@ mod tests {
             action: "parse_module".to_string(),
             source_text: Some("# Test".to_string()),
             source_path: None,
-            source_name: "test.md".to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
+            source_name: Some("test.md".to_string()),
+            provider: Some(provider.to_string()),
+            model: Some(model.to_string()),
+            page_numbers: None,
+            pdf_visual_page_numbers: None,
             mock: Some(false),
         }
     }
@@ -1352,6 +1488,47 @@ mod tests {
         assert!(validate_parse_request(&parser_request("codex", "")).is_ok());
         assert!(validate_parse_request(&parser_request("deepseek", "")).is_err());
         assert!(validate_parse_request(&parser_request("unknown", "model")).is_err());
+    }
+
+    #[test]
+    fn parser_request_accepts_only_bounded_unique_pdf_page_selections() {
+        let request = ModuleParseRequest {
+            id: "pdf-pages".to_string(),
+            action: "render_pdf_pages".to_string(),
+            source_text: None,
+            source_path: Some("C:\\module.pdf".to_string()),
+            source_name: None,
+            provider: None,
+            model: None,
+            page_numbers: Some(vec![1, 3, 8]),
+            pdf_visual_page_numbers: None,
+            mock: None,
+        };
+        assert!(validate_parse_request(&request).is_ok());
+        assert!(validate_parse_request(&ModuleParseRequest {
+            page_numbers: Some(vec![1, 1]),
+            ..request
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn parser_request_limits_pdf_visual_pages_to_live_codex_pdf_sources() {
+        let mut request = parser_request("codex", "");
+        request.source_text = None;
+        request.source_path = Some("C:\\module.pdf".to_string());
+        request.source_name = Some("module.pdf".to_string());
+        request.pdf_visual_page_numbers = Some(vec![2, 4]);
+        assert!(validate_parse_request(&request).is_ok());
+
+        request.provider = Some("deepseek".to_string());
+        assert!(validate_parse_request(&request).is_err());
+        request.provider = Some("codex".to_string());
+        request.pdf_visual_page_numbers = Some(vec![2, 2]);
+        assert!(validate_parse_request(&request).is_err());
+        request.pdf_visual_page_numbers = Some(vec![1]);
+        request.source_path = Some("C:\\module.md".to_string());
+        assert!(validate_parse_request(&request).is_err());
     }
 
     #[test]
@@ -1808,6 +1985,211 @@ mod tests {
                 duplicate.is_err(),
                 "composite key must reject an exact duplicate revision"
             );
+        });
+    }
+
+    #[test]
+    fn module_draft_migration_is_additive_and_drafts_remain_separate_from_modules() {
+        tauri::async_runtime::block_on(async {
+            let mut connection = SqliteConnection::connect("sqlite::memory:")
+                .await
+                .expect("in-memory SQLite should open");
+            sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("initial schema should apply");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0002_module_revision_history.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("module history schema should apply");
+
+            let package_json = serde_json::json!({
+                "schemaVersion": 1,
+                "moduleId": "saved-module",
+                "revision": 1,
+                "metadata": {
+                    "title": "Saved module",
+                    "authors": [],
+                    "language": "zh-CN",
+                    "summary": "",
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "updatedAt": "2026-01-01T00:00:00.000Z"
+                },
+                "overview": "",
+                "sourceDocuments": [],
+                "chapters": [],
+                "scenes": [],
+                "locations": [],
+                "npcs": [],
+                "clues": [],
+                "handouts": [],
+                "suggestedChecks": [],
+                "keeperNotes": [],
+                "relations": [],
+                "extensions": {}
+            })
+            .to_string();
+            sqlx::query(
+                "INSERT INTO modules (id, revision, title, schema_version, source_text, module_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("saved-module")
+            .bind(1_i64)
+            .bind("Saved module")
+            .bind(1_i64)
+            .bind("published source")
+            .bind(&package_json)
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("pre-migration module should insert");
+
+            sqlx::raw_sql(include_str!("../migrations/0006_module_drafts.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("module draft migration should apply to an existing database");
+
+            let module_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM modules")
+                .fetch_one(&mut connection)
+                .await
+                .expect("published modules should remain queryable");
+            assert_eq!(module_count, 1);
+
+            sqlx::query(
+                "INSERT INTO module_drafts (draft_id, module_json, source_text, source_name, warnings_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind("active-editor")
+            .bind(&package_json)
+            .bind("unfinished source")
+            .bind("scenario.md")
+            .bind("[\"review location reference\"]")
+            .bind("2026-01-02T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("draft should insert without becoming a published module");
+
+            let draft_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM module_drafts")
+                .fetch_one(&mut connection)
+                .await
+                .expect("draft count should be readable");
+            assert_eq!(draft_count, 1);
+            let module_count_after_draft: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM modules")
+                .fetch_one(&mut connection)
+                .await
+                .expect("published module count should remain readable");
+            assert_eq!(module_count_after_draft, 1);
+
+            sqlx::query("DELETE FROM module_drafts WHERE draft_id=?")
+                .bind("active-editor")
+                .execute(&mut connection)
+                .await
+                .expect("draft should delete independently");
+            let retained_module_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM modules")
+                .fetch_one(&mut connection)
+                .await
+                .expect("published module should survive draft deletion");
+            assert_eq!(retained_module_count, 1);
+        });
+    }
+
+    #[test]
+    fn asset_board_and_seat_migration_is_additive_and_keeps_verifiers_out_of_sqlite() {
+        tauri::async_runtime::block_on(async {
+            let mut connection = SqliteConnection::connect("sqlite::memory:")
+                .await
+                .expect("in-memory SQLite should open");
+            sqlx::raw_sql(include_str!("../migrations/0001_initial.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("initial schema should apply");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0002_module_revision_history.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("module history migration should apply");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0003_assets_boards_and_seats.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("asset migration should apply to an existing database");
+            sqlx::raw_sql(include_str!("../migrations/0004_protocol_v2.sql"))
+                .execute(&mut connection)
+                .await
+                .expect("protocol v2 migration should apply after the asset migration");
+            sqlx::raw_sql(include_str!(
+                "../migrations/0005_asset_transfer_persistence.sql"
+            ))
+            .execute(&mut connection)
+            .await
+            .expect("asset transfer persistence migration should apply after protocol v2");
+
+            sqlx::query(
+                "INSERT INTO rooms (id, name, local_role, local_peer_id, host_peer_id, invite_token, relay_url, created_at, updated_at) VALUES (?, ?, 'host', ?, ?, ?, ?, ?, ?)",
+            )
+            .bind("room_abcdefghijklmnop")
+            .bind("Asset test")
+            .bind("host_abcdefghijklmnop")
+            .bind("host_abcdefghijklmnop")
+            .bind("test-invite-token-value")
+            .bind("wss://asset-test.invalid")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("room should insert after migration");
+
+            let asset_id = format!("sha256:{}", "a".repeat(64));
+            sqlx::query(
+                "INSERT INTO assets (asset_id, media_kind, media_type, byte_length, pixel_width, pixel_height, storage_key, created_at, last_verified_at) VALUES (?, 'image', 'image/webp', 4, 1, 1, ?, ?, ?)",
+            )
+            .bind(&asset_id)
+            .bind(format!("aa/{}.webp", "a".repeat(64)))
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("valid asset metadata should insert");
+            sqlx::query(
+                "INSERT INTO asset_refs (asset_id, owner_type, owner_id, owner_revision, slot, created_at) VALUES (?, 'module', 'module-a', 1, 'location.background', ?)",
+            )
+            .bind(&asset_id)
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("asset reference should insert");
+            assert!(
+                sqlx::query("DELETE FROM assets WHERE asset_id=?")
+                    .bind(&asset_id)
+                    .execute(&mut connection)
+                    .await
+                    .is_err(),
+                "a referenced asset must not be deletable"
+            );
+
+            sqlx::query(
+                "INSERT INTO room_seat_verifiers (room_id, seat_id, kdf_version, proof_version, created_at, updated_at) VALUES (?, 'investigator-1', 1, 1, ?, ?)",
+            )
+            .bind("room_abcdefghijklmnop")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&mut connection)
+            .await
+            .expect("seat verifier metadata should insert without credential material");
+            let columns = sqlx::query("PRAGMA table_info(room_seat_verifiers)")
+                .fetch_all(&mut connection)
+                .await
+                .expect("seat table columns should be inspectable");
+            let column_names = columns
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect::<Vec<_>>();
+            assert!(!column_names.iter().any(|name| {
+                name == "verifier" || name == "secret" || name == "derived_verifier"
+            }));
         });
     }
 }

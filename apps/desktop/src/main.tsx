@@ -2,31 +2,19 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  exportEventsToHtml,
-  exportEventsToMarkdown,
-  modulePackageSchema,
   type RoomEventV1,
 } from "@coc-room/protocol";
 import { App } from "./App";
+import { AppErrorBoundary, RuntimeModeNotice } from "./components/runtime-shell";
 import { getRepository, type RoomRecord } from "./data/repository";
-import { runNetworkDiagnostic, type NetworkDiagnosticMode } from "./lib/network-diagnostic";
+import type { NetworkDiagnosticMode } from "./lib/network-diagnostic";
 import {
-  runProcessNetworkDiagnostic,
   type NetworkProcessRole,
   type NetworkSmokeMode,
   type NetworkSmokeRendezvous,
 } from "./lib/process-network-diagnostic";
-import {
-  runProcessRoomSessionDiagnostic,
-  type RoomSessionSmokeMode,
-} from "./lib/process-room-session-diagnostic";
-import {
-  getModuleParserProvenance,
-  parseModule,
-  type ParserError,
-  type ParserResult,
-} from "./lib/module-parser";
-import { createStorageSmokeMarker } from "./lib/storage-smoke";
+import type { RoomSessionSmokeMode } from "./lib/process-room-session-diagnostic";
+import type { ParserError, ParserResult } from "./lib/module-parser";
 import "./styles.css";
 
 type AutomatedSmokeMode = NetworkSmokeMode | "storage";
@@ -66,35 +54,44 @@ async function bootstrap(): Promise<void> {
 
   root.render(
     <React.StrictMode>
-      <App />
+      <AppErrorBoundary>
+        <App />
+        <RuntimeModeNotice />
+      </AppErrorBoundary>
     </React.StrictMode>,
   );
 }
 
 async function runAutomatedSmoke(config: NetworkSmokeConfig): Promise<void> {
   try {
-    const result = config.mode === "storage"
-      ? await runStorageSmoke()
-      : (config.mode === "session-direct" || config.mode === "session-relay") && config.processRole
-        ? await runProcessRoomSessionDiagnostic({
-          relayOrigin: requireRelayUrl(config),
-          mode: config.mode as RoomSessionSmokeMode,
-          role: config.processRole,
-          runId: requireProcessRunId(config),
-          repository: await getRepository(),
-          publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
-          readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
-        })
-      : config.processRole
-        ? await runProcessNetworkDiagnostic({
-          relayOrigin: requireRelayUrl(config),
-          mode: config.mode as NetworkDiagnosticMode,
-          role: config.processRole,
-          runId: requireProcessRunId(config),
-          publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
-          readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
-        })
-        : await runNetworkDiagnostic(requireRelayUrl(config), config.mode as NetworkDiagnosticMode);
+    let result: unknown;
+    if (config.mode === "storage") {
+      result = await runStorageSmoke();
+    } else if ((config.mode === "session-direct" || config.mode === "session-relay") && config.processRole) {
+      const { runProcessRoomSessionDiagnostic } = await import("./lib/process-room-session-diagnostic");
+      result = await runProcessRoomSessionDiagnostic({
+        relayOrigin: requireRelayUrl(config),
+        mode: config.mode as RoomSessionSmokeMode,
+        role: config.processRole,
+        runId: requireProcessRunId(config),
+        repository: await getRepository(),
+        publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
+        readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
+      });
+    } else if (config.processRole) {
+      const { runProcessNetworkDiagnostic } = await import("./lib/process-network-diagnostic");
+      result = await runProcessNetworkDiagnostic({
+        relayOrigin: requireRelayUrl(config),
+        mode: config.mode as NetworkDiagnosticMode,
+        role: config.processRole,
+        runId: requireProcessRunId(config),
+        publishRendezvous: (rendezvous) => invoke("publish_network_smoke_rendezvous", { rendezvous }),
+        readRendezvous: () => invoke<NetworkSmokeRendezvous | null>("read_network_smoke_rendezvous"),
+      });
+    } else {
+      const { runNetworkDiagnostic } = await import("./lib/network-diagnostic");
+      result = await runNetworkDiagnostic(requireRelayUrl(config), config.mode as NetworkDiagnosticMode);
+    }
     root.render(<SmokeStatus message={`${smokeModeLabel(config.mode)}自检通过`} />);
     await invoke("finish_network_smoke", {
       report: {
@@ -118,6 +115,15 @@ async function runAutomatedSmoke(config: NetworkSmokeConfig): Promise<void> {
 }
 
 async function runStorageSmoke(): Promise<Record<string, unknown>> {
+  const [
+    { exportEventsToHtml, exportEventsToMarkdown, modulePackageSchema },
+    { getModuleParserProvenance, parseModule },
+    { createStorageSmokeMarker },
+  ] = await Promise.all([
+    import("@coc-room/protocol"),
+    import("./lib/module-parser"),
+    import("./lib/storage-smoke"),
+  ]);
   const repository = await getRepository();
   const runId = crypto.randomUUID();
   const roomId = `storage-smoke-${runId}`;

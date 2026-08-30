@@ -246,6 +246,7 @@ describe("EventReplica", () => {
     const replica = new EventReplica("room-1");
     expect(replica.apply(chatEvent(2))).toEqual({ status: "applied", lastContiguousSequence: 0 });
     expect(replica.missingSequences()).toEqual([1]);
+    expect(replica.orderedEvents()).toEqual([]);
     expect(replica.apply(chatEvent(1))).toEqual({ status: "applied", lastContiguousSequence: 2 });
     expect(replica.apply(chatEvent(1)).status).toBe("duplicate");
     expect(replica.orderedEvents().map((event) => event.sequence)).toEqual([1, 2]);

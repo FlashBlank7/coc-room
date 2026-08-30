@@ -20,6 +20,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "dev:web": "pnpm dev",
     "check": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build",
     "test": "vitest run",

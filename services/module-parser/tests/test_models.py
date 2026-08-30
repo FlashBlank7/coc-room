@@ -107,6 +107,33 @@ def test_codex_provider_does_not_require_an_api_key() -> None:
     config = ParseConfig(source_text="# Test", provider="codex", model="")
     assert config.provider == "codex"
     assert config.api_key is None
+    assert config.codex_timeout_seconds == 900.0
+    assert config.codex_heartbeat_seconds == 15.0
+    assert config.codex_auto_shrink_on_timeout is True
+    assert config.codex_timeout_fallback_chunk_chars == 6_000
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"codex_timeout_seconds": 29.9},
+        {"codex_timeout_seconds": 1_800.1},
+        {"codex_heartbeat_seconds": 4.9},
+        {"codex_heartbeat_seconds": 60.1},
+        {
+            "codex_timeout_fallback_chunk_chars": 2_000,
+            "codex_timeout_fallback_overlap_chars": 2_000,
+        },
+    ],
+)
+def test_codex_recovery_settings_have_hard_bounds(updates: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ParseConfig(
+            source_text="# Test",
+            provider="codex",
+            model="",
+            **updates,
+        )
 
 
 def test_deepseek_provider_still_requires_an_api_key() -> None:

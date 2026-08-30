@@ -16,10 +16,30 @@ body {
     radial-gradient(circle at 18% 5%, rgba(199, 163, 92, .08), transparent 28rem),
     #101317;
 }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { user-select: none; }
+summary { user-select: none; }
+/* Secondary copy is used heavily for guidance. Keep it visibly secondary,
+   but do not let 11–12px instructions disappear into the dark background. */
+.text-zinc-500 { color: rgb(161 161 170 / var(--tw-text-opacity, 1)); }
+.text-zinc-600 { color: rgb(137 137 147 / var(--tw-text-opacity, 1)); }
+a:focus-visible,
+summary:focus-visible {
+  border-radius: .375rem;
+  outline: 2px solid #c7a35c;
+  outline-offset: 3px;
+}
 ::selection { color: #101317; background: #c7a35c; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 10px; background: #3f3f46; background-clip: padding-box; }
 .event-scroll { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

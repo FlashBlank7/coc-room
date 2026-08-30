@@ -63,26 +63,29 @@ export function KeeperSceneControls({
   };
 
   return (
-    <section aria-label="守秘人场景控制" className="grid gap-4">
+    <section aria-label="KP 场景准备" className="grid gap-4">
       <header className="rounded-xl border border-amber-900/60 bg-amber-950/25 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-[.2em] text-brass">
-              <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />守秘人场景控制
+              <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />KP 场景准备
             </p>
             <h2 className="mt-1 truncate font-serif text-lg text-ink">{modulePackage.metadata.title}</h2>
-            <p className="mt-1 text-[11px] text-zinc-500">精确修订 v{modulePackage.revision}</p>
+            <details className="mt-1 text-[11px] text-zinc-500">
+              <summary className="cursor-pointer">查看模组版本</summary>
+              <p className="mt-1">本局使用第 {modulePackage.revision} 版</p>
+            </details>
           </div>
           <span className="shrink-0 rounded bg-amber-950 px-2 py-1 text-[10px] text-amber-300">仅 KP 可见</span>
         </div>
         <p className="mt-3 text-xs leading-5 text-amber-200/80">
-          地点与 NPC 一经公开，就会作为房间事件持久同步给全体成员；界面无法收回其他成员已经保存的副本。
+          展示地点或人物后，所有玩家都会收到并保存在自己的记录里。公开前请先核对绿色区域；发出后无法从其他人的设备上收回。
         </p>
       </header>
 
       {modulePackage.locations.length === 0 || !activeLocation ? (
         <div className="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">
-          当前模组修订没有可用地点。
+          这个模组还没有地点。请先回到模组库补充地点，再来准备场景。
         </div>
       ) : (
         <>
@@ -111,7 +114,7 @@ export function KeeperSceneControls({
                   <span className="min-w-0">
                     <span className="block truncate text-sm text-zinc-200">{location.name}</span>
                     <span className="block text-[10px] text-zinc-600">
-                      {relatedSceneCount > 0 ? `关联 ${relatedSceneCount} 个场景` : "未分组地点"}
+                      {relatedSceneCount > 0 ? `用于 ${relatedSceneCount} 个场景` : "可单独使用"}
                     </span>
                   </span>
                   {published && <span className="rounded bg-emerald-950 px-1.5 py-0.5 text-[10px] text-emerald-300">已公开</span>}
@@ -162,11 +165,11 @@ function LocationPublicationCard({
 }) {
   const playerDescription = location.playerDescription?.trim() ?? "";
   const cannotPublishReason = publishedLocation
-    ? "该地点已经公开"
+    ? "这个地点已经展示给玩家"
     : !playerDescription
-      ? "请先在模组编辑器填写地点的玩家可见描述"
+      ? "请先到模组编辑器填写“玩家看到的描述”"
       : disabled
-        ? disabledReason ?? "当前无法公开地点"
+        ? disabledReason ?? "现在无法展示地点"
         : undefined;
 
   return (
@@ -178,20 +181,20 @@ function LocationPublicationCard({
             <p className="mt-1 text-[11px] text-zinc-500">别名：{location.aliases.join("、")}</p>
           )}
         </div>
-        {publishedLocation && <span className="rounded bg-emerald-950 px-2 py-1 text-[10px] text-emerald-300">已向全房间公开</span>}
+        {publishedLocation && <span className="rounded bg-emerald-950 px-2 py-1 text-[10px] text-emerald-300">所有玩家已可见</span>}
       </div>
 
-      <KeeperText label="守秘人地点资料" text={location.description} />
+      <KeeperText label="只给 KP 看的地点资料" text={location.description} />
 
       <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/15 p-3">
         <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-emerald-300">
-          <Eye className="h-3.5 w-3.5" aria-hidden="true" />实际发送给玩家
+          <Eye className="h-3.5 w-3.5" aria-hidden="true" />玩家会看到这些文字
         </div>
         {playerDescription ? (
           <p className="whitespace-pre-wrap text-xs leading-5 text-zinc-300">{playerDescription}</p>
         ) : (
           <p className="text-xs leading-5 text-zinc-500">
-            玩家可见描述为空。不会使用上方守秘人资料作为后备文本。
+            还没有填写给玩家看的描述。为了避免剧透，上方 KP 私密资料绝不会自动发出。
           </p>
         )}
       </div>
@@ -205,7 +208,7 @@ function LocationPublicationCard({
         onClick={() => onPublish({ id: location.id, name: location.name, description: playerDescription })}
       >
         <Eye className="mr-2 h-4 w-4" aria-hidden="true" />
-        {publishedLocation ? "地点已公开" : "向全房间公开地点"}
+        {publishedLocation ? "玩家已经看到这个地点" : "向所有玩家展示这个地点"}
       </Button>
       {cannotPublishReason && !publishedLocation && (
         <p className={disabled ? "text-xs text-amber-300" : "text-xs text-zinc-500"}>{cannotPublishReason}</p>
@@ -216,12 +219,12 @@ function LocationPublicationCard({
 
 function SceneContext({ scenes }: { scenes: readonly ModuleScene[] }) {
   return (
-    <section aria-label="关联场景" className="rounded-lg border border-zinc-800 bg-zinc-950/45 p-3">
+    <section aria-label="用到这个地点的场景" className="rounded-lg border border-zinc-800 bg-zinc-950/45 p-3">
       <h4 className="flex items-center gap-2 text-xs font-semibold text-zinc-300">
-        <BookOpen className="h-3.5 w-3.5 text-brass" aria-hidden="true" />关联场景
+        <BookOpen className="h-3.5 w-3.5 text-brass" aria-hidden="true" />用到这个地点的场景
       </h4>
       {scenes.length === 0 ? (
-        <p className="mt-2 text-xs text-zinc-600">这个地点未被任何场景引用，仍可独立公开。</p>
+        <p className="mt-2 text-xs text-zinc-600">没有场景用到这个地点，但仍可单独展示给玩家。</p>
       ) : (
         <div className="mt-2 grid gap-2">
           {scenes.map((scene) => (
@@ -275,26 +278,26 @@ function NpcPublicationDirectory({
   const hiddenNpcCount = matchingNpcs.length - visibleRelatedNpcs.length - visibleOtherNpcs.length;
 
   return (
-    <section aria-label={`在${location.name}发布 NPC`} className="grid gap-3 rounded-xl border border-zinc-800 bg-zinc-900/65 p-4">
+    <section aria-label={`在${location.name}展示人物`} className="grid gap-3 rounded-xl border border-zinc-800 bg-zinc-900/65 p-4">
       <div>
         <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
-          <UserRound className="h-4 w-4 text-brass" aria-hidden="true" />让 NPC 在此地出现
+          <UserRound className="h-4 w-4 text-brass" aria-hidden="true" />让人物在这里出现
         </h3>
         <p className="mt-1 text-xs leading-5 text-zinc-500">
-          场景关联人物优先显示；其余模组 NPC 仍全部保留，避免遗漏跨场景人物。
+          优先显示这个场景里的人物；也可以搜索模组中的其他人物。
         </p>
       </div>
 
       <Input
-        aria-label="筛选 NPC"
+        aria-label="搜索人物"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         placeholder="按姓名、身份或公开稿筛选"
       />
 
       <NpcGroup
-        title="关联 NPC"
-        empty="场景没有关联 NPC。"
+        title="本场人物"
+        empty="这个场景没有预先安排人物。"
         npcs={visibleRelatedNpcs}
         location={location}
         publishedLocation={publishedLocation}
@@ -304,8 +307,8 @@ function NpcPublicationDirectory({
         onPublish={onPublish}
       />
       <NpcGroup
-        title="其他 NPC"
-        empty="没有其他 NPC。"
+        title="其他人物"
+        empty="没有其他人物。"
         npcs={visibleOtherNpcs}
         location={location}
         publishedLocation={publishedLocation}
@@ -316,7 +319,7 @@ function NpcPublicationDirectory({
       />
       {hiddenNpcCount > 0 && (
         <p className="text-xs text-amber-300">
-          还有 {hiddenNpcCount} 名 NPC 未显示；请输入更具体的关键词缩小范围。
+          还有 {hiddenNpcCount} 人未显示；请输入更具体的关键词缩小范围。
         </p>
       )}
     </section>
@@ -391,17 +394,17 @@ function NpcPublishCard({
   const playerDescription = npc.playerDescription?.trim() ?? "";
   const alreadyHere = currentLocationId === location.id;
   const cannotPublishReason = !publishedLocation
-    ? "请先公开地点"
+    ? "请先向玩家展示这个地点"
     : !playerDescription
-      ? "请先在模组编辑器填写 NPC 的玩家可见描述"
+      ? "请先到模组编辑器填写“玩家看到的人物描述”"
       : alreadyHere
-        ? "NPC 已在此地"
-        : disabled
-          ? disabledReason ?? "当前无法公开 NPC"
+        ? "这个人物已在这里"
+      : disabled
+          ? disabledReason ?? "现在无法展示人物"
           : undefined;
 
   return (
-    <article aria-label={`NPC 发布：${npc.name}`} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
+    <article aria-label={`展示人物：${npc.name}`} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-zinc-200">{npc.name}</div>
@@ -413,7 +416,7 @@ function NpcPublishCard({
           className="h-8 shrink-0 px-2 text-xs"
           disabled={Boolean(cannotPublishReason)}
           title={cannotPublishReason}
-          aria-label={`发布 NPC：${npc.name}`}
+          aria-label={`让${npc.name}在这里出现`}
           onClick={() => {
             if (!publishedLocation) return;
             onPublish(publishedLocation, {
@@ -424,17 +427,17 @@ function NpcPublishCard({
           }}
         >
           <Eye className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-          {alreadyHere ? "已在此地" : currentLocationId ? "移动到此地" : "发布到此地"}
+          {alreadyHere ? "已在这里" : currentLocationId ? "移动到这里" : "让其出现"}
         </Button>
       </div>
       <details className="mt-2 text-xs">
-        <summary className="cursor-pointer text-zinc-500">核对公开内容</summary>
+        <summary className="cursor-pointer text-zinc-500">先核对玩家会看到什么</summary>
         <div className="mt-2 grid gap-2">
-          <KeeperText label="守秘人 NPC 资料" text={npc.description} compact />
+          <KeeperText label="只给 KP 看的资料" text={npc.description} compact />
           <div className="rounded border border-emerald-900/50 bg-emerald-950/15 p-2">
-            <div className="text-[10px] font-semibold text-emerald-300">实际发送给玩家</div>
+            <div className="text-[10px] font-semibold text-emerald-300">玩家会看到这些文字</div>
             <p className="mt-1 whitespace-pre-wrap leading-5 text-zinc-400">
-              {playerDescription || "玩家可见描述为空；不会发送守秘人资料。"}
+              {playerDescription || "还没有给玩家看的描述；KP 私密资料不会被发送。"}
             </p>
           </div>
         </div>
