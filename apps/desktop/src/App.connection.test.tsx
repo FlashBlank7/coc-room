@@ -24,6 +24,12 @@ const mocks = vi.hoisted(() => ({
   sessionStop: vi.fn(),
   lastSessionV2: undefined as undefined | MockSessionV2Handle,
   lastAiOptions: undefined as undefined | MockAiCoordinatorOptions,
+  audioRuntimes: [] as Array<{
+    dispose: ReturnType<typeof vi.fn>;
+    setLocalVolume: ReturnType<typeof vi.fn>;
+    setMuted: ReturnType<typeof vi.fn>;
+    consumeView: ReturnType<typeof vi.fn>;
+  }>,
 }));
 
 vi.mock("./data/repository", async (importOriginal) => {
@@ -84,6 +90,19 @@ vi.mock("./network/RoomSessionV2", () => ({
 
     stop() {
       mocks.sessionStop(this.roomId);
+    }
+  },
+}));
+
+vi.mock("./lib/audio-sync", () => ({
+  SynchronizedAudioRuntime: class MockSynchronizedAudioRuntime {
+    dispose = vi.fn();
+    setLocalVolume = vi.fn();
+    setMuted = vi.fn();
+    consumeView = vi.fn();
+
+    constructor() {
+      mocks.audioRuntimes.push(this);
     }
   },
 }));
@@ -155,6 +174,7 @@ beforeEach(() => {
   mocks.sessionStop.mockReset();
   mocks.lastSessionV2 = undefined;
   mocks.lastAiOptions = undefined;
+  mocks.audioRuntimes.length = 0;
   useAppStore.setState({
     activeView: "lobby",
     currentRoom: undefined,
@@ -265,6 +285,34 @@ function approvedDraftCharacter(): Coc7Character {
 }
 
 describe("App V2 room presentation", () => {
+  it("keeps the ambience audio runtime alive across main-nav switches and disposes it on leave", async () => {
+    const testRoom = room("room-audio", "音频之房");
+    mocks.getRepository.mockResolvedValue(repository([testRoom]));
+    render(<App />);
+    await screen.findByText("连接测试大厅");
+
+    await connectLive(testRoom);
+    await waitFor(() => expect(mocks.audioRuntimes).toHaveLength(1));
+    const runtime = mocks.audioRuntimes[0]!;
+    expect(runtime.setLocalVolume).toHaveBeenCalledWith(1);
+    expect(runtime.dispose).not.toHaveBeenCalled();
+
+    // Browsing another main tab unmounts the room view; the table's music
+    // must keep playing through it.
+    fireEvent.click(screen.getAllByRole("button", { name: "我的调查员" })[0]!);
+    expect(await screen.findByText("没有迟到批准草稿")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(`当前房间：${testRoom.name}`)).toBeNull());
+    expect(runtime.dispose).not.toHaveBeenCalled();
+    expect(mocks.audioRuntimes).toHaveLength(1);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "调查现场" })[0]!);
+    expect(await screen.findByText(`当前房间：${testRoom.name}`)).toBeTruthy();
+    expect(mocks.audioRuntimes).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "离开当前房间" }));
+    await waitFor(() => expect(runtime.dispose).toHaveBeenCalled());
+  });
+
   it("drops a late-approved AI draft when the player switches rooms", async () => {
     const firstRoom = room("room-draft-a", "甲团");
     const secondRoom = room("room-draft-b", "乙团");
