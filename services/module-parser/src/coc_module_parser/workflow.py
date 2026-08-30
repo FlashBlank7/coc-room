@@ -20,6 +20,7 @@ from .client import (
     ProviderResponseError,
 )
 from .models import (
+    CheckDifficulty,
     CodexEvidenceFragmentV1,
     CodexWorldFragmentV1,
     EntityRelationV1,
@@ -31,8 +32,10 @@ from .models import (
     ParseIssueV1,
     ParseResultV1,
     ProviderUsageV1,
+    SceneV1,
     SourceDocumentV1,
     SourceRefV1,
+    SuggestedCheckV1,
 )
 from .source_refs import find_excerpt_matches, reference_matches_span
 from .text import TextChunk, infer_title, normalize_text, segment_text, stable_id
@@ -272,6 +275,90 @@ def _resolve_many(
             is not None
         ]
     )
+
+
+_CHECK_DIFFICULTY_SUFFIXES: tuple[tuple[str, CheckDifficulty], ...] = (
+    ("极难", CheckDifficulty.EXTREME),
+    ("困难", CheckDifficulty.HARD),
+    ("常规", CheckDifficulty.REGULAR),
+)
+
+
+def _resolve_scene_checks(
+    scene: SceneV1,
+    check_aliases: dict[str, str],
+    checks: list[SuggestedCheckV1],
+    issues: list[ParseIssueV1],
+) -> None:
+    """Keep every check the model attached to a scene playable.
+
+    A reference like "侦察困难" first re-links to an existing "侦察" check with
+    the difficulty suffix stripped; otherwise a minimal check entity is created
+    so the keeper still sees the suggestion instead of a silent removal.
+    """
+
+    resolved: list[str] = []
+    for raw in scene.suggested_check_ids:
+        direct = check_aliases.get(raw) or check_aliases.get(_lookup_key(raw))
+        if direct is not None:
+            resolved.append(direct)
+            continue
+        skill = raw.strip()
+        difficulty = CheckDifficulty.REGULAR
+        for suffix, level in _CHECK_DIFFICULTY_SUFFIXES:
+            if skill.endswith(suffix) and len(skill) > len(suffix):
+                skill = skill[: -len(suffix)].strip()
+                difficulty = level
+                break
+        base = check_aliases.get(skill) or check_aliases.get(_lookup_key(skill))
+        if base is not None:
+            resolved.append(base)
+            issues.append(
+                ParseIssueV1(
+                    severity=IssueSeverity.INFO,
+                    code="CHECK_REFERENCE_RELINKED",
+                    stage="resolve_references",
+                    message=(
+                        f"Linked scene {scene.id} check reference {raw!r} to the "
+                        f"existing {skill!r} check."
+                    ),
+                    entity_id=base,
+                )
+            )
+            continue
+        if not skill:
+            skill = raw.strip()
+        check_id = stable_id("check", f"{_lookup_key(skill)}|{difficulty.value}")
+        if check_id not in {check.id for check in checks}:
+            checks.append(
+                SuggestedCheckV1(
+                    id=check_id,
+                    skill=skill[:200],
+                    difficulty=difficulty,
+                    purpose="",
+                    success="",
+                    failure="",
+                    scene_id=None,
+                    source_refs=[],
+                )
+            )
+            issues.append(
+                ParseIssueV1(
+                    severity=IssueSeverity.INFO,
+                    code="CHECK_REFERENCE_MATERIALIZED",
+                    stage="resolve_references",
+                    message=(
+                        f"Created a {difficulty.value} {skill!r} check for scene "
+                        f"{scene.id}; review its purpose and outcomes in the editor."
+                    ),
+                    entity_id=check_id,
+                )
+            )
+        for alias in {check_id, raw, _lookup_key(raw), skill, _lookup_key(skill)}:
+            if alias:
+                check_aliases.setdefault(alias, check_id)
+        resolved.append(check_id)
+    scene.suggested_check_ids = _unique_strings(resolved)
 
 
 def _clean_refs(
@@ -1082,12 +1169,7 @@ class ModuleParser:
                 context=f"scene {scene.id} handouts",
                 issues=issues,
             )
-            scene.suggested_check_ids = _resolve_many(
-                scene.suggested_check_ids,
-                check_aliases,
-                context=f"scene {scene.id} checks",
-                issues=issues,
-            )
+            _resolve_scene_checks(scene, check_aliases, checks, issues)
         for clue in clues:
             clue.scene_ids = _resolve_many(
                 clue.scene_ids, scene_aliases, context=f"clue {clue.id} scenes", issues=issues

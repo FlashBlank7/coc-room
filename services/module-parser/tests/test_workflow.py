@@ -641,6 +641,54 @@ def test_reference_resolution_accepts_ids_or_visible_names() -> None:
     assert any(issue.code == "UNRESOLVED_REFERENCE" for issue in result.issues)
 
 
+def test_scene_check_references_relink_by_difficulty_or_materialize() -> None:
+    from coc_module_parser.models import CheckDifficulty, SuggestedCheckV1
+
+    fragment = ModuleFragmentV1(
+        metadata=FragmentMetadataV1(title="Test"),
+        scenes=[
+            SceneV1(
+                id="raw-scene",
+                title="Station",
+                suggested_check_ids=["聆听困难", "神秘学", "侦察极难"],
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0001", start=0, end=2, excerpt="te")
+                ],
+            )
+        ],
+        suggested_checks=[
+            SuggestedCheckV1(
+                id="raw-check",
+                skill="聆听",
+                source_refs=[
+                    SourceRefV1(chunk_id="chunk-0001", start=2, end=4, excerpt="st")
+                ],
+            )
+        ],
+    )
+    result = ModuleParser(SequenceExtractor([fragment])).parse(
+        ParseConfig(source_text="test", mock=True)
+    )
+    scene = result.module.scenes[0]
+    checks = {check.id: check for check in result.module.suggested_checks}
+    assert len(scene.suggested_check_ids) == 3
+    linked = [checks[check_id] for check_id in scene.suggested_check_ids]
+    listen = next(check for check in linked if check.skill == "聆听")
+    occult = next(check for check in linked if check.skill == "神秘学")
+    spot = next(check for check in linked if check.skill == "侦察")
+    assert listen.id == next(
+        check.id for check in result.module.suggested_checks if check.skill == "聆听"
+    )
+    assert occult.difficulty == CheckDifficulty.REGULAR
+    assert spot.difficulty == CheckDifficulty.EXTREME
+    assert any(issue.code == "CHECK_REFERENCE_RELINKED" for issue in result.issues)
+    assert any(issue.code == "CHECK_REFERENCE_MATERIALIZED" for issue in result.issues)
+    assert not any(
+        issue.code == "UNRESOLVED_REFERENCE" and "checks" in issue.message
+        for issue in result.issues
+    )
+
+
 def test_cache_reuses_validated_fragment_and_never_contains_key(tmp_path: Path) -> None:
     secret = "SUPER-SECRET-SHOULD-NOT-BE-CACHED"
     extractor = SequenceExtractor([ModuleFragmentV1()])
