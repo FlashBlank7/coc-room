@@ -20,8 +20,10 @@ import {
   hasManagedAssetStore,
   importManagedAssetBytes,
   readManagedAssetChunk,
+  resolveManagedAssetUrl,
   verifyManagedAsset,
 } from "../lib/asset-store";
+import { codexImageExecutor, CodexImageExecutorError } from "../lib/codex-image-executor";
 
 type CharacteristicKey = keyof Coc7Character["characteristics"];
 type StatusKey = keyof Coc7Character["status"];
@@ -154,6 +156,9 @@ export function CharactersView({
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiDraftNotice, setAiDraftNotice] = useState<string>();
+  const [avatarUrl, setAvatarUrl] = useState<string>();
+  const [portraitBusy, setPortraitBusy] = useState(false);
+  const [portraitNotice, setPortraitNotice] = useState<string>();
   const [savingTarget, setSavingTarget] = useState<"personal" | "room">();
   const [roomEditBaseUpdatedAt, setRoomEditBaseUpdatedAt] = useState<string | null | "unknown">(
     ownRoomCharacter?.updatedAt ?? null,
@@ -173,6 +178,77 @@ export function CharactersView({
   const dirtyRef = useRef(dirty);
   const draftNameRef = useRef(draft.name);
   const selectedPersonalRecord = personalCharacters.find((record) => record.characterId === draft.id);
+  const portraitAuthorization = useMemo(() => (
+    isV2 && currentRoom?.hostSeatId && sessionV2?.isHost && currentRoom.localSeatId === currentRoom.hostSeatId
+      ? { roomId: currentRoom.id, seatId: currentRoom.hostSeatId }
+      : undefined
+  ), [currentRoom, isV2, sessionV2]);
+
+  useEffect(() => {
+    let active = true;
+    const assetId = selectedPersonalRecord?.avatarAssetId;
+    if (!assetId || !hasManagedAssetStore()) {
+      setAvatarUrl(undefined);
+      return;
+    }
+    void resolveManagedAssetUrl(assetId)
+      .then((url) => { if (active) setAvatarUrl(url); })
+      .catch(() => { if (active) setAvatarUrl(undefined); });
+    return () => { active = false; };
+  }, [selectedPersonalRecord?.avatarAssetId]);
+
+  const composePortraitDescription = (): string => {
+    const moduleBackdrop = worldV2?.activeModule ? `时代与氛围参考模组《${worldV2.activeModule.title}》。` : "";
+    const parts = [
+      `${draft.name || "无名调查员"}，${draft.age} 岁，职业：${draft.occupation || "未定"}。`,
+      draft.background.personalDescription,
+      draft.background.traits ? `气质：${draft.background.traits}。` : "",
+      moduleBackdrop,
+    ];
+    return parts.filter(Boolean).join(" ").slice(0, 4_000);
+  };
+
+  const generatePortrait = async () => {
+    if (!portraitAuthorization || portraitBusy) return;
+    setPortraitBusy(true);
+    setPortraitNotice(undefined);
+    try {
+      const generated = await codexImageExecutor.generateDraft({
+        kind: "character",
+        description: composePortraitDescription(),
+        aspectRatio: "portrait",
+      }, portraitAuthorization);
+      if (!isLocallyOwnedDraft) throw new Error("只能为自己的角色保存人设图");
+      const repository = await getRepository();
+      const existing = personalCharacters.find((record) => record.characterId === draft.id);
+      const revision = (existing?.revision ?? 0) + 1;
+      await addManagedAssetReference({
+        assetId: generated.asset.assetId,
+        ownerType: "character",
+        ownerId: draft.id,
+        ownerRevision: revision,
+        slot: "avatar",
+      });
+      const now = new Date().toISOString();
+      await repository.savePersonalCharacterV2({
+        characterId: draft.id,
+        revision,
+        character: existing?.character ?? draft,
+        privateNotes: existing?.privateNotes ?? privateNotes,
+        avatarAssetId: generated.asset.assetId,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      await refreshPersonalLibrary();
+      setPortraitNotice(generated.deduplicated ? "人设图与已有素材相同，已直接使用。" : "人设图已生成并保存为头像。");
+    } catch (error) {
+      setPortraitNotice(error instanceof CodexImageExecutorError || error instanceof Error
+        ? `人设图生成失败：${error.message}`
+        : "人设图生成失败");
+    } finally {
+      setPortraitBusy(false);
+    }
+  };
   const selectedRoomCharacter = roomCharacters.find((character) => character.id === draft.id);
   const isLocallyOwnedDraft = !currentRoom
     || draft.ownerPeerId === effectiveLocalOwnerId
@@ -928,6 +1004,21 @@ export function CharactersView({
             )}
 
             <Section id="character-identity" title="1. 我是谁">
+              {(avatarUrl || portraitAuthorization) && <div className="mb-4 flex flex-wrap items-start gap-4 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+                {avatarUrl
+                  ? <img src={avatarUrl} alt={`${draft.name || "调查员"}的人设图`} className="h-36 w-28 rounded object-cover" />
+                  : <div className="grid h-36 w-28 place-items-center rounded border border-dashed border-zinc-700 text-xs text-zinc-600">暂无人设图</div>}
+                <div className="grid min-w-48 flex-1 gap-2">
+                  <p className="text-xs leading-5 text-zinc-500">人设图保存在本机角色库，会随 .cocchar 一起导出。</p>
+                  {portraitAuthorization && <div className="flex flex-wrap gap-2">
+                    <Button variant="secondary" disabled={portraitBusy || !isLocallyOwnedDraft} onClick={() => void generatePortrait()}>
+                      {portraitBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}按人设与当前模组生成人设图
+                    </Button>
+                    {portraitBusy && <Button variant="ghost" onClick={() => void codexImageExecutor.cancel(portraitAuthorization)}>停止</Button>}
+                  </div>}
+                  {portraitNotice && <p className="text-xs leading-5 text-zinc-400">{portraitNotice}</p>}
+                </div>
+              </div>}
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <Field label="姓名">
                   <Input disabled={!canEdit} maxLength={160} value={draft.name} onChange={(event) => editDraft((current) => ({ ...current, name: event.target.value }))} />
