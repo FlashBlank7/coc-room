@@ -325,4 +325,102 @@ describe("LobbyView saved rooms", () => {
     expect(await screen.findByText(/请确认 KP 仍在线/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "加入调查" }).hasAttribute("disabled")).toBe(false);
   });
+
+  it("refuses a player invitation for a room this machine hosts instead of overwriting the keeper record", async () => {
+    const hostRecord: RoomRecord = {
+      ...modernRoom,
+      id: "hosted-room-id-12345",
+      name: "我主持的调查",
+      localRole: "host",
+      localPeerId: "host-peer-local",
+      hostPeerId: "host-peer-local",
+      inviteToken: "host-relay-token-keep",
+      joinToken: "host-peer-local." + "j".repeat(43),
+      localSeatId: "seat-host",
+      lastSeq: 77,
+    };
+    const onConnect = vi.fn(async () => undefined);
+    const invitation = encodeInvitationV2({
+      protocolVersion: 2,
+      roomId: hostRecord.id,
+      roomName: hostRecord.name,
+      seatId: "seat-guest",
+      role: "player",
+      relayToken: "host-peer-local." + "s".repeat(43),
+      seatSecret: "x".repeat(48),
+      credentialVersion: 1,
+      hostSeatId: "seat-host",
+      hostPeerId: "host-peer-local",
+      relayUrl: "ws://127.0.0.1:8787/v1/rooms/hosted-room-id-12345/ws",
+    });
+    useAppStore.setState({ rooms: [hostRecord] });
+    render(<LobbyView onConnect={onConnect} onOpenLocalRecord={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /我是玩家，加入朋友/ }));
+    fireEvent.change(screen.getByLabelText("你的称呼"), { target: { value: "守秘人" } });
+    fireEvent.change(screen.getByLabelText("KP 发给你的邀请"), { target: { value: invitation } });
+    fireEvent.click(screen.getByRole("button", { name: "加入调查" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("你在本机主持的");
+    expect(alert.textContent).toContain("没有覆盖 KP 记录");
+    expect(onConnect).not.toHaveBeenCalled();
+    expect(useAppStore.getState().rooms[0]).toEqual(hostRecord);
+  });
+
+  it("rejoins a known room with a fresh invite without resetting local continuity", async () => {
+    const priorRecord: RoomRecord = {
+      ...modernRoom,
+      id: "joined-room-id-12345",
+      name: "旧的房间名字",
+      localRole: "player",
+      localPeerId: "player-peer-keep",
+      hostPeerId: "host-id-old",
+      inviteToken: "stale-relay-token",
+      lastSeq: 42,
+      createdAt: "2026-05-01T00:00:00.000Z",
+      localSeatId: "seat-alice",
+      seatCredentialVersion: 1,
+    };
+    const onConnect = vi.fn(async (_room: RoomRecord, _nickname: string) => undefined);
+    const invitation = encodeInvitationV2({
+      protocolVersion: 2,
+      roomId: priorRecord.id,
+      roomName: "雾港来信",
+      seatId: "seat-alice",
+      role: "player",
+      relayToken: "host-id-1234." + "n".repeat(43),
+      seatSecret: "y".repeat(48),
+      credentialVersion: 2,
+      hostSeatId: "seat-host",
+      hostPeerId: "host-id-1234",
+      relayUrl: "ws://127.0.0.1:8787/v1/rooms/joined-room-id-12345/ws",
+    });
+    useAppStore.setState({ rooms: [priorRecord] });
+    render(<LobbyView onConnect={onConnect} onOpenLocalRecord={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /我是玩家，加入朋友/ }));
+    fireEvent.change(screen.getByLabelText("你的称呼"), { target: { value: "调查员" } });
+    fireEvent.change(screen.getByLabelText("KP 发给你的邀请"), { target: { value: invitation } });
+    fireEvent.click(screen.getByRole("button", { name: "加入调查" }));
+
+    await waitFor(() => expect(onConnect).toHaveBeenCalledOnce());
+    const [rejoinedRoom] = onConnect.mock.calls[0]!;
+    expect(rejoinedRoom).toMatchObject({
+      id: priorRecord.id,
+      localRole: "player",
+      // Continuity preserved from the saved record.
+      localPeerId: "player-peer-keep",
+      lastSeq: 42,
+      createdAt: "2026-05-01T00:00:00.000Z",
+      // Freshness adopted from the new invite.
+      name: "雾港来信",
+      hostPeerId: "host-id-1234",
+      inviteToken: "host-id-1234." + "n".repeat(43),
+      seatCredentialVersion: 2,
+      localSeatId: "seat-alice",
+      hostSeatId: "seat-host",
+    });
+    expect(rejoinedRoom).not.toHaveProperty("joinToken");
+  });
 });

@@ -150,15 +150,37 @@ export function LobbyView({ onConnect, onOpenLocalRecord }: LobbyViewProps) {
       inviteInputRef.current?.focus();
       return;
     }
+    const lobbyState = useAppStore.getState();
+    const existingRecord = lobbyState.rooms.find((candidate) => candidate.id === parsed.roomId)
+      ?? (lobbyState.currentRoom?.id === parsed.roomId ? lobbyState.currentRoom : undefined);
+    if (existingRecord?.localRole === "host") {
+      // Connecting with a player invitation would persist a player record over
+      // this machine's host record (host token, seat and identity), leaving
+      // the room permanently unhostable. Refuse before anything is written.
+      setError({
+        message: `这份玩家邀请属于你在本机主持的“${existingRecord.name}”，因此没有覆盖 KP 记录。邀请请发给玩家使用；你可以从开始页的房间卡片继续以 KP 身份进入。`,
+      });
+      inviteInputRef.current?.focus();
+      return;
+    }
     if (!confirmLeavingCurrentRoom("加入另一个房间")) return;
     setBusy(true);
     try {
       await saveLocalSeatSecret(parsed.roomId, parsed.seatId, parsed.seatSecret);
       const now = new Date().toISOString();
+      // Rejoining a room with a fresh invite must extend the existing local
+      // record instead of resetting it: keep the local peer identity, lastSeq
+      // (so event catch-up continues from what is already on this machine)
+      // and createdAt, while adopting the invite's newer seat credentials.
       const room: RoomRecord = {
-        id: parsed.roomId, name: parsed.roomName ?? `未命名调查 · ${parsed.roomId.slice(0, 8)}`, localRole: "player",
-        localPeerId: crypto.randomUUID(), hostPeerId: parsed.hostPeerId, inviteToken: parsed.relayToken,
-        relayUrl: parsed.relayUrl, lastSeq: 0, createdAt: now, updatedAt: now,
+        id: parsed.roomId,
+        name: parsed.roomName ?? existingRecord?.name ?? `未命名调查 · ${parsed.roomId.slice(0, 8)}`,
+        localRole: "player",
+        localPeerId: existingRecord?.localPeerId ?? crypto.randomUUID(),
+        hostPeerId: parsed.hostPeerId, inviteToken: parsed.relayToken,
+        relayUrl: parsed.relayUrl,
+        lastSeq: existingRecord?.lastSeq ?? 0,
+        createdAt: existingRecord?.createdAt ?? now, updatedAt: now,
         protocolVersion: 2, localSeatId: parsed.seatId, hostSeatId: parsed.hostSeatId,
         seatCredentialVersion: parsed.credentialVersion,
       };

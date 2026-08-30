@@ -3,12 +3,24 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoardV1, ModulePackageV1, RoomArtifactV2, RoomEntityV2, RoomEventV1 } from "@coc-room/protocol";
+import { invoke } from "@tauri-apps/api/core";
 import { getRepository, type RoomRecord } from "../data/repository";
 import { createCocmodPackage } from "../lib/cocmod-package";
 import type { RoomSession } from "../network/RoomSession";
 import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
 import { ModulesView } from "./ModulesView";
+
+// Desktop-mode tests drive the Tauri IPC surface directly; only `invoke` and
+// `listen` are replaced so the plugin modules keep their real exports.
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/core")>(),
+  invoke: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/event")>(),
+  listen: vi.fn(async () => () => undefined),
+}));
 
 afterEach(async () => {
   cleanup();
@@ -1041,6 +1053,158 @@ describe("ModulesView room publishing controls", () => {
     expect(screen.queryByLabelText(`用于本次跑团：${modulePackage.metadata.title}`)).toBeNull();
     expect(screen.queryByLabelText("公开线索：可公开线索")).toBeNull();
     expect(screen.queryByLabelText("公开手记：玩家手记")).toBeNull();
+  });
+});
+
+describe("ModulesView recovery draft preservation", () => {
+  it("keeps an unrestored recovery draft when the keeper browses other saved material", async () => {
+    const repository = await getRepository();
+    const savedModule = {
+      ...createModulePackageWithEntities(),
+      moduleId: "module_saved_keep_recovery_01",
+      metadata: { ...createModulePackageWithEntities().metadata, title: "已保存的正式资料" },
+    };
+    const recoveryPackage = {
+      ...createModulePackageWithEntities(),
+      moduleId: "module_recovery_keep_01",
+      metadata: { ...createModulePackageWithEntities().metadata, title: "耗时整理的未保存草稿" },
+    };
+    await repository.saveModule({ package: savedModule, sourceText: "正式原文" });
+    await repository.saveModuleDraft({
+      draftId: "active-module-editor",
+      package: recoveryPackage,
+      sourceText: "整晚解析出的草稿原文",
+      sourceName: "recovery.md",
+      warnings: [],
+      updatedAt: "2026-08-30T00:00:00.000Z",
+    });
+    useAppStore.setState({ modules: [savedModule] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ModulesView />);
+    await screen.findByLabelText("可恢复的模组草稿");
+
+    fireEvent.click(within(screen.getByLabelText("已保存模组：已保存的正式资料"))
+      .getByRole("button", { name: "查看资料" }));
+    await screen.findByLabelText("已保存的正式资料模组内容浏览");
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("可恢复的模组草稿")).toBeTruthy();
+    expect((await repository.getModuleDraft("active-module-editor"))?.package.moduleId)
+      .toBe(recoveryPackage.moduleId);
+
+    fireEvent.click(within(screen.getByLabelText("可恢复的模组草稿"))
+      .getByRole("button", { name: "恢复并继续检查" }));
+    const restored = await screen.findByLabelText("未保存的解析草稿");
+    expect(within(restored).getByText(/已恢复上次未保存的草稿/)).not.toBeNull();
+
+    await repository.deleteModule(savedModule.moduleId);
+  });
+
+  it("asks for explicit consent before a new parse may replace a pending recovery draft", async () => {
+    const repository = await getRepository();
+    const recoveryPackage = {
+      ...createModulePackageWithEntities(),
+      moduleId: "module_recovery_reparse_01",
+      metadata: { ...createModulePackageWithEntities().metadata, title: "尚未恢复的整理成果" },
+    };
+    const parsedModule = {
+      ...createModulePackageWithEntities(),
+      moduleId: "module_new_parse_after_recovery_01",
+      metadata: { ...createModulePackageWithEntities().metadata, title: "新的整理结果" },
+    };
+    await repository.saveModuleDraft({
+      draftId: "active-module-editor",
+      package: recoveryPackage,
+      sourceText: "旧草稿原文",
+      sourceName: "recovery.md",
+      warnings: [],
+      updatedAt: "2026-08-30T00:00:00.000Z",
+    });
+    const fetchMock = mockSuccessfulBrowserParse(parsedModule);
+    render(<ModulesView />);
+    await screen.findByLabelText("可恢复的模组草稿");
+    fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), {
+      target: { value: "覆盖恢复点之前必须先确认的新原文" },
+    });
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("未恢复的备团草稿"));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("可恢复的模组草稿")).toBeTruthy();
+    expect((await repository.getModuleDraft("active-module-editor"))?.package.moduleId)
+      .toBe(recoveryPackage.moduleId);
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+    await screen.findByLabelText("未保存的解析草稿");
+    expect(screen.queryByLabelText("可恢复的模组草稿")).toBeNull();
+    await waitFor(async () => {
+      expect((await repository.getModuleDraft("active-module-editor"))?.package.moduleId)
+        .toBe(parsedModule.moduleId);
+    }, { timeout: 2_000 });
+  });
+});
+
+describe("ModulesView desktop parse cancellation", () => {
+  it("stops a desktop parse by requesting native cancellation and discarding the run", async () => {
+    // Cache the repository before pretending to be the Tauri runtime so data
+    // access keeps using the test-safe backend.
+    await getRepository();
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    let rejectParse: ((cause: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command: unknown) => {
+      if (command === "run_module_parser") {
+        return new Promise((_resolve, reject) => { rejectParse = reject; });
+      }
+      if (command === "cancel_module_parse") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    try {
+      render(<ModulesView />);
+      fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), {
+        target: { value: "桌面端整理到一半必须能停止的模组正文" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+
+      const stop = await screen.findByRole("button", { name: "停止整理" });
+      fireEvent.click(stop);
+
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("cancel_module_parse"));
+      rejectParse?.("模组解析已按请求停止，本次结果已丢弃");
+
+      const stopped = await screen.findByRole("status");
+      expect(stopped.textContent).toContain("已停止本次整理");
+      expect(stopped.textContent).toContain("没有生成或保存新草稿");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByLabelText("未保存的解析草稿")).toBeNull();
+      expect((screen.getByLabelText("粘贴原始模组文本") as HTMLTextAreaElement).value)
+        .toContain("必须能停止");
+    } finally {
+      vi.unstubAllGlobals();
+      invokeMock.mockReset();
+    }
+  });
+});
+
+describe("ModulesView error visibility", () => {
+  it("pins failures to the viewport with a dismiss action instead of hiding them at the page bottom", async () => {
+    const view = render(<ModulesView />);
+    const input = view.container.querySelector<HTMLInputElement>('input[aria-label="导入模组包文件"]');
+    if (!input) throw new Error("module package input was not rendered");
+    const file = new File(["{}"], "big.cocmod.json", { type: "application/json" });
+    Object.defineProperty(file, "size", { value: 17 * 1024 * 1024 });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("已拒绝导入");
+    expect(alert.className).toContain("fixed");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "知道了" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 

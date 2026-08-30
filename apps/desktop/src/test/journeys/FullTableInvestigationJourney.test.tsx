@@ -631,8 +631,8 @@ describe("table investigation core (components + V2 protocol; not file import, R
 
     const consequenceSubmit = vi.fn().mockResolvedValue("confirmed");
     renderRoom(authority.world, miniHostSeat, consequenceSubmit, authority.hostViews);
-    expect(screen.getByRole("heading", { name: "描述这次成功带来的变化" })).toBeTruthy();
-    fireEvent.change(screen.getByRole("textbox", { name: "这次检定的叙述结果" }), {
+    expect(screen.getByRole("heading", { name: /描述 .* 这次成功带来的变化/ })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/^检定叙述结果：/), {
       target: { value: tableStory.consequence },
     });
     fireEvent.click(screen.getByRole("button", { name: "发布这次叙述结果" }));

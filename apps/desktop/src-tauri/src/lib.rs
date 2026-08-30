@@ -59,6 +59,7 @@ const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const MAX_SOURCE_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_PDF_SOURCE_FILE_BYTES: u64 = 200 * 1024 * 1024;
 const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+const MODULE_PARSER_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_SIDECAR_STDOUT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SIDECAR_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_PROBE_BYTES: u64 = 4 * 1024;
@@ -118,6 +119,7 @@ struct AuthorizedModuleSources(Mutex<HashSet<PathBuf>>);
 #[derive(Default)]
 struct ModuleParserExecutionGate {
     running: AtomicBool,
+    cancel_requested: AtomicBool,
 }
 
 impl ModuleParserExecutionGate {
@@ -125,9 +127,25 @@ impl ModuleParserExecutionGate {
         self.running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "已有模组解析任务正在运行".to_string())?;
+        // A cancel request always belongs to exactly one run; a stale flag
+        // from a request that raced a finished run must not kill this one.
+        self.cancel_requested.store(false, Ordering::Release);
         Ok(ModuleParserPermit {
             running: &self.running,
         })
+    }
+
+    /// Requests the active parse to stop. Returns whether a parse was running.
+    fn request_cancel(&self) -> bool {
+        if !self.running.load(Ordering::Acquire) {
+            return false;
+        }
+        self.cancel_requested.store(true, Ordering::Release);
+        true
+    }
+
+    fn cancel_pending(&self) -> bool {
+        self.cancel_requested.load(Ordering::Acquire)
     }
 }
 
@@ -1085,10 +1103,23 @@ async fn run_module_parser(
     let mut messages = Vec::new();
     let mut stderr_bytes = 0;
     loop {
-        let event = match timeout_at(deadline, receiver.recv()).await {
-            Ok(Some(event)) => event,
-            Ok(None) => return Err("模组解析器通信异常".to_string()),
-            Err(_) => return Err("模组解析超时，已终止解析器".to_string()),
+        // Check the cancel flag between short recv windows so an explicit stop
+        // from the module editor terminates the sidecar promptly. Returning
+        // drops `child` (SidecarChildGuard), which kills the sidecar and, on
+        // Windows, closes the KILL_ON_JOB_CLOSE job for its whole process tree.
+        let event = loop {
+            if execution_gate.cancel_pending() {
+                return Err("模组解析已按请求停止，本次结果已丢弃".to_string());
+            }
+            let poll_deadline = deadline.min(Instant::now() + MODULE_PARSER_CANCEL_POLL_INTERVAL);
+            match timeout_at(poll_deadline, receiver.recv()).await {
+                Ok(Some(event)) => break event,
+                Ok(None) => return Err("模组解析器通信异常".to_string()),
+                Err(_) if Instant::now() >= deadline => {
+                    return Err("模组解析超时，已终止解析器".to_string())
+                }
+                Err(_) => {}
+            }
         };
         match event {
             CommandEvent::Stdout(bytes) => {
@@ -1136,6 +1167,14 @@ async fn run_module_parser(
     } else {
         Ok(messages)
     }
+}
+
+/// Stops the parse currently running in `run_module_parser`, terminating its
+/// sidecar so it stops consuming provider tokens. Returns whether a parse was
+/// running when the request arrived.
+#[tauri::command]
+fn cancel_module_parse(execution_gate: State<'_, ModuleParserExecutionGate>) -> bool {
+    execution_gate.request_cancel()
 }
 
 fn parse_jsonl_messages(
@@ -1433,7 +1472,8 @@ pub fn run() {
             npc_reply::run_npc_stats_draft,
             npc_reply::cancel_npc_stats_draft,
             select_module_source,
-            run_module_parser
+            run_module_parser,
+            cancel_module_parse
         ])
         .setup(|app| {
             codex_image::recover_stale_image_executor_state(app.handle())
@@ -1466,6 +1506,26 @@ mod tests {
 
         drop(permit);
         assert!(gate.try_acquire().is_ok());
+    }
+
+    #[test]
+    fn parser_cancel_requests_apply_only_to_the_active_run() {
+        let gate = ModuleParserExecutionGate::default();
+        assert!(!gate.request_cancel(), "idle gate has nothing to cancel");
+        assert!(!gate.cancel_pending());
+
+        let permit = gate.try_acquire().expect("permit should succeed");
+        assert!(gate.request_cancel());
+        assert!(gate.cancel_pending());
+        drop(permit);
+
+        let _next = gate
+            .try_acquire()
+            .expect("gate should be reusable after a cancelled run");
+        assert!(
+            !gate.cancel_pending(),
+            "a stale cancel must not kill the next run"
+        );
     }
 
     fn parser_request(provider: &str, model: &str) -> ModuleParseRequest {

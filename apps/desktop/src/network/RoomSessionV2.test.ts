@@ -202,6 +202,53 @@ describe("RoomSessionV2", () => {
     host.stop();
   });
 
+  it("kicks a connected player's live session when the KP rotates their invitation", async () => {
+    const hub = new MemoryTransportHub();
+    const hostRoom = roomRecord("host-rotate-kick-v2", "host", "seat-host-rotate-kick");
+    const host = new RoomSessionV2({
+      room: hostRoom,
+      displayName: "KP",
+      repository: new MemoryRepository(),
+      transport: hub.create(participant(hostRoom, "KP"), hostRoom.hostPeerId),
+    });
+    const rosterSnapshots: SeatV2[][] = [];
+    host.onPresence = (seats) => rosterSnapshots.push(structuredClone(seats));
+    await host.start();
+    const invitation = await host.issueSeatInvitation("Alice", "seat-rotate-kick-alice");
+    await saveLocalSeatSecret(invitation.roomId, invitation.seatId, invitation.seatSecret);
+    const aliceRoom = playerRoom(invitation, "rotate-kick-alice-peer");
+    const alice = new RoomSessionV2({
+      room: aliceRoom,
+      displayName: "Alice",
+      repository: new MemoryRepository(),
+      transport: hub.create(participant(aliceRoom, "Alice"), hostRoom.hostPeerId),
+    });
+    const authStates: string[] = [];
+    alice.onAuthenticationState = (state) => authStates.push(state);
+    const errors: string[] = [];
+    alice.onError = (message) => errors.push(message);
+    await alice.start();
+    await eventually(() => alice.isAuthenticated);
+
+    await host.rotateSeatInvitation(invitation.seatId);
+    await eventually(() => !alice.isAuthenticated);
+    expect(authStates.at(-1)).toBe("failed");
+    expect(errors.some((message) => message.includes("邀请可能已轮换"))).toBe(true);
+    expect(hub.messages.some(({ from, to, message }) => (
+      from === hostRoom.hostPeerId && to === aliceRoom.localPeerId
+      && message.kind === "v2.auth.result" && !message.ok
+    ))).toBe(true);
+    expect(rosterSnapshots.at(-1)?.find(({ seatId }) => seatId === invitation.seatId)?.peerId).toBeUndefined();
+    await expect(alice.submit({
+      type: "chat.message",
+      audience: { kind: "room" },
+      payload: { message: "zombie", format: "plain" },
+    })).rejects.toThrow(/席位认证完成前/);
+
+    alice.stop();
+    host.stop();
+  });
+
   it("reconnects a stable seat from a new peer and resumes at its contiguous cursor", async () => {
     const hub = new MemoryTransportHub();
     const hostRoom = roomRecord("host-reconnect-v2", "host", "seat-host-reconnect");

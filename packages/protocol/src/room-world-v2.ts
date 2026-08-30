@@ -309,13 +309,18 @@ export function reduceRoomWorldStateV2(
       if (request === undefined) throw new Error(`check request ${event.payload.requestId} does not exist`);
       const authorization = state.checkAuthorizations.get(event.payload.requestId);
       if (authorization !== undefined) {
-        const requesterDeclinesUnrolledPush = request.pushOfRequestId !== undefined
-          && authorization.resolvedByEventId === undefined
-          && event.sender.role === "player"
-          && event.sender.seatId === request.requesterSeatId
-          && event.payload.outcome === "cancelled";
-        if (!requesterDeclinesUnrolledPush) {
-          throw new Error(`check ${event.payload.requestId} was already authorized`);
+        // An authorized check whose dice have not yet been rolled may still be
+        // walked back with an explicit cancellation: the host withdraws a
+        // mistaken ruling, or the requester declines the roll (for a push this
+        // is the informed choice after reading the consequence). Once the dice
+        // have landed the check is terminal and only its outcome may follow.
+        const cancelsUnrolledAuthorization = authorization.resolvedByEventId === undefined
+          && event.payload.outcome === "cancelled"
+          && (event.sender.role === "host" || event.sender.seatId === request.requesterSeatId);
+        if (!cancelsUnrolledAuthorization) {
+          throw new Error(authorization.resolvedByEventId !== undefined
+            ? `check ${event.payload.requestId} was already rolled`
+            : `check ${event.payload.requestId} was already authorized`);
         }
       }
       if (state.checkClosures.has(event.payload.requestId)) {

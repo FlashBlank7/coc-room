@@ -21,7 +21,8 @@ import { useAppStore, type AppView } from "./store/app-store";
 import { LobbyView } from "./views/LobbyView";
 import { cn } from "./lib/cn";
 import { isRoomHostAvailable } from "./lib/room-availability";
-import { hasManagedAssetStore, managedAssetStoreKind } from "./lib/asset-store";
+import { hasManagedAssetStore, managedAssetStoreKind, resolveManagedAssetUrl } from "./lib/asset-store";
+import { SynchronizedAudioRuntime, type AudioSyncStatus } from "./lib/audio-sync";
 import type { RoomAssetCoordinator } from "./network/RoomAssetCoordinator";
 import type {
   NpcInteractionBroker,
@@ -126,11 +127,61 @@ export function App() {
   const [aiDraftStage, setAiDraftStage] = useState<string>();
   const [lateApprovedDraft, setLateApprovedDraft] = useState<Coc7Character>();
   const [resolveRoomAsset, setResolveRoomAsset] = useState<((asset: AssetDescriptorV1) => Promise<string>)>();
+  // Ambience audio survives main-nav switches: the runtime lives with the
+  // session here, not with the room view that unmounts on every tab change.
+  const [audioStatus, setAudioStatus] = useState<AudioSyncStatus>();
+  const [audioVolume, setAudioVolume] = useState(1);
+  const [audioMuted, setAudioMuted] = useState(false);
+  const audioRuntimeRef = useRef<SynchronizedAudioRuntime>();
+  const resolveRoomAssetRef = useRef<typeof resolveRoomAsset>();
+  resolveRoomAssetRef.current = resolveRoomAsset;
+
+  useEffect(() => {
+    if (!sessionV2) return;
+    const runtime = new SynchronizedAudioRuntime({
+      resolveAssetUrl: async (asset) => {
+        const resolver = resolveRoomAssetRef.current;
+        if (resolver) return resolver(asset);
+        if (!hasManagedAssetStore()) return null;
+        return resolveManagedAssetUrl(asset.assetId);
+      },
+      localVolume: 1,
+      muted: false,
+      onStatus: setAudioStatus,
+    });
+    audioRuntimeRef.current = runtime;
+    setAudioVolume(1);
+    setAudioMuted(false);
+    return () => {
+      if (audioRuntimeRef.current === runtime) audioRuntimeRef.current = undefined;
+      runtime.dispose();
+      setAudioStatus(undefined);
+    };
+  }, [sessionV2]);
+
+  useEffect(() => {
+    audioRuntimeRef.current?.setLocalVolume(audioVolume);
+    audioRuntimeRef.current?.setMuted(audioMuted);
+  }, [audioMuted, audioVolume, sessionV2]);
+
+  useEffect(() => {
+    const runtime = audioRuntimeRef.current;
+    if (!runtime) return;
+    for (const view of viewsV2) runtime.consumeView(view);
+  }, [viewsV2]);
+  const isV2PlayerRoom = Boolean(currentRoom && (currentRoom.protocolVersion ?? 1) === 2 && currentRoom.localRole === "player");
+  const seatAuthFailedV2 = Boolean(isV2PlayerRoom && !isViewingLocalRecord && authenticationV2 === "failed");
+  const hostPathV2 = currentRoom ? paths[currentRoom.hostPeerId] : undefined;
+  // The transport only reports "offline" when it tears down an existing link,
+  // so a host absent from the moment we joined never gets a path entry. Once
+  // the relay is up and presence has arrived, a missing host seat is offline.
+  const hostOfflineV2 = Boolean(isV2PlayerRoom && (
+    hostPathV2 === "offline"
+    || (hostPathV2 === undefined && relayConnected && seatsV2.length > 0 && !seatsV2.some((seat) => seat.role === "host"))
+  ));
   const roomPaused = Boolean(currentRoom && !isViewingLocalRecord && (
     (currentRoom.protocolVersion ?? 1) === 2
-      ? currentRoom.localRole === "player" && (
-          authenticationV2 === "failed" || paths[currentRoom.hostPeerId] === "offline"
-        )
+      ? seatAuthFailedV2 || hostOfflineV2
       : !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId])
   ));
 
@@ -212,6 +263,7 @@ export function App() {
     setRequestCharacterDraft(undefined);
     setHostCharacterDrafts([]);
     setAiDraftStage(undefined);
+    setLateApprovedDraft(undefined);
     setNpcJobStatuses([]);
     setNpcShadowReplies([]);
     setResolveRoomAsset(undefined);
@@ -354,7 +406,11 @@ export function App() {
         };
         next.onRelayStateChange = (connected) => {
           latestRelayConnected = connected;
-          if (active && sessionV2Ref.current === next) useAppStore.getState().setRelayConnected(connected);
+          if (active && sessionV2Ref.current === next) {
+            const state = useAppStore.getState();
+            state.setRelayConnected(connected);
+            if (connected) state.setConnectionError(undefined);
+          }
         };
         next.onCommandRejected = (_commandId, message) => {
           if (active && sessionV2Ref.current === next) useAppStore.getState().setConnectionError(message);
@@ -561,6 +617,8 @@ export function App() {
     ? "正在连接房间…"
     : isViewingLocalRecord
     ? "本地记录（只读）"
+    : connectionPhase === "live" && seatAuthFailedV2
+    ? "席位验证失败：邀请可能已被换新，请向 KP 索取新邀请串"
     : connectionPhase === "live" && roomPaused
       ? "房主离线 · 房间暂停"
       : relayDegraded
@@ -629,6 +687,11 @@ export function App() {
                 connectionError={connectionError}
                 setConnectionError={setConnectionError}
                 resolveAsset={resolveRoomAsset}
+                audioStatus={audioStatus}
+                audioVolume={audioVolume}
+                audioMuted={audioMuted}
+                onAudioVolumeChange={setAudioVolume}
+                onAudioMutedChange={setAudioMuted}
                 npcJobStatuses={npcJobStatuses}
                 npcShadowReplies={npcShadowReplies}
                 onDismissNpcShadow={(jobId) => setNpcShadowReplies((current) => current.filter((reply) => reply.jobId !== jobId))}

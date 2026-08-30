@@ -64,7 +64,7 @@ import {
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
-import { SynchronizedAudioRuntime, type AudioSyncStatus } from "../lib/audio-sync";
+import type { AudioSyncStatus } from "../lib/audio-sync";
 import {
   codexImageExecutor,
   type CodexImageCapabilities,
@@ -91,6 +91,11 @@ export interface RoomViewV2Props {
   connectionError?: string;
   setConnectionError(message?: string): void;
   resolveAsset?(asset: AssetDescriptorV1): Promise<string>;
+  audioStatus?: AudioSyncStatus;
+  audioVolume?: number;
+  audioMuted?: boolean;
+  onAudioVolumeChange?(volume: number): void;
+  onAudioMutedChange?(muted: boolean): void;
   npcJobStatuses?: NpcInteractionJobStatusV1[];
   npcShadowReplies?: NpcShadowReplyV1[];
   onDismissNpcShadow?(jobId: string): void;
@@ -127,6 +132,11 @@ export function RoomViewV2({
   connectionError,
   setConnectionError,
   resolveAsset,
+  audioStatus,
+  audioVolume: localAudioVolume = 1,
+  audioMuted = false,
+  onAudioVolumeChange,
+  onAudioMutedChange,
   npcJobStatuses = [],
   npcShadowReplies = [],
   onDismissNpcShadow,
@@ -154,13 +164,14 @@ export function RoomViewV2({
   const [selectedBoardItemId, setSelectedBoardItemId] = useState<string>();
   const [caseFileBoardId, setCaseFileBoardId] = useState<string>();
   const [message, setMessage] = useState("");
-  const [checkOutcomeText, setCheckOutcomeText] = useState("");
+  const [checkOutcomeDrafts, setCheckOutcomeDrafts] = useState<Record<string, string>>({});
   const [dice, setDice] = useState("1d100");
   const [reason, setReason] = useState("");
   const [newSeatName, setNewSeatName] = useState("");
   const [latestInvitation, setLatestInvitation] = useState<string>();
   const [invitationCopied, setInvitationCopied] = useState(false);
   const [entityName, setEntityName] = useState("");
+  const [entityCreating, setEntityCreating] = useState(false);
   const [entityDescription, setEntityDescription] = useState("");
   const [entityKind, setEntityKind] = useState<"location" | "npc" | "clue">("clue");
   const [presentNewEntityInActiveScene, setPresentNewEntityInActiveScene] = useState(true);
@@ -168,6 +179,7 @@ export function RoomViewV2({
   const [newBoardName, setNewBoardName] = useState("");
   const [secretDraft, setSecretDraft] = useState(false);
   const [npcMessage, setNpcMessage] = useState("");
+  const [npcMessageSending, setNpcMessageSending] = useState(false);
   const [activeNpcSessionId, setActiveNpcSessionId] = useState<string>();
   const [pendingNpcSessionEntityId, setPendingNpcSessionEntityId] = useState<string>();
   const [npcSessionCreating, setNpcSessionCreating] = useState(false);
@@ -182,9 +194,7 @@ export function RoomViewV2({
   const [audioFadeInMs, setAudioFadeInMs] = useState(1_000);
   const [audioFadeOutMs, setAudioFadeOutMs] = useState(1_000);
   const [audioStartOffsetMs, setAudioStartOffsetMs] = useState(0);
-  const [localAudioVolume, setLocalAudioVolume] = useState(1);
-  const [audioMuted, setAudioMuted] = useState(false);
-  const [audioStatus, setAudioStatus] = useState<AudioSyncStatus>();
+
   const [imageCapabilities, setImageCapabilities] = useState<CodexImageCapabilities>();
   const [imageKind, setImageKind] = useState<CodexImageJobKind>("location");
   const [imageDescription, setImageDescription] = useState("");
@@ -193,6 +203,7 @@ export function RoomViewV2({
   const [localImageEntityId, setLocalImageEntityId] = useState("");
   const [imageDraft, setImageDraft] = useState<CodexImageDraft>();
   const [imageBusy, setImageBusy] = useState(false);
+  const [imageCapabilityProbeTick, setImageCapabilityProbeTick] = useState(0);
   const [npcStatsTargetId, setNpcStatsTargetId] = useState("");
   const [npcStatsProvider, setNpcStatsProvider] = useState<NpcStatsProvider>("codex");
   const [npcStatsModel, setNpcStatsModel] = useState("");
@@ -202,6 +213,9 @@ export function RoomViewV2({
     sourceRevision: number;
   }>();
   const [npcStatsBusy, setNpcStatsBusy] = useState(false);
+  const npcStatsAbortRef = useRef<AbortController>();
+  const npcStatsTargetIdRef = useRef("");
+  npcStatsTargetIdRef.current = npcStatsTargetId;
   const [activeModulePackage, setActiveModulePackage] = useState<ModulePackageV1>();
   const [activeModuleLoading, setActiveModuleLoading] = useState(false);
   const [activeModuleLoadError, setActiveModuleLoadError] = useState<string>();
@@ -343,19 +357,19 @@ export function RoomViewV2({
   const unseenPublicMaterialIncludesSupportingMaterial = unseenPublicCaseFileEvents.some((event) =>
     event.type === "artifact.upserted" && event.payload.artifact.kind !== "clue",
   );
-  const latestUnresolvedCheckRoll = [...humanRecordEvents].reverse().find((event) =>
-    event.type === "dice.result"
-      && event.payload.checkRequestId !== undefined
-      && !world.checkOutcomes.has(event.payload.checkRequestId),
+  // Every unresolved roll keeps its own narration slot: another player rolling
+  // must never erase or retarget what the keeper is already writing.
+  const unresolvedCheckRolls = humanRecordEvents.filter(
+    (event): event is Extract<RoomEventV2, { type: "dice.result" }> =>
+      event.type === "dice.result"
+        && event.payload.checkRequestId !== undefined
+        && !world.checkOutcomes.has(event.payload.checkRequestId)
+        && world.checkRequests.has(event.payload.checkRequestId),
   );
-  const latestUnresolvedCheckRequest = latestUnresolvedCheckRoll?.type === "dice.result" && latestUnresolvedCheckRoll.payload.checkRequestId
+  const latestUnresolvedCheckRoll = unresolvedCheckRolls.at(-1);
+  const latestUnresolvedCheckRequest = latestUnresolvedCheckRoll?.payload.checkRequestId
     ? world.checkRequests.get(latestUnresolvedCheckRoll.payload.checkRequestId)
     : undefined;
-  const latestUnresolvedCheckSucceeded = latestUnresolvedCheckRoll?.type === "dice.result"
-    && latestUnresolvedCheckRoll.payload.result.kind === "percentile"
-    ? latestUnresolvedCheckRoll.payload.result.check?.success
-    : undefined;
-  const latestUnresolvedCheckWasPushed = latestUnresolvedCheckRequest?.pushOfRequestId !== undefined;
   const latestOwnCheckRoll = !session?.isHost
     ? [...humanRecordEvents].reverse().find((event) => {
         if (event.type !== "dice.result" || !event.payload.checkRequestId) return false;
@@ -396,7 +410,7 @@ export function RoomViewV2({
   );
   const roomActionCount = session?.isHost
     ? pendingCheckRequests.length
-      + (keeperNeedsToDescribeOutcome ? 1 : 0)
+      + unresolvedCheckRolls.length
       + pendingModuleSceneEntries.length
     : ownReadyChecks.length + (playerClosureHandoff ? 1 : 0);
   const ownRoomCharacters = session
@@ -430,10 +444,6 @@ export function RoomViewV2({
   useEffect(() => {
     setAcknowledgedPlayerClosureEventId(undefined);
   }, [room.id, session?.localSeat.seatId]);
-
-  useEffect(() => {
-    setCheckOutcomeText("");
-  }, [latestUnresolvedCheckRequest?.requestId]);
 
   useEffect(() => {
     if (activeRoomTab !== "clues" || !latestPublicCaseFileEvent) return;
@@ -504,25 +514,6 @@ export function RoomViewV2({
   const selectedAudioTitle = preparedAudio
     ? audioTitle.trim() || "氛围音乐"
     : selectedAudioArtifact?.title ?? "氛围音乐";
-  const audioRuntime = useMemo(() => new SynchronizedAudioRuntime({
-    resolveAssetUrl: async (asset) => {
-      if (resolveAsset) return resolveAsset(asset);
-      if (!hasManagedAssetStore()) return null;
-      return resolveManagedAssetUrl(asset.assetId);
-    },
-    localVolume: localAudioVolume,
-    muted: audioMuted,
-    onStatus: setAudioStatus,
-  }), [resolveAsset]);
-
-  useEffect(() => () => audioRuntime.dispose(), [audioRuntime]);
-  useEffect(() => {
-    audioRuntime.setLocalVolume(localAudioVolume);
-    audioRuntime.setMuted(audioMuted);
-  }, [audioMuted, audioRuntime, localAudioVolume]);
-  useEffect(() => {
-    for (const view of views) audioRuntime.consumeView(view);
-  }, [audioRuntime, views]);
   useEffect(() => {
     if (!resolveAsset) return;
     for (const artifact of world.artifacts.values()) {
@@ -549,7 +540,7 @@ export function RoomViewV2({
         });
       });
     return () => { active = false; };
-  }, [imageKeeperAuthorization, readOnly, setConnectionError]);
+  }, [imageKeeperAuthorization, readOnly, setConnectionError, imageCapabilityProbeTick]);
   useEffect(() => {
     let cancelled = false;
     setActiveModulePackage(undefined);
@@ -729,11 +720,22 @@ export function RoomViewV2({
         },
       },
     });
-    await session.submit({
-      type: "board.updated",
-      audience: board.audience,
-      payload: { board: { ...board, revision: board.revision + 1, backgroundArtifactId: artifactId } },
-    });
+    // The artifact commit above may interleave with player commands (token
+    // drags) that bump the board revision; always read the freshest board from
+    // the host's authoritative world and retry once on a lost race.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const freshBoard = session.world.boards.get(board.boardId) ?? board;
+      try {
+        await session.submit({
+          type: "board.updated",
+          audience: freshBoard.audience,
+          payload: { board: { ...freshBoard, revision: freshBoard.revision + 1, backgroundArtifactId: artifactId } },
+        });
+        return;
+      } catch (error) {
+        if (attempt === 2) throw error;
+      }
+    }
   };
 
   const enableFog = () => run(async () => {
@@ -760,6 +762,16 @@ export function RoomViewV2({
   });
 
   const createEntity = () => run(async () => {
+    if (entityCreating) return;
+    setEntityCreating(true);
+    try {
+      await createEntityInner();
+    } finally {
+      setEntityCreating(false);
+    }
+  });
+
+  const createEntityInner = async () => {
     if (!session || !entityName.trim()) return;
     if (!session.isHost && entityKind !== "clue") {
       throw new Error("玩家可以新建线索；地点和人物由 KP 公开。");
@@ -815,7 +827,7 @@ export function RoomViewV2({
     setEntityName("");
     setEntityDescription("");
     setMobileToolsOpen(false);
-  });
+  };
 
   const presentEntityInActiveScene = (entity: RoomEntityV2) => run(async () => {
     if (!session?.isHost || !activeScene || (entity.kind !== "location" && entity.kind !== "npc")) return;
@@ -1195,17 +1207,27 @@ export function RoomViewV2({
       },
     });
     if (targetBoard) {
-      await session.submit({
-        type: "board.updated",
-        audience: targetBoard.audience,
-        payload: {
-          board: {
-            ...targetBoard,
-            revision: targetBoard.revision + 1,
-            backgroundArtifactId: artifactId,
-          },
-        },
-      });
+      // Re-read the board per attempt: a token drag between the artifact and
+      // board commits must not strand an orphaned background artifact.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const freshBoard = session.world.boards.get(targetBoard.boardId) ?? targetBoard;
+        try {
+          await session.submit({
+            type: "board.updated",
+            audience: freshBoard.audience,
+            payload: {
+              board: {
+                ...freshBoard,
+                revision: freshBoard.revision + 1,
+                backgroundArtifactId: artifactId,
+              },
+            },
+          });
+          break;
+        } catch (error) {
+          if (attempt === 2) throw error;
+        }
+      }
     } else if (targetEntity) {
       await session.submit({
         type: "entity.upserted",
@@ -1241,24 +1263,31 @@ export function RoomViewV2({
   };
 
   const sendNpcPanelMessage = (role: "human" | "npc") => run(async () => {
-    if (!session || !activeNpcSession || !npcMessage.trim()) return;
+    if (!session || !activeNpcSession || !npcMessage.trim() || npcMessageSending) return;
     if (activeNpcSession.status !== "active") {
       throw new Error(activeNpcSession.status === "closed"
         ? "这段 NPC 交谈已经结束，不能再发送消息。"
         : "这段 NPC 交谈已暂停，请等待 KP 恢复后再发送消息。");
     }
-    await session.submitConfirmed({
-      type: "npc.session.message",
-      audience: activeNpcSession.audience,
-      payload: {
-        sessionId: activeNpcSession.sessionId,
-        messageId: globalThis.crypto.randomUUID(),
-        role,
-        ...(role === "human" ? { speakerSeatId: session.localSeat.seatId } : {}),
-        spokenText: npcMessage.trim(),
-      },
-    });
-    setNpcMessage("");
+    const sentText = npcMessage.trim();
+    setNpcMessageSending(true);
+    try {
+      await session.submitConfirmed({
+        type: "npc.session.message",
+        audience: activeNpcSession.audience,
+        payload: {
+          sessionId: activeNpcSession.sessionId,
+          messageId: globalThis.crypto.randomUUID(),
+          role,
+          ...(role === "human" ? { speakerSeatId: session.localSeat.seatId } : {}),
+          spokenText: sentText,
+        },
+      });
+      // Keep anything the player typed or corrected during the round-trip.
+      setNpcMessage((current) => (current.trim() === sentText ? "" : current));
+    } finally {
+      setNpcMessageSending(false);
+    }
   });
 
   const updateNpcSession = (
@@ -1354,6 +1383,8 @@ export function RoomViewV2({
     if (!session?.isHost) return;
     const npc = world.entities.get(npcStatsTargetId);
     if (!npc || npc.kind !== "npc") throw new Error("这位人物已经不在房间资料中，请重新选择。");
+    const abort = new AbortController();
+    npcStatsAbortRef.current = abort;
     setNpcStatsBusy(true);
     try {
       const draft = await tauriNpcStatsDraftExecutor.generateDraft({
@@ -1363,12 +1394,22 @@ export function RoomViewV2({
         guidance: npcStatsGuidance.trim(),
         provider: npcStatsProvider,
         model: npcStatsModel.trim(),
-      }, new AbortController().signal);
-      setNpcStatsDraft({ draft, sourceRevision: npc.revision });
+      }, abort.signal);
+      // A late result must not attach to a different NPC selected meanwhile.
+      if (!abort.signal.aborted && npcStatsTargetIdRef.current === npc.entityId) {
+        setNpcStatsDraft({ draft, sourceRevision: npc.revision });
+      }
     } finally {
+      if (npcStatsAbortRef.current === abort) npcStatsAbortRef.current = undefined;
       setNpcStatsBusy(false);
     }
   });
+
+  const cancelNpcStatsDraftGeneration = () => {
+    npcStatsAbortRef.current?.abort();
+    npcStatsAbortRef.current = undefined;
+    setNpcStatsBusy(false);
+  };
 
   const confirmNpcStatsDraft = () => run(async () => {
     if (!session?.isHost || !npcStatsDraft) return;
@@ -1488,7 +1529,9 @@ export function RoomViewV2({
                 ? `${playerSeats.filter(({ peerId }) => peerId).length} 位调查员在线`
                 : authenticationState === "authenticated"
                   ? "已进入调查"
-                  : "正在确认你的邀请…"}</p>
+                  : authenticationState === "failed"
+                    ? "席位验证失败：邀请可能已被换新，请向 KP 索取新邀请串"
+                    : "正在确认你的邀请…"}</p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
           <button type="button" aria-label={session?.isHost ? "打开 KP 导演台" : "打开调查员工具"} onClick={() => setMobileToolsOpen(true)} className="grid h-9 w-9 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-ink lg:hidden"><Wrench className="h-4 w-4" /></button>
@@ -1548,6 +1591,12 @@ export function RoomViewV2({
         </div>}
 
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          {session?.isHost && activeRoomTab !== "scene" && unresolvedCheckRolls.length > 0 && <section aria-label="待叙述检定提醒" className="mx-auto mb-4 max-w-4xl rounded-xl border border-amber-800/60 bg-amber-950/20 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs leading-5 text-amber-200">有 {unresolvedCheckRolls.length} 项检定等待你的叙述结果；对应玩家在收到结果前无法继续行动。</p>
+              <Button variant="secondary" onClick={() => setActiveRoomTab("scene")}>去发布叙述</Button>
+            </div>
+          </section>}
           {activeRoomTab === "scene" && <>
           <section aria-label="当前情境" className={`mx-auto mb-5 max-w-6xl overflow-hidden rounded-2xl border ${activeScene ? "border-brass/30 bg-gradient-to-br from-brass/10 via-zinc-950 to-zinc-950" : "border-zinc-800 bg-zinc-950/50"}`}>
             {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} conversation={findNpcConversation(world, entity.entityId)} isHost={session?.isHost === true} readOnly={readOnly} onStart={() => setPendingNpcSessionEntityId(entity.entityId)} onOpen={revealNpcConversation} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
@@ -1620,32 +1669,45 @@ export function RoomViewV2({
             <p className="mt-1 text-xs leading-5 text-zinc-400">用移动表达你准备前往的位置；地图不会自动公开场景、人物或线索，KP 会根据行动继续描述。</p>
             <Button className="mt-3" variant="secondary" onClick={openActiveBoard}><Map className="mr-2 h-4 w-4" />{boardExpanded ? `回到地图：${board.name}` : `打开地图：${board.name}`}</Button>
           </section>}
-          {keeperNeedsToDescribeOutcome && <section aria-label="KP 下一步" className="mx-auto mb-5 max-w-4xl rounded-xl border border-emerald-800/50 bg-emerald-950/15 p-4">
-            <h2 className="text-sm font-semibold text-emerald-100">{latestUnresolvedCheckSucceeded
-              ? "描述这次成功带来的变化"
-              : latestUnresolvedCheckWasPushed
-                ? "结算你在强推前声明的严重代价"
-                : "说明这次失败目前如何表现"}</h2>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{latestUnresolvedCheckSucceeded
-              ? "说清玩家达成了什么、现场发生了什么变化；若获得线索，再把对应内容公开到调查案卷。"
-              : latestUnresolvedCheckWasPushed
-                ? "强推失败后不要让玩家无事发生地再试一次。落实此前声明的代价，同时让故事继续向前。"
-                : "先说明眼前的尝试为什么没有奏效。玩家收到这段结果后，才能换一种有实际区别的做法申请一次强推。"}</p>
-            {latestUnresolvedCheckRequest && <p className="mt-2 rounded-lg bg-black/20 px-3 py-2 text-xs leading-5 text-zinc-300"><b>{latestUnresolvedCheckRequest.characterName}</b> 想要“{latestUnresolvedCheckRequest.goal ?? latestUnresolvedCheckRequest.reason}”，做法是“{latestUnresolvedCheckRequest.approach ?? latestUnresolvedCheckRequest.reason}”。</p>}
-            <Textarea className="mt-3" aria-label="这次检定的叙述结果" aria-required="true" maxLength={4_000} value={checkOutcomeText} onChange={(event) => setCheckOutcomeText(event.target.value)} placeholder={latestUnresolvedCheckSucceeded ? "例如：夹层发出轻响，一封折叠的信落进你手中。" : latestUnresolvedCheckWasPushed ? "写下此前声明的严重代价，以及故事如何继续。" : "例如：锁芯没有转动，里面却传来一声金属碰撞；你可以换一种做法再试。"} />
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button disabled={commandsDisabled || !checkOutcomeText.trim()} onClick={() => void run(async () => {
-                if (!session?.isHost || !latestUnresolvedCheckRequest) return;
-                await session.submitConfirmed({
-                  type: "check.outcome.described",
-                  audience: latestUnresolvedCheckRequest.audience,
-                  payload: { requestId: latestUnresolvedCheckRequest.requestId, text: checkOutcomeText.trim() },
-                });
-                setCheckOutcomeText("");
-              })}>发布这次叙述结果</Button>
-              {activeModulePackage && <Button variant="secondary" onClick={openKeeperSceneWorkbench}>查看当前场景的线索</Button>}
-            </div>
-          </section>}
+          {keeperNeedsToDescribeOutcome && unresolvedCheckRolls.map((roll) => {
+            const requestId = roll.payload.checkRequestId!;
+            const request = world.checkRequests.get(requestId);
+            if (!request) return null;
+            const succeeded = roll.payload.result.kind === "percentile" ? roll.payload.result.check?.success : undefined;
+            const wasPushed = request.pushOfRequestId !== undefined;
+            const draftText = checkOutcomeDrafts[requestId] ?? "";
+            const publishOutcome = (text: string) => run(async () => {
+              if (!session?.isHost) return;
+              await session.submitConfirmed({
+                type: "check.outcome.described",
+                audience: request.audience,
+                payload: { requestId, text },
+              });
+              setCheckOutcomeDrafts((current) => {
+                const { [requestId]: _published, ...rest } = current;
+                return rest;
+              });
+            });
+            return <section key={requestId} aria-label={`KP 下一步：${request.characterName}`} className="mx-auto mb-5 max-w-4xl rounded-xl border border-emerald-800/50 bg-emerald-950/15 p-4">
+              <h2 className="text-sm font-semibold text-emerald-100">{succeeded
+                ? `描述 ${request.characterName} 这次成功带来的变化`
+                : wasPushed
+                  ? `结算 ${request.characterName} 强推前声明的严重代价`
+                  : `说明 ${request.characterName} 这次失败目前如何表现`}</h2>
+              <p className="mt-1 text-xs leading-5 text-zinc-400">{succeeded
+                ? "说清玩家达成了什么、现场发生了什么变化；若获得线索，再把对应内容公开到调查案卷。"
+                : wasPushed
+                  ? "强推失败后不要让玩家无事发生地再试一次。落实此前声明的代价，同时让故事继续向前。"
+                  : "先说明眼前的尝试为什么没有奏效。玩家收到这段结果后，才能换一种有实际区别的做法申请一次强推。"}</p>
+              <p className="mt-2 rounded-lg bg-black/20 px-3 py-2 text-xs leading-5 text-zinc-300"><b>{request.characterName}</b> 想要“{request.goal ?? request.reason}”，做法是“{request.approach ?? request.reason}”。</p>
+              <Textarea className="mt-3" aria-label={`检定叙述结果：${request.characterName}`} aria-required="true" maxLength={4_000} value={draftText} onChange={(event) => setCheckOutcomeDrafts((current) => ({ ...current, [requestId]: event.target.value }))} placeholder={succeeded ? "例如：夹层发出轻响，一封折叠的信落进你手中。" : wasPushed ? "写下此前声明的严重代价，以及故事如何继续。" : "例如：锁芯没有转动，里面却传来一声金属碰撞；你可以换一种做法再试。"} />
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button disabled={commandsDisabled || !draftText.trim()} onClick={() => void publishOutcome(draftText.trim())}>发布这次叙述结果</Button>
+                <Button variant="secondary" disabled={commandsDisabled} onClick={() => void publishOutcome("（KP 已在桌面上口头描述了这次结果。）")}>已口头描述，直接解锁玩家</Button>
+                {activeModulePackage && <Button variant="ghost" onClick={openKeeperSceneWorkbench}>查看当前场景的线索</Button>}
+              </div>
+            </section>;
+          })}
           {keeperNeedsToDecideClue && latestCheckOutcomeEvent && <section aria-label="KP 下一步" className="mx-auto mb-5 max-w-4xl rounded-xl border border-emerald-800/50 bg-emerald-950/15 p-4">
             <h2 className="text-sm font-semibold text-emerald-100">这次行动带来了线索吗？</h2>
             <p className="mt-1 text-xs leading-5 text-zinc-400">如果玩家因此得到了新信息，把玩家可见的正文公开到共同案卷；没有线索时直接继续现场。</p>
@@ -1683,6 +1745,9 @@ export function RoomViewV2({
                 <Button type="submit" variant="secondary"><Plus className="mr-2 h-4 w-4" />创建可选画面</Button>
               </form>}
             </div>
+            {!board && session?.isHost && !readOnly && liveBoards.length > 0 && <nav aria-label="可切换的现场画面" className="mt-3 flex flex-wrap gap-2">
+              {liveBoards.map((candidate) => <Button key={candidate.boardId} variant="secondary" onClick={() => void activateBoard(candidate.boardId)}>启用画面：{candidate.name}</Button>)}
+            </nav>}
             {board && boardExpanded && <div id="active-board-view" className="mt-4 border-t border-zinc-800 pt-4">
               <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <nav aria-label="现场画面" className="flex flex-wrap gap-2">{liveBoards.map((candidate) => <div key={candidate.boardId} className="flex rounded-lg border border-zinc-800 bg-zinc-950"><button type="button" disabled={!session?.isHost || readOnly || candidate.boardId === board.boardId} onClick={() => void activateBoard(candidate.boardId)} className="px-3 py-2 text-xs disabled:opacity-50">{candidate.name}</button>{session?.isHost && !readOnly && <button type="button" aria-label={`归档画面 ${candidate.name}`} title="归档后不再作为现场画面显示" onClick={() => void archiveBoard(candidate)} className="border-l border-zinc-800 px-2 text-xs text-red-300">归档</button>}</div>)}</nav>
@@ -1911,10 +1976,13 @@ export function RoomViewV2({
         <Panel className="grid gap-3 p-4">
           <div className="flex items-center gap-2"><UserRound className="h-4 w-4 text-brass" /><h2 className="text-sm font-semibold">生成 NPC 属性草稿</h2></div>
           <p className="text-[11px] leading-4 text-zinc-500">助手只会读取这个人物的名称、公开描述和你的补充要求。结果先给 KP 检查，确认前不会改变房间里的资料。</p>
-          <Field label="要补全哪位人物"><select aria-label="NPC 属性草稿目标" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={npcStatsTargetId} onChange={(event) => { setNpcStatsTargetId(event.target.value); setNpcStatsDraft(undefined); }}><option value="">选择人物</option>{[...world.entities.values()].filter((entity) => entity.kind === "npc").map((npc) => <option key={npc.entityId} value={npc.entityId}>{npc.name}</option>)}</select></Field>
+          <Field label="要补全哪位人物"><select aria-label="NPC 属性草稿目标" disabled={npcStatsBusy} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={npcStatsTargetId} onChange={(event) => { setNpcStatsTargetId(event.target.value); setNpcStatsDraft(undefined); }}><option value="">选择人物</option>{[...world.entities.values()].filter((entity) => entity.kind === "npc").map((npc) => <option key={npc.entityId} value={npc.entityId}>{npc.name}</option>)}</select></Field>
           {[...world.entities.values()].every((entity) => entity.kind !== "npc") && <p className="rounded border border-dashed border-zinc-800 p-3 text-xs leading-5 text-zinc-500">还没有可选人物。先从模组导演台向房间介绍人物，或在“临时补充内容”中创建一位。</p>}
           <Textarea aria-label="NPC 属性补充要求" value={npcStatsGuidance} maxLength={50_000} onChange={(event) => { setNpcStatsGuidance(event.target.value); setNpcStatsDraft(undefined); }} placeholder="例如：年迈但观察敏锐，不擅长战斗" />
-          <Button disabled={!npcStatsTargetId || npcStatsBusy} onClick={() => void generateNpcStatsDraft()}>{npcStatsBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成属性草稿</Button>
+          <div className="flex gap-2">
+            <Button disabled={!npcStatsTargetId || npcStatsBusy} onClick={() => void generateNpcStatsDraft()}>{npcStatsBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成属性草稿</Button>
+            {npcStatsBusy && <Button variant="secondary" onClick={cancelNpcStatsDraftGeneration}><Square className="mr-2 h-4 w-4" />立即停止</Button>}
+          </div>
           <details className="rounded border border-zinc-800 px-3 py-2 text-xs text-zinc-500">
             <summary className="cursor-pointer">更换 AI 服务（通常不用改）</summary>
             <div className="mt-3 grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3">
@@ -1923,7 +1991,7 @@ export function RoomViewV2({
             </div>
           </details>
           {npcStatsDraft && <div className="grid gap-2 rounded-md border border-amber-800/60 bg-amber-950/20 p-3 text-xs">
-            <p className="font-semibold text-amber-200">只有你能看到 · 确认后才会更新人物</p>
+            <p className="font-semibold text-amber-200">只有你能看到 · 确认后才会更新「{world.entities.get(npcStatsDraft.draft.npcId)?.name ?? "已不存在的人物"}」</p>
             <p className="text-zinc-400">属性：{formatNpcStats(npcStatsDraft.draft.character.characteristics)}</p>
             <p className="text-zinc-400">技能：{formatNpcStats(npcStatsDraft.draft.character.skills) || "无"}</p>
             <p className="text-zinc-400">HP {npcStatsDraft.draft.character.hitPoints}{npcStatsDraft.draft.character.sanity === undefined ? "" : ` · SAN ${npcStatsDraft.draft.character.sanity}`}</p>
@@ -1969,9 +2037,12 @@ export function RoomViewV2({
         <Panel className="grid gap-3 p-4">
           <div className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-brass" /><h2 className="text-sm font-semibold">生成一张图片草稿</h2></div>
           <p className="text-[11px] leading-4 text-zinc-500">一次只生成一张。图片先留给 KP 检查，确认前不会出现在玩家画面或资料中。</p>
-          {imageCapabilities && <p className={`text-[11px] ${imageCapabilities.imageGeneration ? "text-emerald-400" : "text-amber-300"}`}>
-            {imageCapabilities.imageGeneration ? "图片能力可用" : imageCapabilities.message ?? "当前 Codex 会话没有图片能力"}
-          </p>}
+          {imageCapabilities && <div className="flex flex-wrap items-center gap-2">
+            <p className={`text-[11px] ${imageCapabilities.imageGeneration ? "text-emerald-400" : "text-amber-300"}`}>
+              {imageCapabilities.imageGeneration ? "图片能力可用" : imageCapabilities.message ?? "当前 Codex 会话没有图片能力"}
+            </p>
+            {!imageCapabilities.imageGeneration && <button type="button" className="text-[11px] text-zinc-400 underline hover:text-zinc-200" onClick={() => setImageCapabilityProbeTick((tick) => tick + 1)}>重新检测</button>}
+          </div>}
           <Field label="要生成什么"><select aria-label="图片类型" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={imageKind} onChange={(event) => { setImageKind(event.target.value as CodexImageJobKind); setImageTarget(""); setImageDraft(undefined); }}>
             <option value="location">地点背景</option><option value="npc">NPC 肖像</option><option value="character">调查员肖像</option><option value="textlessMap">无文字地图</option>
           </select></Field>
@@ -2004,11 +2075,11 @@ export function RoomViewV2({
               type="button"
               aria-label={audioMuted ? "取消静音" : "静音"}
               className="rounded p-2 text-zinc-400 hover:bg-zinc-800"
-              onClick={() => setAudioMuted((value) => !value)}
+              onClick={() => onAudioMutedChange?.(!audioMuted)}
             >
               {audioMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
             </button>
-            <input aria-label="本地音量" type="range" min="0" max="1" step="0.05" value={localAudioVolume} onChange={(event) => setLocalAudioVolume(Number(event.target.value))} className="min-w-0 flex-1" />
+            <input aria-label="本地音量" type="range" min="0" max="1" step="0.05" value={localAudioVolume} onChange={(event) => onAudioVolumeChange?.(Number(event.target.value))} className="min-w-0 flex-1" />
             <span className="w-9 text-right text-[11px] text-zinc-500">{Math.round(localAudioVolume * 100)}%</span>
           </div>
           {audioStatus && <p className="text-[11px] text-zinc-500">本机：{audioStatusLabel(audioStatus)}</p>}
@@ -2041,7 +2112,7 @@ export function RoomViewV2({
           <label className="flex items-center gap-2 text-xs text-zinc-400"><input type="checkbox" checked={secretDraft} onChange={(event) => setSecretDraft(event.target.checked)} />只给我和 KP 看</label>
           {session?.isHost && entityKind !== "clue" && activeScene && <label className="flex items-start gap-2 rounded-md border border-brass/20 bg-brass/5 p-3 text-xs leading-5 text-zinc-300"><input className="mt-1" type="checkbox" checked={presentNewEntityInActiveScene} onChange={(event) => setPresentNewEntityInActiveScene(event.target.checked)} />创建后立即在当前情境“{activeScene.name}”登场</label>}
           {session?.isHost && entityKind !== "clue" && !activeScene && <p className="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs leading-5 text-zinc-500">当前还没有情境。内容会保留在下方；KP 开场后可点“让它在当前情境登场”。</p>}
-          <Button disabled={commandsDisabled || !entityName.trim() || (entityKind === "clue" && !entityDescription.trim())} onClick={() => void createEntity()}>{entityKind === "clue" ? (secretDraft ? "保存私密线索" : "公开到调查案卷") : activeScene && presentNewEntityInActiveScene ? "创建并在当前情境登场" : "创建这项内容"}</Button>
+          <Button disabled={commandsDisabled || entityCreating || !entityName.trim() || (entityKind === "clue" && !entityDescription.trim())} onClick={() => void createEntity()}>{entityCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}{entityKind === "clue" ? (secretDraft ? "保存私密线索" : "公开到调查案卷") : activeScene && presentNewEntityInActiveScene ? "创建并在当前情境登场" : "创建这项内容"}</Button>
           <div className="grid gap-2">{[...world.entities.values()].map((entity) => {
             const canPresentHere = Boolean(session?.isHost && activeScene && (entity.kind === "location" || entity.kind === "npc"));
             const presentedHere = Boolean(activeScene && entityPresentedInScene(entity, activeScene.entityId));
@@ -2134,8 +2205,8 @@ export function RoomViewV2({
             </label>}
             {!readOnly && activeNpcSession.status !== "active" && <p role="status" className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-xs leading-5 text-zinc-500">{activeNpcSession.status === "paused" ? "KP 已暂停这段交谈。恢复后才能继续发言。" : "这段交谈已经结束，只能回看记录；需要继续时请另开一段交谈。"}</p>}
             {!readOnly && activeNpcSession.status === "active" && <div className="flex gap-2">
-              <Button disabled={commandsDisabled || !npcMessage.trim()} onClick={() => void sendNpcPanelMessage("human")}>{session?.isHost ? `以 ${session.localSeat.displayName} 身份发言` : "发送"}</Button>
-              {session?.isHost && <Button variant="secondary" disabled={!npcMessage.trim()} onClick={() => void sendNpcPanelMessage("npc")}>以 NPC 身份回应</Button>}
+              <Button disabled={commandsDisabled || npcMessageSending || !npcMessage.trim()} onClick={() => void sendNpcPanelMessage("human")}>{npcMessageSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}{session?.isHost ? `以 ${session.localSeat.displayName} 身份发言` : "发送"}</Button>
+              {session?.isHost && <Button variant="secondary" disabled={npcMessageSending || !npcMessage.trim()} onClick={() => void sendNpcPanelMessage("npc")}>以 NPC 身份回应</Button>}
             </div>}
 
             {session?.isHost && <details className="rounded-lg border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs">

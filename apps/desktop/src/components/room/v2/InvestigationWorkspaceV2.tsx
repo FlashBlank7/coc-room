@@ -1,5 +1,5 @@
 import { characteristicBandSuffix } from "../../../lib/characteristic-bands";
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   isAudienceSubsetV2,
   type BoardItemV1,
@@ -53,6 +53,14 @@ interface ModuleSceneDropPayloadV1 {
   readonly revision: number;
   readonly sceneId: string;
 }
+
+/**
+ * How long a submitted roll keeps its button locked while waiting for the
+ * host's dice.result to come back through the relay. After this window the
+ * command is treated as lost and the player may try again — the reducer
+ * rejects a duplicate roll, so retrying can never double-spend the check.
+ */
+const ROLL_SETTLE_GRACE_MS = 15_000;
 
 export function KeeperModuleWorkbenchV2({
   modulePackage,
@@ -446,6 +454,50 @@ export function CheckNegotiationV2({
     finally { setBusy(false); }
   };
 
+  // For a non-host, session.rollDice resolves as soon as the command reaches
+  // the transport — long before the host's dice.result comes back. A busy flag
+  // cleared in `finally` would therefore re-enable the roll button within
+  // microseconds, and a second click on a laggy relay produces a confusing
+  // "someone just modified this" rejection. Instead the in-flight request ID
+  // is held (via a ref, so a same-tick double click cannot slip past React's
+  // batched state) until the world state shows the roll resolved or closed,
+  // the submit fails locally, or a grace window elapses (a genuinely lost
+  // command should become retryable).
+  const [rollingRequestId, setRollingRequestId] = useState<string>();
+  const rollingRef = useRef<string>();
+  const clearRolling = (requestId: string) => {
+    if (rollingRef.current !== requestId) return;
+    rollingRef.current = undefined;
+    setRollingRequestId((current) => (current === requestId ? undefined : current));
+  };
+  const beginAuthorizedRoll = (
+    requestId: string,
+    payload: Parameters<RoomSessionV2["rollDice"]>[0],
+  ) => {
+    if (!session || busy || readOnly || rollingRef.current !== undefined) return;
+    rollingRef.current = requestId;
+    setRollingRequestId(requestId);
+    onError?.(undefined);
+    void session.rollDice(payload).catch((error: unknown) => {
+      onError?.(friendlyInvestigationError(error));
+      clearRolling(requestId);
+    });
+  };
+  useEffect(() => {
+    if (rollingRequestId === undefined) return;
+    const timer = globalThis.setTimeout(() => clearRolling(rollingRequestId), ROLL_SETTLE_GRACE_MS);
+    return () => globalThis.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one grace window per in-flight roll
+  }, [rollingRequestId]);
+  useEffect(() => {
+    if (rollingRequestId === undefined) return;
+    if (
+      world.checkAuthorizations.get(rollingRequestId)?.resolvedByEventId !== undefined
+      || world.checkClosures.has(rollingRequestId)
+    ) clearRolling(rollingRequestId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reacts to world updates settling the roll
+  }, [rollingRequestId, world]);
+
   const pending = [...world.checkRequests.values()].filter(({ requestId }) => !world.checkAuthorizations.has(requestId) && !world.checkClosures.has(requestId));
   const ownPending = pending.filter(({ requesterSeatId }) => requesterSeatId === session?.localSeat.seatId);
   const ready = [...world.checkAuthorizations.values()].filter(({ requestId, requesterSeatId, resolvedByEventId }) =>
@@ -470,6 +522,13 @@ export function CheckNegotiationV2({
     : undefined;
   const readyPushCount = ready.filter(({ requestId }) => world.checkRequests.get(requestId)?.pushOfRequestId !== undefined).length;
   const pendingPushCount = pending.filter(({ pushOfRequestId }) => pushOfRequestId !== undefined).length;
+  // Host view of every ruling still waiting for its dice. A mis-clicked
+  // difficulty would otherwise be a dead end: the protocol forbids
+  // re-authorizing, so the way out is an explicit cancellation.
+  const authorizedAwaitingRoll = session?.isHost
+    ? [...world.checkAuthorizations.values()].filter(({ requestId, resolvedByEventId }) =>
+        resolvedByEventId === undefined && !world.checkClosures.has(requestId))
+    : [];
 
   useEffect(() => {
     setPushReason("");
@@ -578,16 +637,39 @@ export function CheckNegotiationV2({
       }))} />)}
     </div>}
 
+    {session?.isHost && authorizedAwaitingRoll.length > 0 && <div className="grid gap-2">
+      <h3 className="text-xs font-semibold text-zinc-400">已裁定，等待调查员掷骰</h3>
+      {authorizedAwaitingRoll.map((authorization) => {
+        const request = world.checkRequests.get(authorization.requestId);
+        if (!request) return null;
+        const modifierLabel = bonusPenaltyLabelV2(authorization);
+        const isPush = request.pushOfRequestId !== undefined;
+        return <div key={authorization.requestId} className="flex flex-wrap items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950/50 p-3 text-xs" aria-label={`等待掷骰：${request.characterName}`}>
+          <p className="text-zinc-300">
+            {request.characterName} · {isPush ? "强推 " : ""}{authorization.skillName ?? request.skillName} {authorization.target} · {difficultyLabel(authorization.requiredDifficulty)}{modifierLabel ? ` · ${modifierLabel}` : ""}
+          </p>
+          <Button className="h-8 px-2 text-[11px]" variant="ghost" disabled={busy || readOnly} onClick={() => void run(() => session.submitConfirmed({
+            type: "check.closed",
+            audience: request.audience,
+            payload: { requestId: request.requestId, outcome: "cancelled", note: "KP 撤回了这次裁定；请重新提交行动，再由 KP 重新裁定。" },
+          }))}>撤回裁定</Button>
+        </div>;
+      })}
+    </div>}
+
     {ready.map((authorization) => {
       const request = world.checkRequests.get(authorization.requestId);
       if (!request) return null;
       const authorizedSkillName = authorization.skillName ?? request.skillName;
+      const modifierLabel = bonusPenaltyLabelV2(authorization);
+      const isRolling = rollingRequestId === request.requestId;
+      const cardBusy = busy || readOnly || rollingRequestId !== undefined;
       if (request.pushOfRequestId !== undefined) {
         return <div key={authorization.requestId} className="grid gap-3 rounded border border-amber-700/60 bg-amber-950/20 p-3 text-xs" aria-label="决定是否进行强推">
           <div>
             <span className="inline-flex rounded bg-amber-900/60 px-2 py-1 text-[10px] font-semibold text-amber-100">强推 · 最后一次机会</span>
             <p className="mt-2 font-semibold text-zinc-200">你的新做法：{request.approach ?? request.reason}</p>
-            <p className="mt-1 text-zinc-500">检定 {authorizedSkillName} {authorization.target} · {difficultyLabel(authorization.requiredDifficulty)}</p>
+            <p className="mt-1 text-zinc-500">检定 {authorizedSkillName} {authorization.target} · {difficultyLabel(authorization.requiredDifficulty)}{modifierLabel ? ` · ${modifierLabel}` : ""}</p>
           </div>
           <div className="rounded-lg border border-red-800/60 bg-red-950/25 p-3">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-red-300">如果再次失败</p>
@@ -595,7 +677,7 @@ export function CheckNegotiationV2({
           </div>
           {authorization.note && <p className="text-zinc-400">KP 补充：{authorization.note}</p>}
           <div className="flex flex-wrap gap-2">
-            <Button disabled={busy || readOnly || !authorization.failureConsequence?.trim()} onClick={() => void run(() => session!.rollDice({
+            <Button disabled={cardBusy || !authorization.failureConsequence?.trim()} onClick={() => beginAuthorizedRoll(request.requestId, {
               expression: "1d100",
               reason: `强推 ${authorizedSkillName}：${request.approach ?? request.reason}`,
               bonusDice: authorization.bonusDice,
@@ -603,8 +685,8 @@ export function CheckNegotiationV2({
               target: authorization.target,
               requiredDifficulty: authorization.requiredDifficulty,
               checkRequestId: request.requestId,
-            }))}><Dices className="mr-2 h-4 w-4" />接受代价并强推</Button>
-            <Button variant="secondary" disabled={busy || readOnly} onClick={() => void run(() => session!.submitConfirmed({
+            })}><Dices className="mr-2 h-4 w-4" />{isRolling ? "正在掷骰…" : "接受代价并强推"}</Button>
+            <Button variant="secondary" disabled={cardBusy} onClick={() => void run(() => session!.submitConfirmed({
               type: "check.closed",
               audience: request.audience,
               payload: { requestId: request.requestId, outcome: "cancelled", note: "调查员知晓再次失败的代价后，决定不进行强推。" },
@@ -612,19 +694,27 @@ export function CheckNegotiationV2({
           </div>
         </div>;
       }
-      return <div key={authorization.requestId} className="grid gap-2 rounded border border-emerald-800/60 bg-emerald-950/15 p-3 text-xs">
-        <p className="font-semibold text-emerald-200">KP 已允许：{authorizedSkillName} {authorization.target} · {difficultyLabel(authorization.requiredDifficulty)}</p>
+      return <div key={authorization.requestId} className="grid gap-2 rounded border border-emerald-800/60 bg-emerald-950/15 p-3 text-xs" aria-label="KP 已允许的检定">
+        <p className="font-semibold text-emerald-200">KP 已允许：{authorizedSkillName} {authorization.target} · {difficultyLabel(authorization.requiredDifficulty)}{modifierLabel ? ` · ${modifierLabel}` : ""}</p>
         <p className="text-zinc-400">目标：{request.goal ?? request.reason}</p>
         <p className="text-zinc-400">做法：{request.approach ?? request.reason}</p>
-        <Button disabled={busy || readOnly} onClick={() => void run(() => session!.rollDice({
-          expression: "1d100",
-          reason: `${authorizedSkillName}：${request.approach ?? request.reason}`,
-          bonusDice: authorization.bonusDice,
-          penaltyDice: authorization.penaltyDice,
-          target: authorization.target,
-          requiredDifficulty: authorization.requiredDifficulty,
-          checkRequestId: request.requestId,
-        }))}><Dices className="mr-2 h-4 w-4" />掷骰：{authorizedSkillName}（{authorization.target}）</Button>
+        {authorization.note && <p className="text-zinc-400">KP 补充：{authorization.note}</p>}
+        <div className="flex flex-wrap gap-2">
+          <Button disabled={cardBusy} onClick={() => beginAuthorizedRoll(request.requestId, {
+            expression: "1d100",
+            reason: `${authorizedSkillName}：${request.approach ?? request.reason}`,
+            bonusDice: authorization.bonusDice,
+            penaltyDice: authorization.penaltyDice,
+            target: authorization.target,
+            requiredDifficulty: authorization.requiredDifficulty,
+            checkRequestId: request.requestId,
+          })}><Dices className="mr-2 h-4 w-4" />{isRolling ? "正在掷骰…" : `掷骰：${authorizedSkillName}（${authorization.target}）`}</Button>
+          <Button variant="secondary" disabled={cardBusy} onClick={() => void run(() => session!.submitConfirmed({
+            type: "check.closed",
+            audience: request.audience,
+            payload: { requestId: request.requestId, outcome: "cancelled", note: "调查员在掷骰前放弃了这次检定，换一种做法继续调查。" },
+          }))}>放弃这次检定</Button>
+        </div>
       </div>;
     })}
   </Panel>;
@@ -1136,10 +1226,77 @@ function friendlyInvestigationError(error: unknown): string {
   if (/revision|conflict|版本冲突/i.test(message)) {
     return "另一位成员刚刚更新了这里。等画面刷新后，再试一次。";
   }
-  if (/^(请先|当前画面|当前没有|地点“|人物“|线索“|拖入的场景)/.test(message)) {
+  const reducerExplanation = friendlyHostReducerError(message);
+  if (reducerExplanation) return reducerExplanation;
+  if (/^(请先|当前画面|当前没有|地点“|人物“|线索“|拖入的场景|房主当前离线|席位认证)/.test(message)) {
     return message;
   }
+  // The host applies commands to its own authoritative reducer, so its
+  // failures surface as raw errors instead of classified rejections. An
+  // unrecognized reason must still be shown — hiding it behind a generic
+  // apology leaves the Keeper unable to understand what happened.
+  if (message.trim()) return `刚才的操作没有完成：${message.trim()}`;
   return "刚才的操作没有完成，请稍后再试。";
+}
+
+/**
+ * The host commits commands to the local reducer directly, so protocol guard
+ * failures reach it as raw English `Error`s (see packages/protocol
+ * room-world-v2.ts / event-log-v2.ts) rather than the classified
+ * RoomCommandRejectedError players receive. Translate the known guards into
+ * the same friendly copy.
+ */
+function friendlyHostReducerError(message: string): string | undefined {
+  if (/^check request .+ does not exist$/i.test(message) || /^check .+ was (already )?closed$/i.test(message)) {
+    return "这项行动刚刚被撤回或已经结束，不需要再处理它。";
+  }
+  if (/^check .+ was already authorized$/i.test(message)) {
+    return "这项行动刚刚已经有了裁定，不能重复裁定。";
+  }
+  if (/^check .+ was already rolled$/i.test(message)) {
+    return "这次检定已经掷过骰了，以先掷出的结果为准。";
+  }
+  if (/^check .+ was not authorized$/i.test(message)) {
+    return "这次检定还没有得到 KP 允许，等 KP 裁定后再掷骰。";
+  }
+  if (/^duplicate check request /i.test(message)) {
+    return "这项行动已经提交过了，等待 KP 处理即可。";
+  }
+  if (/^a failed check may only be pushed once$/i.test(message)) {
+    return "失败的检定只能强推一次，这次机会已经用掉了。";
+  }
+  if (/^check .+ outcome was already described$/i.test(message)) {
+    return "这次检定的结果已经描述过了，不能再描述一次。";
+  }
+  if (/^check .+ outcome requires a completed roll$/i.test(message)) {
+    return "调查员还没有掷骰，先等骰子落定再描述结果。";
+  }
+  if (/(does not match .* authorization|result does not match its authorization)/i.test(message)) {
+    return "这次掷骰与 KP 允许的检定参数不一致。等画面刷新后，再试一次。";
+  }
+  if (/^Board .+ is archived$/i.test(message)) {
+    return "这个画面已经被收起了，先重新打开或换一个画面。";
+  }
+  if (/^Board .+ is not visible/i.test(message)) {
+    return "这个画面只给部分人看，你现在不能改动它。";
+  }
+  if (/^character .+ is already referenced by an unowned token/i.test(message)) {
+    return "这张角色卡的棋子还没有确定归属，请让 KP 先确认棋子归属。";
+  }
+  if (/^(only the host may|players may|a player cannot)/i.test(message)) {
+    return "你现在不能执行这个操作。内容可能只给部分人看，或已被 KP 设为只读。";
+  }
+  return undefined;
+}
+
+/** Human label for the authorized bonus/penalty dice, if any apply. */
+function bonusPenaltyLabelV2({ bonusDice, penaltyDice }: {
+  readonly bonusDice: number;
+  readonly penaltyDice: number;
+}): string | undefined {
+  if (bonusDice > 0) return `${bonusDice} 个奖励骰`;
+  if (penaltyDice > 0) return `${penaltyDice} 个惩罚骰`;
+  return undefined;
 }
 
 function characterCheckOptions(character: Coc7Character): Array<{ id: string; name: string; value: number }> {

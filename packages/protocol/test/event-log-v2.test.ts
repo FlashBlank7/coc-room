@@ -1331,7 +1331,7 @@ describe("HostEventSequencerV2", () => {
     },
   );
 
-  it("rejects closing an authorized check and mismatching a request audience", () => {
+  it("limits closing an authorized check to an explicit cancellation and keeps the request audience", () => {
     const sequencer = deterministicSequencer();
     sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
       type: "character.updated",
@@ -1353,11 +1353,122 @@ describe("HostEventSequencerV2", () => {
       audience: ROOM,
       payload: { requestId: "check-authorized", target: 60, requiredDifficulty: "regular", bonusDice: 0, penaltyDice: 0, note: "Roll" },
     }, commandId(73)), HOST);
+    // An authorized check may not be resolved with a substitute ruling, and a
+    // non-requester player may not touch it. Only an explicit cancellation by
+    // the host or the requester withdraws the unrolled ruling.
     expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
       type: "check.closed",
       audience: ROOM,
-      payload: { requestId: "check-authorized", outcome: "cancelled", note: "Too late" },
+      payload: { requestId: "check-authorized", outcome: "no-roll", note: "Forged shortcut" },
     }, commandId(74)), HOST)).toThrow(/already authorized/i);
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, BOB, {
+      type: "check.closed",
+      audience: ROOM,
+      payload: { requestId: "check-authorized", outcome: "cancelled", note: "Not my check" },
+    }, commandId(75)), BOB)).toThrow(/requester may only cancel/i);
+  });
+
+  it("lets the host withdraw a mistaken ruling and the requester walk away before rolling", () => {
+    const sequencer = deterministicSequencer();
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "character.updated",
+      audience: ROOM,
+      payload: { character: investigator(ALICE.seatId) },
+    }, commandId(80)), ALICE);
+    const requestCheck = (requestId: string, id: number) => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "check.requested",
+      audience: ROOM,
+      payload: { requestId, characterId: "character-alice", characterName: "Alice Investigator", skillName: "Spot Hidden", proposedTarget: 60, reason: "Search the archive" },
+    }, commandId(id)), ALICE);
+    const authorizeCheck = (requestId: string, id: number) => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
+      type: "check.authorized",
+      audience: ROOM,
+      payload: { requestId, target: 60, requiredDifficulty: "extreme", bonusDice: 0, penaltyDice: 1, note: "Mistaken ruling" },
+    }, commandId(id)), HOST);
+
+    // The host picked the wrong difficulty and withdraws the ruling.
+    requestCheck("check-misruled", 81);
+    authorizeCheck("check-misruled", 82);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
+      type: "check.closed",
+      audience: ROOM,
+      payload: { requestId: "check-misruled", outcome: "cancelled", note: "Wrong difficulty; resubmit the action" },
+    }, commandId(83)), HOST);
+    expect(sequencer.world.checkClosures.get("check-misruled")).toMatchObject({
+      outcome: "cancelled",
+      closedBySeatId: HOST.seatId,
+      closedByRole: "host",
+    });
+    expect(() => sequencer.commitCommand(roomCommandV2Schema.parse({
+      protocolVersion: 2,
+      roomId: ROOM_ID,
+      commandId: commandId(84),
+      sender: ALICE,
+      sentAt: "2026-08-29T00:00:00.000Z",
+      type: "dice.roll",
+      audience: ROOM,
+      payload: { expression: "1d100", reason: "Spot Hidden", bonusDice: 0, penaltyDice: 1, target: 60, requiredDifficulty: "extreme", checkRequestId: "check-misruled" },
+    }), ALICE)).toThrow(/was closed/i);
+
+    // The table is not stuck: the requester may submit a fresh action and may
+    // also walk away from an authorized regular check before rolling.
+    requestCheck("check-retried", 85);
+    authorizeCheck("check-retried", 86);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "check.closed",
+      audience: ROOM,
+      payload: { requestId: "check-retried", outcome: "cancelled", note: "I change my mind before rolling" },
+    }, commandId(87)), ALICE);
+    expect(sequencer.world.checkClosures.get("check-retried")).toMatchObject({
+      outcome: "cancelled",
+      closedBySeatId: ALICE.seatId,
+      closedByRole: "player",
+    });
+
+    const restored = new HostEventSequencerV2(ROOM_ID, { initialEvents: sequencer.eventsAfter(0) });
+    expect(restored.world.checkClosures.get("check-misruled")?.closedByRole).toBe("host");
+    expect(restored.world.checkClosures.get("check-retried")?.closedByRole).toBe("player");
+  });
+
+  it("keeps a rolled check terminal: nobody may cancel it afterwards", () => {
+    const values = [4, 2];
+    const sequencer = deterministicSequencer(() => values.shift() ?? 0);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "character.updated",
+      audience: ROOM,
+      payload: { character: investigator(ALICE.seatId) },
+    }, commandId(90)), ALICE);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "check.requested",
+      audience: ROOM,
+      payload: { requestId: "check-rolled", characterId: "character-alice", characterName: "Alice Investigator", skillName: "Spot Hidden", proposedTarget: 60, reason: "Search" },
+    }, commandId(91)), ALICE);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
+      type: "check.authorized",
+      audience: ROOM,
+      payload: { requestId: "check-rolled", target: 60, requiredDifficulty: "regular", bonusDice: 0, penaltyDice: 0, note: "Roll" },
+    }, commandId(92)), HOST);
+    sequencer.commitCommand(roomCommandV2Schema.parse({
+      protocolVersion: 2,
+      roomId: ROOM_ID,
+      commandId: commandId(93),
+      sender: ALICE,
+      sentAt: "2026-08-29T00:00:00.000Z",
+      type: "dice.roll",
+      audience: ROOM,
+      payload: { expression: "1d100", reason: "Spot Hidden", bonusDice: 0, penaltyDice: 0, target: 60, requiredDifficulty: "regular", checkRequestId: "check-rolled" },
+    }), ALICE);
+
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
+      type: "check.closed",
+      audience: ROOM,
+      payload: { requestId: "check-rolled", outcome: "cancelled", note: "Too late" },
+    }, commandId(94)), HOST)).toThrow(/already rolled/i);
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "check.closed",
+      audience: ROOM,
+      payload: { requestId: "check-rolled", outcome: "cancelled", note: "Undo my roll" },
+    }, commandId(95)), ALICE)).toThrow(/already rolled/i);
   });
 
   it("persists target audience expansion across every artifact revision", () => {

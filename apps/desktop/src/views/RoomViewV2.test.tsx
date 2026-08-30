@@ -881,7 +881,7 @@ describe("RoomViewV2 board creation", () => {
     fireEvent.change(screen.getByLabelText("NPC 属性补充要求"), { target: { value: "观察敏锐，不擅长战斗" } });
     fireEvent.click(screen.getByRole("button", { name: "生成属性草稿" }));
 
-    expect(await screen.findByText(/只有你能看到 · 确认后才会更新人物/)).toBeTruthy();
+    expect(await screen.findByText(/只有你能看到 · 确认后才会更新「/)).toBeTruthy();
     expect(generateNpcStatsDraft).toHaveBeenCalledWith(expect.objectContaining({
       npcId: npc.entityId,
       name: npc.name,
@@ -1369,8 +1369,8 @@ describe("RoomViewV2 board creation", () => {
     };
 
     const view = render(<RoomViewV2 {...props} views={[rollView]} />);
-    expect(screen.getByRole("heading", { name: "描述这次成功带来的变化" })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("这次检定的叙述结果"), {
+    expect(screen.getByRole("heading", { name: /描述 .* 这次成功带来的变化/ })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/^检定叙述结果：/), {
       target: { value: "你在夹层里摸到一张被折起的曲目单。" },
     });
     fireEvent.click(screen.getByRole("button", { name: "发布这次叙述结果" }));
@@ -1459,7 +1459,7 @@ describe("RoomViewV2 board creation", () => {
     const props = { room, session, views: [failedRoll], seats: [], paths: {}, authenticationState: "authenticated" as const, setConnectionError: vi.fn(), onLeave: vi.fn() };
     const view = render(<RoomViewV2 {...props} world={worldAfterFailure} />);
 
-    expect(screen.getByRole("heading", { name: "说明这次失败目前如何表现" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /说明 .* 这次失败目前如何表现/ })).toBeTruthy();
     expect(screen.getByText(/换一种有实际区别的做法申请一次强推/)).toBeTruthy();
 
     const pushedRequest: CheckRequestV2 = {
@@ -1485,7 +1485,7 @@ describe("RoomViewV2 board creation", () => {
     };
     view.rerender(<RoomViewV2 {...props} world={worldWithPendingPush} />);
 
-    expect(screen.queryByRole("heading", { name: "说明这次失败目前如何表现" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /说明 .* 这次失败目前如何表现/ })).toBeNull();
     expect(screen.getByLabelText("当前行动")).toBeTruthy();
   });
 

@@ -8,6 +8,7 @@ import {
   type PlayerVisibleLocationV1,
   type RoomEntityV2,
 } from "@coc-room/protocol";
+import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, readTextFile, writeFile } from "@tauri-apps/plugin-fs";
 import { getRepository, type StoredModule, type StoredModuleDraft } from "../data/repository";
@@ -46,7 +47,7 @@ import {
 type ModuleRoomSession = RoomSession | RoomSessionV2;
 type PreparationStage = "source" | "parse" | "review" | "saved" | "room";
 type WorkflowError = { step: Exclude<PreparationStage, "saved">; message: string };
-type ActiveParseTask = { id: number; controller?: AbortController; stopped: boolean };
+type ActiveParseTask = { id: number; controller: AbortController; stopped: boolean };
 type SwitchModuleOptions = { returnToRoom?: boolean };
 const ACTIVE_MODULE_DRAFT_ID = "active-module-editor";
 type RetainedParserPreparation = {
@@ -246,7 +247,11 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       const repository = await getRepository();
       const stored = await repository.getModule(modulePackage.moduleId, modulePackage.revision)
         ?? { package: modulePackage, sourceText: "" };
-      await invalidateDraftRecovery();
+      // An unrestored recovery draft may be the only copy of hours of unsaved
+      // work; browsing other saved material must never delete it. The slot is
+      // only cleared when it holds the autosave of the dirty draft the keeper
+      // just confirmed to drop.
+      if (draftDirty && !recoveryDraft) await invalidateDraftRecovery();
       showStoredModule(stored);
       rememberHistory(
         modulePackage.moduleId,
@@ -255,7 +260,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [confirmReplaceDraft, invalidateDraftRecovery, rememberHistory, showStoredModule]);
+  }, [confirmReplaceDraft, draftDirty, invalidateDraftRecovery, recoveryDraft, rememberHistory, showStoredModule]);
 
   useEffect(() => {
     let cancelled = false;
@@ -310,7 +315,10 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     if (!task) return;
     activeParseTaskRef.current = undefined;
     task.stopped = true;
-    task.controller?.abort();
+    task.controller.abort();
+    // The leave guard promises that leaving interrupts the run. On desktop the
+    // sidecar keeps billing unless the native side is told to terminate it.
+    if (window.__TAURI_INTERNALS__) void invoke("cancel_module_parse").catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -328,6 +336,13 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
 
   useEffect(() => {
     if (!recoveryChecked || !draftDirty || !parsedDraft?.success) return;
+    if (recoveryDraft) {
+      // The single recovery slot still holds an unrestored draft. Overwriting
+      // it here would silently destroy the keeper's only copy, so keep it and
+      // say plainly that the current edits have no recovery point yet.
+      setDraftRecoveryNotice("本机恢复点仍保留着上次未恢复的草稿；当前修改不会自动留恢复点，请尽快正式保存。");
+      return;
+    }
     const modulePackage = parsedDraft.data;
     const recoveryGeneration = draftRecoveryGenerationRef.current;
     const timer = globalThis.setTimeout(() => {
@@ -353,7 +368,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
         });
     }, 500);
     return () => globalThis.clearTimeout(timer);
-  }, [draftDirty, draftSourceText, isMockDraft, parsedDraft, recoveryChecked, sourceName, warnings]);
+  }, [draftDirty, draftSourceText, isMockDraft, parsedDraft, recoveryChecked, recoveryDraft, sourceName, warnings]);
 
   const restoreRecoveryDraft = () => {
     if (!recoveryDraft) return;
@@ -506,9 +521,12 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       return setWorkflowError({ step: "source", message: "请粘贴文字或选择模组文件" });
     }
     if (!confirmReplaceDraft("重新整理模组")) return;
+    if (recoveryDraft && !window.confirm(
+      `本机还保留着一份未恢复的备团草稿“${recoveryDraft.package.metadata.title}”。整理成功后会用新草稿覆盖它的恢复点，之后无法再找回，确认继续吗？`,
+    )) return;
     const task: ActiveParseTask = {
       id: ++parseTaskIdRef.current,
-      ...(!window.__TAURI_INTERNALS__ ? { controller: new AbortController() } : {}),
+      controller: new AbortController(),
       stopped: false,
     };
     activeParseTaskRef.current = task;
@@ -532,10 +550,10 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
             setProgress((current) => [...current, update]);
           }
         },
-        task.controller?.signal,
+        task.controller.signal,
       );
       if (activeParseTaskRef.current !== task) return;
-      if (task.stopped || task.controller?.signal.aborted) {
+      if (task.stopped || task.controller.signal.aborted) {
         setProgress([]);
         setParserNotice("已停止本次整理；没有生成或保存新草稿，已选择的原文仍保留在这里。");
         return;
@@ -580,7 +598,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       setWorkspaceMode("browse");
     } catch (cause) {
       if (activeParseTaskRef.current !== task) return;
-      if (task.stopped || task.controller?.signal.aborted) {
+      if (task.stopped || task.controller.signal.aborted) {
         setProgress([]);
         setWorkflowError(undefined);
         setParserNotice("已停止本次整理；没有生成或保存新草稿，已选择的原文仍保留在这里。");
@@ -599,12 +617,16 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
 
   const stopParser = () => {
     const task = activeParseTaskRef.current;
-    if (!task?.controller || task.stopped) return;
+    if (!task || task.stopped) return;
     task.stopped = true;
     setParseStopping(true);
     setWorkflowError(undefined);
     setParserNotice("正在停止本次整理并清理本地 AI 任务…");
     task.controller.abort();
+    // On desktop the parse runs in a native sidecar that ignores the fetch
+    // signal; ask the backend to terminate it. Even if that request fails,
+    // this task is already marked stopped, so its late result is discarded.
+    if (window.__TAURI_INTERNALS__) void invoke("cancel_module_parse").catch(() => undefined);
   };
 
   const saveDraft = async () => {
@@ -628,7 +650,9 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
         }
       }
       await repository.saveModule({ package: modulePackage, sourceText: draftSourceText });
-      await invalidateDraftRecovery();
+      // Only clear the recovery slot when it belongs to the draft that was
+      // just saved; a pending, unrestored recovery draft must survive.
+      if (!recoveryDraft) await invalidateDraftRecovery();
       await refreshLibrary();
       setDraft(JSON.stringify(modulePackage, null, 2));
       setDraftDirty(false);
@@ -709,7 +733,10 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     const modulePackage = nextModuleRevision(candidate, storedModules.map((item) => item.package));
     await beforeSave?.(modulePackage);
     await repository.saveModule({ package: modulePackage, sourceText: existing?.sourceText ?? "" });
-    await invalidateDraftRecovery();
+    // Importing other material must not delete an unrestored recovery draft;
+    // the slot is only cleared alongside the dirty draft the keeper agreed to
+    // replace in the import confirmation.
+    if (draftDirty && !recoveryDraft) await invalidateDraftRecovery();
     await refreshLibrary();
     setDraft(JSON.stringify(modulePackage, null, 2));
     setDraftSourceText(existing?.sourceText ?? "");
@@ -1053,9 +1080,9 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                           <p className="font-medium text-brass">{parseStopping ? "正在停止整理" : "正在整理模组"}</p>
                           <p className="mt-1">{parseStopping ? "正在终止本地 AI 任务；已选择的原文不会丢失。" : progress.at(-1) ? describeParserProgress(progress.at(-1)!) : "正在启动本地安全桥……"}</p>
                         </div>
-                        {!window.__TAURI_INTERNALS__ && <Button type="button" variant="secondary" className="h-8 shrink-0 px-2 text-xs" disabled={parseStopping} onClick={stopParser}>
+                        <Button type="button" variant="secondary" className="h-8 shrink-0 px-2 text-xs" disabled={parseStopping} onClick={stopParser}>
                           <Square className="mr-1.5 h-3.5 w-3.5" />{parseStopping ? "正在停止…" : "停止整理"}
-                        </Button>}
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1384,7 +1411,22 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
             )}
           </Panel>
         </div>
-        {error && <div className="rounded-md border border-red-900 bg-red-950/40 p-3 text-sm text-red-300">{error}</div>}
+        {/* Errors can fire from actions anywhere on this long page; keep the
+            notice fixed to the viewport so it is visible without scrolling. */}
+        {error && (
+          <div
+            role="alert"
+            className="fixed bottom-6 left-1/2 z-50 w-[min(92vw,40rem)] -translate-x-1/2 rounded-md border border-red-900 bg-red-950 p-3 text-sm text-red-300 shadow-[0_18px_50px_rgba(0,0,0,.45)]"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-medium">这一步没有完成</p>
+                <p className="mt-1 break-words text-xs leading-5">{error}</p>
+              </div>
+              <Button variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => setError(undefined)}>知道了</Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

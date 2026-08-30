@@ -551,8 +551,14 @@ export class RoomSessionV2 {
     await this.repository.saveSeatV2(next);
     this.seats.set(seatId, next);
     const oldPeer = this.peerBySeat.get(seatId);
-    if (oldPeer) this.forgetAuthenticatedPeer(oldPeer);
-    else this.emitPresence();
+    if (oldPeer) {
+      // Best-effort kick before forgetting: without it the connected client
+      // keeps a live-looking session whose messages the host silently drops.
+      this.sendAuthenticationFailure(oldPeer);
+      this.forgetAuthenticatedPeer(oldPeer);
+    } else {
+      this.emitPresence();
+    }
     this.onSeatCredentialRotated?.(seatId);
     return roomInvitationPayloadV2Schema.parse({
       protocolVersion: 2,
@@ -577,8 +583,12 @@ export class RoomSessionV2 {
     await this.repository.saveSeatV2(next);
     this.seats.set(seatId, next);
     const peerId = this.peerBySeat.get(seatId);
-    if (peerId) this.forgetAuthenticatedPeer(peerId);
-    else this.emitPresence();
+    if (peerId) {
+      this.sendAuthenticationFailure(peerId);
+      this.forgetAuthenticatedPeer(peerId);
+    } else {
+      this.emitPresence();
+    }
   }
 
   private async ensureHostSeat(): Promise<void> {
@@ -628,18 +638,19 @@ export class RoomSessionV2 {
     this.onRelayStateChange?.(connected);
   }
 
-  private resetPlayerAuthentication(): void {
+  private resetPlayerAuthentication(state: "waiting" | "failed" = "waiting"): void {
     if (this.isHost || this.stopped) return;
     this.activeSyncRequest = undefined;
     if (this.repairTimer !== undefined) globalThis.clearTimeout(this.repairTimer);
     this.repairTimer = undefined;
     this.uploadLeases.clear();
+    const rejection = state === "failed" ? "席位认证已失效，房间已暂停" : "房主连接中断，房间已暂停";
     for (const [commandId, pending] of this.pendingCommandConfirmations) {
       globalThis.clearTimeout(pending.timer);
-      pending.reject(new RoomCommandRejectedError("房主连接中断，房间已暂停", "PAUSED"));
+      pending.reject(new RoomCommandRejectedError(rejection, "PAUSED"));
       this.pendingCommandConfirmations.delete(commandId);
     }
-    if (this.authenticationState !== "waiting") this.setAuthenticationState("waiting");
+    if (this.authenticationState !== state) this.setAuthenticationState(state);
   }
 
   private sendAuthenticationHello(): void {
@@ -791,7 +802,14 @@ export class RoomSessionV2 {
   }
 
   private handleAuthResult(message: Extract<RoomWireMessage, { kind: "v2.auth.result" }>): void {
-    if (this.isAuthenticated) return;
+    if (this.isAuthenticated) {
+      // A failed result on a live seat is the host revoking it (invitation
+      // rotated or seat disabled); a duplicate success stays ignored.
+      if (message.ok) return;
+      this.resetPlayerAuthentication("failed");
+      this.onError?.(message.message ?? "席位认证失败；邀请可能已轮换或失效");
+      return;
+    }
     if (!message.ok || !message.seat || message.seat.seatId !== this.localSeat.seatId) {
       this.setAuthenticationState("failed");
       this.onError?.(message.message ?? "席位认证失败；邀请可能已轮换或失效");

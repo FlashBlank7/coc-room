@@ -2,14 +2,28 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Coc7Character, SeatV2 } from "@coc-room/protocol";
 import type { LocalRepository, RoomRecord } from "./data/repository";
 import { useAppStore } from "./store/app-store";
+
+interface MockSessionV2Handle {
+  onPresence?: (seats: SeatV2[]) => void;
+  onAuthenticationState?: (state: "waiting" | "challenged" | "authenticated" | "failed") => void;
+  onRelayStateChange?: (connected: boolean) => void;
+  onError?: (message: string) => void;
+}
+
+interface MockAiCoordinatorOptions {
+  onClientStatus?: (status: { jobId: string; status: string; message: string; result?: unknown }) => void;
+}
 
 const mocks = vi.hoisted(() => ({
   getRepository: vi.fn(),
   connect: undefined as undefined | ((room: RoomRecord, nickname: string) => Promise<void>),
   sessionStart: vi.fn(),
   sessionStop: vi.fn(),
+  lastSessionV2: undefined as undefined | MockSessionV2Handle,
+  lastAiOptions: undefined as undefined | MockAiCoordinatorOptions,
 }));
 
 vi.mock("./data/repository", async (importOriginal) => {
@@ -33,7 +47,11 @@ vi.mock("./views/RoomViewV2", () => ({
     </div>
   ),
 }));
-vi.mock("./views/CharactersView", () => ({ CharactersView: () => <div>角色</div> }));
+vi.mock("./views/CharactersView", () => ({
+  CharactersView: ({ lateApprovedDraft }: { lateApprovedDraft?: unknown }) => (
+    <div>{lateApprovedDraft ? "存在迟到批准草稿" : "没有迟到批准草稿"}</div>
+  ),
+}));
 vi.mock("./views/ModulesView", () => ({ ModulesView: () => <div>模组</div> }));
 vi.mock("./views/SettingsView", () => ({ SettingsView: () => <div>设置</div> }));
 
@@ -46,13 +64,18 @@ vi.mock("./network/RoomSession", () => ({
 }));
 
 vi.mock("./network/RoomSessionV2", () => ({
-  RoomSessionV2: class MockRoomSessionV2 {
+  RoomSessionV2: class MockRoomSessionV2 implements MockSessionV2Handle {
     readonly isHost = false;
     readonly localSeat = { seatId: "seat-player", role: "player", displayName: "player", extensions: {} };
+    onPresence?: MockSessionV2Handle["onPresence"];
+    onAuthenticationState?: MockSessionV2Handle["onAuthenticationState"];
+    onRelayStateChange?: MockSessionV2Handle["onRelayStateChange"];
+    onError?: MockSessionV2Handle["onError"];
     private readonly roomId: string;
 
     constructor({ room }: { room: RoomRecord }) {
       this.roomId = room.id;
+      mocks.lastSessionV2 = this;
     }
 
     start() {
@@ -74,6 +97,10 @@ vi.mock("./network/RoomAssetCoordinator", () => ({
 
 vi.mock("./ai/room-ai-job-coordinator", () => ({
   RoomAiJobCoordinator: class MockRoomAiJobCoordinator {
+    constructor(options: MockAiCoordinatorOptions) {
+      mocks.lastAiOptions = options;
+    }
+
     shutdown() {}
     flushOutbox() {}
     resendPendingRequests() {}
@@ -126,6 +153,8 @@ beforeEach(() => {
   mocks.connect = undefined;
   mocks.sessionStart.mockReset();
   mocks.sessionStop.mockReset();
+  mocks.lastSessionV2 = undefined;
+  mocks.lastAiOptions = undefined;
   useAppStore.setState({
     activeView: "lobby",
     currentRoom: undefined,
@@ -197,5 +226,133 @@ describe("App connection attempt ownership", () => {
     expect(useAppStore.getState().currentRoom).toBeUndefined();
     expect(useAppStore.getState().connectionPhase).toBe("idle");
     expect(useAppStore.getState().connectionError).toBeUndefined();
+  });
+});
+
+async function connectLive(target: RoomRecord, nickname = "玩家"): Promise<void> {
+  if (!mocks.connect) throw new Error("missing App connect callback");
+  let pending!: Promise<void>;
+  act(() => {
+    pending = mocks.connect!(target, nickname);
+  });
+  await act(async () => {
+    await pending;
+  });
+  expect(useAppStore.getState().connectionPhase).toBe("live");
+}
+
+function approvedDraftCharacter(): Coc7Character {
+  return {
+    schemaVersion: 1,
+    id: "character-late-approved",
+    ownerPeerId: "seat-player",
+    name: "迟到的调查员",
+    playerName: "玩家",
+    occupation: "档案管理员",
+    age: 32,
+    residence: "阿卡姆",
+    birthplace: "波士顿",
+    characteristics: { str: 45, con: 55, siz: 50, dex: 60, app: 55, int: 70, pow: 60, edu: 65, luck: 50 },
+    derived: { hitPoints: 10, maxHitPoints: 10, magicPoints: 12, maxMagicPoints: 12, sanity: 60, maxSanity: 99, movementRate: 8, build: 0, damageBonus: "0" },
+    skills: [{ id: "skill-library-use", name: "图书馆使用", baseValue: 20, value: 70, checked: false }],
+    status: { temporaryInsanity: false, indefiniteInsanity: false, majorWound: false, dying: false, unconscious: false },
+    inventory: [],
+    background: { personalDescription: "", ideologyAndBeliefs: "", significantPeople: "", meaningfulLocations: "", treasuredPossessions: "", traits: "", injuriesAndScars: "", phobiasAndManias: "", arcaneTomesSpellsAndArtifacts: "", encountersWithStrangeEntities: "" },
+    notes: "",
+    updatedAt: "2026-08-29T00:00:00.000Z",
+    extensions: {},
+  };
+}
+
+describe("App V2 room presentation", () => {
+  it("drops a late-approved AI draft when the player switches rooms", async () => {
+    const firstRoom = room("room-draft-a", "甲团");
+    const secondRoom = room("room-draft-b", "乙团");
+    mocks.getRepository.mockResolvedValue(repository([firstRoom, secondRoom]));
+    render(<App />);
+    await screen.findByText("连接测试大厅");
+
+    await connectLive(firstRoom, "玩家一");
+    act(() => {
+      mocks.lastAiOptions?.onClientStatus?.({
+        jobId: "job-late-approved",
+        status: "completed",
+        message: "KP 已通过草稿",
+        result: { character: approvedDraftCharacter() },
+      });
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "我的调查员" })[0]!);
+    expect(await screen.findByText("存在迟到批准草稿")).toBeTruthy();
+
+    await connectLive(secondRoom, "玩家一");
+    fireEvent.click(screen.getAllByRole("button", { name: "我的调查员" })[0]!);
+    expect(await screen.findByText("没有迟到批准草稿")).toBeTruthy();
+    expect(screen.queryByText("存在迟到批准草稿")).toBeNull();
+  });
+
+  it("shows the paused room to a player who joins while the host is absent", async () => {
+    const testRoom = room("room-absent-host", "无主之房");
+    mocks.getRepository.mockResolvedValue(repository([testRoom]));
+    render(<App />);
+    await screen.findByText("连接测试大厅");
+
+    await connectLive(testRoom);
+    const session = mocks.lastSessionV2;
+    if (!session) throw new Error("missing mock session");
+    act(() => {
+      session.onRelayStateChange?.(true);
+      session.onPresence?.([
+        { seatId: testRoom.localSeatId!, role: "player", displayName: "玩家", extensions: {} },
+      ]);
+    });
+    expect(screen.getByText("房主离线 · 房间暂停")).toBeTruthy();
+
+    act(() => {
+      session.onPresence?.([
+        { seatId: testRoom.hostSeatId!, role: "host", displayName: "KP", peerId: testRoom.hostPeerId, extensions: {} },
+        { seatId: testRoom.localSeatId!, role: "player", displayName: "玩家", extensions: {} },
+      ]);
+    });
+    expect(screen.queryByText("房主离线 · 房间暂停")).toBeNull();
+    expect(screen.getByText("房间已连接")).toBeTruthy();
+  });
+
+  it("clears the V2 connection error once the relay reconnects", async () => {
+    const testRoom = room("room-relay-blip", "中继闪断");
+    mocks.getRepository.mockResolvedValue(repository([testRoom]));
+    render(<App />);
+    await screen.findByText("连接测试大厅");
+
+    await connectLive(testRoom);
+    const session = mocks.lastSessionV2;
+    if (!session) throw new Error("missing mock session");
+    act(() => {
+      session.onRelayStateChange?.(false);
+      session.onError?.("中继节点连接已断开；现有直连可继续，正在尝试重连");
+    });
+    expect(useAppStore.getState().connectionError).toContain("中继节点连接已断开");
+
+    act(() => {
+      session.onRelayStateChange?.(true);
+    });
+    expect(useAppStore.getState().connectionError).toBeUndefined();
+    expect(useAppStore.getState().relayConnected).toBe(true);
+  });
+
+  it("labels a seat authentication failure instead of claiming the host is offline", async () => {
+    const testRoom = room("room-auth-failed", "认证失败之房");
+    mocks.getRepository.mockResolvedValue(repository([testRoom]));
+    render(<App />);
+    await screen.findByText("连接测试大厅");
+
+    await connectLive(testRoom);
+    const session = mocks.lastSessionV2;
+    if (!session) throw new Error("missing mock session");
+    act(() => {
+      session.onRelayStateChange?.(true);
+      session.onAuthenticationState?.("failed");
+    });
+    expect(screen.getByText("席位验证失败：邀请可能已被换新，请向 KP 索取新邀请串")).toBeTruthy();
+    expect(screen.queryByText("房主离线 · 房间暂停")).toBeNull();
   });
 });

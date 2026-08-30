@@ -71,6 +71,13 @@ describe("immersive V2 investigation workspace", () => {
 
     render(<CheckNegotiationV2 world={world} session={session} />);
     expect(screen.getByRole("heading", { name: "KP 已允许你掷骰" })).toBeTruthy();
+
+    // The player must see the full terms of the ruling — the risk note and
+    // the bonus/penalty dice — before deciding to roll, not after the result.
+    const readyCard = screen.getByLabelText("KP 已允许的检定");
+    expect(readyCard.textContent).toContain("KP 已允许：侦查 60 · 困难 · 1 个奖励骰");
+    expect(readyCard.textContent).toContain("KP 补充：可以");
+
     fireEvent.click(screen.getByRole("button", { name: "掷骰：侦查（60）" }));
 
     await waitFor(() => expect(rollDice).toHaveBeenCalledWith({
@@ -82,6 +89,154 @@ describe("immersive V2 investigation workspace", () => {
       requiredDifficulty: "hard",
       checkRequestId: "check-spot",
     }));
+  });
+
+  it("keeps the roll locked through the relay round-trip and ignores a second click", async () => {
+    const world = regularReadyCheckWorld();
+    let settleRoll: ((commandId: string) => void) | undefined;
+    const rollDice = vi.fn().mockImplementation(() => new Promise<string>((resolve) => { settleRoll = resolve; }));
+    const session = { isHost: false, localSeat: { seatId: "seat-player", role: "player", displayName: "玩家" }, rollDice, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;
+
+    const view = render(<CheckNegotiationV2 world={world} session={session} />);
+    const rollButton = screen.getByRole("button", { name: "掷骰：侦查（60）" });
+    fireEvent.click(rollButton);
+    // A frantic double-click during the same tick must not send a second
+    // command — the host would reject it as an "already rolled" conflict.
+    fireEvent.click(rollButton);
+    expect(rollDice).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "正在掷骰…" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "放弃这次检定" }).hasAttribute("disabled")).toBe(true);
+
+    // For a player, rollDice resolves when the command reaches the transport,
+    // not when the dice.result lands. The button must stay locked after that.
+    settleRoll?.("command-roll");
+    await waitFor(() => expect(screen.getByRole("button", { name: "正在掷骰…" }).hasAttribute("disabled")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "正在掷骰…" }));
+    expect(rollDice).toHaveBeenCalledTimes(1);
+
+    // Once the relayed dice.result resolves the authorization, the card leaves
+    // the ready list entirely.
+    const resolvedWorld = regularReadyCheckWorld({ resolvedByEventId: "event-roll", resolvedSuccess: true });
+    view.rerender(<CheckNegotiationV2 world={resolvedWorld} session={session} />);
+    expect(screen.queryByRole("button", { name: "正在掷骰…" })).toBeNull();
+    expect(screen.queryByLabelText("KP 已允许的检定")).toBeNull();
+  });
+
+  it("re-enables the roll and shows the reason when the submit itself fails", async () => {
+    const world = regularReadyCheckWorld();
+    const rollDice = vi.fn().mockRejectedValue(new Error("房主当前离线，房间已暂停"));
+    const onError = vi.fn();
+    const session = { isHost: false, localSeat: { seatId: "seat-player", role: "player", displayName: "玩家" }, rollDice, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} onError={onError} />);
+    fireEvent.click(screen.getByRole("button", { name: "掷骰：侦查（60）" }));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("房主当前离线，房间已暂停"));
+    expect(screen.getByRole("button", { name: "掷骰：侦查（60）" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("lets the player walk away from an authorized regular check before rolling", async () => {
+    const world = regularReadyCheckWorld();
+    const submitConfirmed = vi.fn().mockResolvedValue("check-abandoned");
+    const session = { isHost: false, localSeat: { seatId: "seat-player", role: "player", displayName: "玩家" }, rollDice: vi.fn(), submitConfirmed, isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} />);
+    fireEvent.click(screen.getByRole("button", { name: "放弃这次检定" }));
+
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledWith({
+      type: "check.closed",
+      audience: { kind: "room" },
+      payload: {
+        requestId: "check-spot",
+        outcome: "cancelled",
+        note: "调查员在掷骰前放弃了这次检定，换一种做法继续调查。",
+      },
+    }));
+  });
+
+  it("lets KP withdraw a mistaken ruling that is still waiting for the roll", async () => {
+    const world = regularReadyCheckWorld();
+    const submitConfirmed = vi.fn().mockResolvedValue("ruling-withdrawn");
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, submitConfirmed, isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} />);
+    const waitingRow = screen.getByLabelText("等待掷骰：林默");
+    expect(waitingRow.textContent).toContain("林默 · 侦查 60 · 困难 · 1 个奖励骰");
+    fireEvent.click(within(waitingRow).getByRole("button", { name: "撤回裁定" }));
+
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledWith({
+      type: "check.closed",
+      audience: { kind: "room" },
+      payload: {
+        requestId: "check-spot",
+        outcome: "cancelled",
+        note: "KP 撤回了这次裁定；请重新提交行动，再由 KP 重新裁定。",
+      },
+    }));
+  });
+
+  it("does not show the waiting-for-roll ruling list once the dice have landed", () => {
+    const world = regularReadyCheckWorld({ resolvedByEventId: "event-roll", resolvedSuccess: true });
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} />);
+
+    expect(screen.queryByLabelText("等待掷骰：林默")).toBeNull();
+    expect(screen.queryByRole("button", { name: "撤回裁定" })).toBeNull();
+  });
+
+  it("translates a raw host-side reducer race into an understandable reason", async () => {
+    const world = createRoomWorldStateV2("room-host-reducer-error");
+    const character = investigator();
+    (world.latestCharacters as Map<string, Coc7Character>).set(character.id, character);
+    (world.checkRequests as Map<string, never>).set("check-obvious", {
+      requestId: "check-obvious",
+      characterId: character.id,
+      characterName: character.name,
+      skillName: "侦查",
+      proposedTarget: 60,
+      reason: "查看桌面上没有遮挡的信件",
+      requesterSeatId: "seat-player",
+      requestedAt: "2026-08-29T00:00:00.000Z",
+      audience: { kind: "room" },
+    } as never);
+    // The host commits to its local reducer, so a race (the investigator just
+    // withdrew) rejects with a raw English error rather than a classified one.
+    const submitConfirmed = vi.fn().mockRejectedValue(new Error("check check-obvious was closed"));
+    const onError = vi.fn();
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, submitConfirmed, isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} onError={onError} />);
+    fireEvent.change(screen.getByLabelText("直接结果：林默"), { target: { value: "信件就在桌面上。" } });
+    fireEvent.click(screen.getByRole("button", { name: "无需掷骰，直接给出结果" }));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("这项行动刚刚被撤回或已经结束，不需要再处理它。"));
+  });
+
+  it("falls back to showing an unknown host-side failure instead of hiding it", async () => {
+    const world = createRoomWorldStateV2("room-host-unknown-error");
+    const character = investigator();
+    (world.latestCharacters as Map<string, Coc7Character>).set(character.id, character);
+    (world.checkRequests as Map<string, never>).set("check-odd", {
+      requestId: "check-odd",
+      characterId: character.id,
+      characterName: character.name,
+      skillName: "侦查",
+      proposedTarget: 60,
+      reason: "翻查抽屉",
+      requesterSeatId: "seat-player",
+      requestedAt: "2026-08-29T00:00:00.000Z",
+      audience: { kind: "room" },
+    } as never);
+    const submitConfirmed = vi.fn().mockRejectedValue(new Error("sequencer storage exploded"));
+    const onError = vi.fn();
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, submitConfirmed, isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<CheckNegotiationV2 world={world} session={session} onError={onError} />);
+    fireEvent.change(screen.getByLabelText("直接结果：林默"), { target: { value: "抽屉里只有旧报纸。" } });
+    fireEvent.click(screen.getByRole("button", { name: "无需掷骰，直接给出结果" }));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("刚才的操作没有完成：sequencer storage exploded"));
   });
 
   it("holds the next action until KP has narrated a completed check", () => {
@@ -1102,6 +1257,39 @@ function investigator(): Coc7Character {
     status: { temporaryInsanity: false, indefiniteInsanity: false, majorWound: false, dying: false, unconscious: false },
     background: { personalDescription: "", ideologyAndBeliefs: "", significantPeople: "", meaningfulLocations: "", treasuredPossessions: "", traits: "", injuriesAndScars: "", phobiasAndManias: "", arcaneTomesSpellsAndArtifacts: "", encountersWithStrangeEntities: "" }, notes: "", updatedAt: "2026-08-29T00:00:00.000Z", extensions: {},
   };
+}
+
+/** A regular (non-push) check the KP has authorized but nobody has rolled yet. */
+function regularReadyCheckWorld(resolution?: { resolvedByEventId: string; resolvedSuccess: boolean }) {
+  const world = createRoomWorldStateV2("room-regular-ready");
+  const character = investigator();
+  (world.latestCharacters as Map<string, Coc7Character>).set(character.id, character);
+  (world.checkRequests as Map<string, never>).set("check-spot", {
+    requestId: "check-spot",
+    characterId: character.id,
+    characterName: character.name,
+    skillName: "侦查",
+    proposedTarget: 60,
+    reason: "检查唱片机夹层",
+    goal: "确认唱片机是否被动过",
+    approach: "检查唱片机夹层",
+    requesterSeatId: "seat-player",
+    requestedAt: "2026-08-29T00:00:00.000Z",
+    audience: { kind: "room" },
+  } as never);
+  (world.checkAuthorizations as Map<string, never>).set("check-spot", {
+    requestId: "check-spot",
+    skillName: "侦查",
+    target: 60,
+    requiredDifficulty: "hard",
+    bonusDice: 1,
+    penaltyDice: 0,
+    note: "小心：失败会惊动楼下的人。",
+    requesterSeatId: "seat-player",
+    authorizedAt: "2026-08-29T00:00:01.000Z",
+    ...(resolution ?? {}),
+  } as never);
+  return world;
 }
 
 type PushCheckWorldMode =
