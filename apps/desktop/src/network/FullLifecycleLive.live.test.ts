@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 import {
   exportEventsV2ToMarkdown,
@@ -431,6 +431,8 @@ liveDescribe("full table lifecycle over the live relay", () => {
       }
       expect(hostTranscript).toContain(keeperCanary);
       expect(aliceTranscript).not.toContain(keeperCanary);
+      const transcriptOut = process.env.COC_ROOM_LIVE_TRANSCRIPT_OUT;
+      if (transcriptOut) writeFileSync(transcriptOut, aliceTranscript, "utf8");
       expect(JSON.stringify(aliceViews)).not.toContain(keeperCanary);
       expect(aliceViews.some((view) => view.view === "redacted")).toBe(true);
 
