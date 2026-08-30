@@ -797,6 +797,47 @@ describe("CharactersView AI draft review", () => {
     expect(onReject).toHaveBeenCalledWith("job-review-0001");
   });
 
+  it("offers portrait generation only to the V2 keeper", () => {
+    const hostRoom: RoomRecord = {
+      ...createRoom("host", "host-local"),
+      id: "character-room-portrait",
+      protocolVersion: 2,
+      localSeatId: "seat-host-v2",
+      hostSeatId: "seat-host-v2",
+      seatCredentialVersion: 1,
+    };
+    useAppStore.setState({ currentRoom: hostRoom, activeView: "characters" });
+    const session = new RoomSessionV2({
+      room: hostRoom,
+      displayName: "Keeper",
+      repository: {} as never,
+      transport: {} as never,
+    });
+    render(<CharactersView session={session} worldV2={createRoomWorldStateV2(hostRoom.id)} />);
+    fireEvent.click(screen.getByRole("button", { name: "新建我的角色" }));
+    expect(screen.getByRole("button", { name: /按人设与当前模组生成人设图/ })).toBeTruthy();
+    cleanup();
+
+    const playerRoom2: RoomRecord = {
+      ...createRoom("player", "player-v2"),
+      id: "character-room-portrait-player",
+      protocolVersion: 2,
+      localSeatId: "seat-player-v2",
+      hostSeatId: "seat-host-v2",
+      seatCredentialVersion: 1,
+    };
+    useAppStore.setState({ currentRoom: playerRoom2, activeView: "characters" });
+    const playerSession = new RoomSessionV2({
+      room: playerRoom2,
+      displayName: "Alice",
+      repository: {} as never,
+      transport: {} as never,
+    });
+    render(<CharactersView session={playerSession} worldV2={createRoomWorldStateV2(playerRoom2.id)} />);
+    fireEvent.click(screen.getByRole("button", { name: "新建我的角色" }));
+    expect(screen.queryByRole("button", { name: /按人设与当前模组生成人设图/ })).toBeNull();
+  });
+
   it("shows the live draft stage while waiting and surfaces a KP rejection", async () => {
     const v2Room: RoomRecord = {
       ...createRoom("player", "player-v2"),
