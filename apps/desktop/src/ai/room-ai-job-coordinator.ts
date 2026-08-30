@@ -51,9 +51,9 @@ interface PendingClientRequest {
   awaitingReview: boolean;
 }
 
-interface HeldReview {
+interface PendingApproval {
   requester: SeatV2;
-  terminal: AiJobStatus;
+  request: AiJobRequest;
 }
 
 const MAX_PROMPT_CODE_POINTS = 100_000;
@@ -62,8 +62,10 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 /**
  * Host-controlled broker for room AI drafts. Remote peers can request the
  * fixed `character-draft` operation only; provider/model selection and the
- * actual executor always stay on the host. Remote results are held for KP
- * review and only released to the requesting player via approveDraft.
+ * actual executor always stay on the host. The KP approves the REQUEST — may
+ * this player spend the host's AI — via approveRequest; once approved, the
+ * generated character goes straight to the requesting player. What the player
+ * does with it is their own business.
  */
 export class RoomAiJobCoordinator {
   private readonly session: RoomSessionV2;
@@ -80,7 +82,7 @@ export class RoomAiJobCoordinator {
   /** jobId → requesting seatId; also the idempotency ledger for replays. */
   private readonly seenJobIds = new Map<string, string>();
   private readonly pendingClients = new Map<string, PendingClientRequest>();
-  private readonly pendingReview = new Map<string, HeldReview>();
+  private readonly pendingApproval = new Map<string, PendingApproval>();
   private readonly terminalByJobId = new Map<string, AiJobStatus>();
   private readonly outbox = new Map<string, AiJobStatus[]>();
   private disposed = false;
@@ -150,25 +152,31 @@ export class RoomAiJobCoordinator {
     return false;
   }
 
-  /** Releases a KP-reviewed draft to the requesting player. */
-  approveDraft(jobId: string): boolean {
-    const held = this.pendingReview.get(jobId);
+  /** KP grants the player's request to use the host AI; generation starts now. */
+  approveRequest(jobId: string): boolean {
+    const held = this.pendingApproval.get(jobId);
     if (!held) return false;
-    this.pendingReview.delete(jobId);
-    this.dispatchToRequester(held.requester, held.terminal);
+    this.pendingApproval.delete(jobId);
+    if (this.queue.length + this.running.size >= this.maxQueued + this.maxConcurrent) {
+      this.dispatchToRequester(held.requester, status(jobId, "failed", "房主 AI 队列已满，请稍后重新申请"));
+      return true;
+    }
+    this.queue.push({ request: held.request, requester: held.requester });
+    this.dispatchToRequester(held.requester, status(jobId, "queued", "KP 已同意，角色草稿进入生成队列"));
+    this.drain();
     return true;
   }
 
-  /** Returns a KP-reviewed draft to the requesting player as rejected. */
-  rejectDraft(jobId: string, reason?: string): boolean {
-    const held = this.pendingReview.get(jobId);
+  /** KP declines the player's request to use the host AI. */
+  rejectRequest(jobId: string, reason?: string): boolean {
+    const held = this.pendingApproval.get(jobId);
     if (!held) return false;
-    this.pendingReview.delete(jobId);
+    this.pendingApproval.delete(jobId);
     const detail = reason?.trim();
     this.dispatchToRequester(held.requester, status(
       jobId,
       "cancelled",
-      detail ? `KP 退回了这份草稿：${detail}` : "KP 退回了这份草稿",
+      detail ? `KP 拒绝了这次 AI 车卡申请：${detail}` : "KP 拒绝了这次 AI 车卡申请",
     ));
     return true;
   }
@@ -203,20 +211,20 @@ export class RoomAiJobCoordinator {
     this.queue.splice(0);
     for (const controller of this.running.values()) controller.abort(new Error("房间 AI 草稿代理已经关闭"));
     this.running.clear();
-    // Held reviews live only in this host's memory; tell waiting players the
-    // truth instead of letting their spinners run into a misleading timeout.
-    for (const [jobId, held] of this.pendingReview) {
+    // Pending approvals live only in this host's memory; tell waiting players
+    // the truth instead of letting their spinners run into a misleading timeout.
+    for (const [jobId, held] of this.pendingApproval) {
       try {
         this.session.sendAiJobStatusToSeat(held.requester.seatId, status(
           jobId,
           "cancelled",
-          "KP 已离开房间，这份草稿失效了；KP 回来后可以重新申请",
+          "KP 已离开房间，这次申请失效了；KP 回来后可以重新申请",
         ));
       } catch {
         // The session is going down with us; nothing more to do.
       }
     }
-    this.pendingReview.clear();
+    this.pendingApproval.clear();
     this.outbox.clear();
     for (const [jobId] of this.pendingClients) this.rejectPending(jobId, new Error("房间 AI 草稿代理已经关闭"));
   }
@@ -227,8 +235,8 @@ export class RoomAiJobCoordinator {
    */
   forgetSeat(seatId: string): void {
     this.outbox.delete(seatId);
-    for (const [jobId, held] of [...this.pendingReview]) {
-      if (held.requester.seatId === seatId) this.pendingReview.delete(jobId);
+    for (const [jobId, held] of [...this.pendingApproval]) {
+      if (held.requester.seatId === seatId) this.pendingApproval.delete(jobId);
     }
     for (const [jobId, ownerSeatId] of [...this.seenJobIds]) {
       if (ownerSeatId === seatId) {
@@ -246,8 +254,8 @@ export class RoomAiJobCoordinator {
       // Idempotent replay (player reconnected): re-send the current state to
       // the original requester only; never leak results to another seat.
       if (ownerSeatId !== requester.seatId) return;
-      if (this.pendingReview.has(request.jobId)) {
-        this.sendToSeatOrPark(requester.seatId, reviewNotice(request.jobId));
+      if (this.pendingApproval.has(request.jobId)) {
+        this.sendToSeatOrPark(requester.seatId, approvalNotice(request.jobId));
         return;
       }
       const terminal = this.terminalByJobId.get(request.jobId);
@@ -280,9 +288,21 @@ export class RoomAiJobCoordinator {
         model: this.model,
         input: { prompt, playerName },
       };
-      this.queue.push({ request: sanitized, requester });
-      this.deliver(requester, status(request.jobId, "queued", "角色草稿已进入房主队列"));
-      this.drain();
+      if (requester.seatId === this.session.localSeat.seatId) {
+        // The host approving their own AI usage is meaningless; run directly.
+        this.queue.push({ request: sanitized, requester });
+        this.deliver(requester, status(request.jobId, "queued", "角色草稿已进入房主队列"));
+        this.drain();
+        return;
+      }
+      this.pendingApproval.set(request.jobId, { request: sanitized, requester });
+      this.onHostStatus?.(requester, status(
+        request.jobId,
+        "queued",
+        `${playerName} 申请用房主的 AI 生成角色草稿`,
+        { approvalRequest: true, prompt, playerName },
+      ));
+      this.sendToSeatOrPark(requester.seatId, approvalNotice(request.jobId));
     } catch (error) {
       this.deliver(requester, status(request.jobId, "failed", toError(error).message));
     }
@@ -320,25 +340,15 @@ export class RoomAiJobCoordinator {
       }, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason ?? new Error("角色草稿执行超时");
       const character = validateCharacterDraft(raw, requester, String(request.input.playerName));
-      const terminal = status(request.jobId, "completed", "角色草稿已生成，确认保存前不会发布", { character });
-      if (requester.seatId === this.session.localSeat.seatId) {
-        // The host reviewing their own draft is meaningless; deliver directly.
-        this.deliver(requester, terminal);
-      } else {
-        this.holdForReview(requester, terminal);
-      }
+      // The request itself was already approved; the result belongs to the
+      // player without any further gate.
+      this.deliver(requester, status(request.jobId, "completed", "角色草稿已生成", { character }));
     } catch (error) {
       const message = controller.signal.aborted ? "角色草稿执行超时" : toError(error).message;
       this.deliver(requester, status(request.jobId, "failed", message));
     } finally {
       globalThis.clearTimeout(timeout);
     }
-  }
-
-  private holdForReview(requester: SeatV2, terminal: AiJobStatus): void {
-    this.pendingReview.set(terminal.jobId, { requester, terminal });
-    this.onHostStatus?.(requester, terminal);
-    this.sendToSeatOrPark(requester.seatId, reviewNotice(terminal.jobId));
   }
 
   private deliver(requester: SeatV2, message: AiJobStatus): void {
@@ -399,7 +409,7 @@ export class RoomAiJobCoordinator {
       if (!pending) return;
       this.pendingClients.delete(jobId);
       pending.reject(new Error(pending.awaitingReview
-        ? "KP 尚未审核；若 KP 通过草稿，这里会再次提示载入，也可稍后重新申请"
+        ? "KP 尚未同意这次 AI 车卡申请；可以稍后重新申请，或当面和 KP 说一声"
         : "角色草稿请求超时"));
     }, this.timeoutMs + 5_000);
   }
@@ -460,14 +470,14 @@ function status(
   };
 }
 
-function reviewNotice(jobId: string): AiJobStatus {
-  return status(jobId, "running", "草稿已生成，等待 KP 审核", { pendingReview: true });
+function approvalNotice(jobId: string): AiJobStatus {
+  return status(jobId, "queued", "已发送申请，等待 KP 同意用房主的 AI 生成", { pendingApproval: true });
 }
 
 function isReviewNotice(message: AiJobStatus): boolean {
   return Boolean(
     message.result && typeof message.result === "object"
-    && (message.result as { pendingReview?: unknown }).pendingReview === true,
+    && (message.result as { pendingApproval?: unknown }).pendingApproval === true,
   );
 }
 

@@ -41,11 +41,12 @@ const ModulesView = lazy(async () => ({ default: (await import("./views/ModulesV
 const SettingsView = lazy(async () => ({ default: (await import("./views/SettingsView")).SettingsView }));
 const CharactersView = lazy(async () => ({ default: (await import("./views/CharactersView")).CharactersView }));
 
-interface HostCharacterDraftReview {
+interface HostCharacterDraftRequest {
   jobId: string;
   requesterSeatId: string;
   requesterName: string;
-  character: Coc7Character;
+  playerName: string;
+  prompt: string;
 }
 
 type AppHydrationState =
@@ -123,7 +124,7 @@ export function App() {
   const [npcJobStatuses, setNpcJobStatuses] = useState<NpcInteractionJobStatusV1[]>([]);
   const [npcShadowReplies, setNpcShadowReplies] = useState<NpcShadowReplyV1[]>([]);
   const [requestCharacterDraft, setRequestCharacterDraft] = useState<((prompt: string, playerName: string) => Promise<Coc7Character>)>();
-  const [hostCharacterDrafts, setHostCharacterDrafts] = useState<HostCharacterDraftReview[]>([]);
+  const [hostCharacterRequests, setHostCharacterRequests] = useState<HostCharacterDraftRequest[]>([]);
   const [aiDraftStage, setAiDraftStage] = useState<string>();
   const [lateApprovedDraft, setLateApprovedDraft] = useState<Coc7Character>();
   const [resolveRoomAsset, setResolveRoomAsset] = useState<((asset: AssetDescriptorV1) => Promise<string>)>();
@@ -261,7 +262,7 @@ export function App() {
 
   const clearSessionPresentation = (roomId?: string) => {
     setRequestCharacterDraft(undefined);
-    setHostCharacterDrafts([]);
+    setHostCharacterRequests([]);
     setAiDraftStage(undefined);
     setLateApprovedDraft(undefined);
     setNpcJobStatuses([]);
@@ -324,17 +325,20 @@ export function App() {
           model: aiModel,
           ...(characterDraftExecutor ? { executor: characterDraftExecutor } : {}),
           onHostStatus: (seat, status) => {
-            if (!active || status.status !== "completed") return;
-            const candidate = status.result && typeof status.result === "object"
-              ? (status.result as { character?: unknown }).character
+            if (!active) return;
+            const result = status.result && typeof status.result === "object"
+              ? status.result as { approvalRequest?: unknown; prompt?: unknown; playerName?: unknown }
               : undefined;
-            const parsed = coc7CharacterSchema.safeParse(candidate);
-            if (!parsed.success) return;
-            setHostCharacterDrafts((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), {
+            const prompt = result?.prompt;
+            if (result?.approvalRequest !== true || typeof prompt !== "string") return;
+            setHostCharacterRequests((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), {
               jobId: status.jobId,
               requesterSeatId: seat.seatId,
               requesterName: seat.displayName,
-              character: parsed.data,
+              playerName: typeof result.playerName === "string" && result.playerName.length > 0
+                ? result.playerName
+                : seat.displayName,
+              prompt,
             }].slice(-200));
           },
           onClientStatus: (status) => {
@@ -705,14 +709,14 @@ export function App() {
             aiDraftStage={aiDraftStage}
             lateApprovedDraft={lateApprovedDraft}
             onConsumeLateApprovedDraft={() => setLateApprovedDraft(undefined)}
-            hostCharacterDrafts={hostCharacterDrafts}
-            onApproveHostCharacterDraft={(jobId) => {
-              aiCoordinatorRef.current?.approveDraft(jobId);
-              setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId));
+            hostCharacterRequests={hostCharacterRequests}
+            onApproveHostCharacterRequest={(jobId) => {
+              aiCoordinatorRef.current?.approveRequest(jobId);
+              setHostCharacterRequests((current) => current.filter((request) => request.jobId !== jobId));
             }}
-            onRejectHostCharacterDraft={(jobId) => {
-              aiCoordinatorRef.current?.rejectDraft(jobId);
-              setHostCharacterDrafts((current) => current.filter((draft) => draft.jobId !== jobId));
+            onRejectHostCharacterRequest={(jobId) => {
+              aiCoordinatorRef.current?.rejectRequest(jobId);
+              setHostCharacterRequests((current) => current.filter((request) => request.jobId !== jobId));
             }}
           />}
           {activeView === "modules" && <ModulesView session={sessionV2 ?? session} />}

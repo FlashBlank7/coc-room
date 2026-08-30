@@ -83,11 +83,12 @@ interface RecoverableCharacterDraftV1 {
   baseRoomUpdatedAt?: string | null | "unknown";
 }
 
-export interface HostCharacterDraftReview {
+export interface HostCharacterDraftRequest {
   jobId: string;
   requesterSeatId: string;
   requesterName: string;
-  character: Coc7Character;
+  playerName: string;
+  prompt: string;
 }
 
 export function CharactersView({
@@ -97,9 +98,9 @@ export function CharactersView({
   aiDraftStage,
   lateApprovedDraft,
   onConsumeLateApprovedDraft,
-  hostCharacterDrafts = [],
-  onApproveHostCharacterDraft,
-  onRejectHostCharacterDraft,
+  hostCharacterRequests = [],
+  onApproveHostCharacterRequest,
+  onRejectHostCharacterRequest,
 }: {
   session?: CharacterRoomSession;
   worldV2?: RoomWorldStateV2;
@@ -107,9 +108,9 @@ export function CharactersView({
   aiDraftStage?: string;
   lateApprovedDraft?: Coc7Character;
   onConsumeLateApprovedDraft?: () => void;
-  hostCharacterDrafts?: readonly HostCharacterDraftReview[];
-  onApproveHostCharacterDraft?: (jobId: string) => void;
-  onRejectHostCharacterDraft?: (jobId: string) => void;
+  hostCharacterRequests?: readonly HostCharacterDraftRequest[];
+  onApproveHostCharacterRequest?: (jobId: string) => void;
+  onRejectHostCharacterRequest?: (jobId: string) => void;
 }) {
   const events = useAppStore((state) => state.events);
   const currentRoom = useAppStore((state) => state.currentRoom);
@@ -960,11 +961,11 @@ export function CharactersView({
                 <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
                   <Textarea disabled={aiBusy || roomPaused} maxLength={100_000} className="min-h-28" value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="例如：1920 年代东京的谨慎女记者，擅长图书馆使用、心理学与摄影，害怕深海。" />
                   <Button className="justify-self-start" disabled={aiBusy || roomPaused || !aiPrompt.trim()} onClick={() => void generateCharacterDraft()}>
-                    {aiBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成待审核草稿
+                    {aiBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}用 AI 生成草稿
                   </Button>
                   {aiBusy && <p role="status" className="text-xs leading-5 text-zinc-400">{aiDraftStage ?? "正在请求房主生成角色草稿…"}</p>}
                   {!aiBusy && lateApprovedDraft && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-900/60 bg-emerald-950/15 p-3">
-                    <p className="text-xs leading-5 text-emerald-200">KP 已通过你此前申请的草稿“{lateApprovedDraft.name}”。</p>
+                    <p className="text-xs leading-5 text-emerald-200">你此前申请的 AI 车卡已生成完毕：“{lateApprovedDraft.name}”。</p>
                     <Button variant="secondary" onClick={() => {
                       if (!confirmDiscardChanges(`载入“${lateApprovedDraft.name}”`)) return;
                       setDraft(coc7CharacterSchema.parse(lateApprovedDraft));
@@ -982,23 +983,20 @@ export function CharactersView({
               </details>
             )}
 
-            {isV2 && sessionV2?.isHost && hostCharacterDrafts.length > 0 && (
-              <Section title="等待你审核的玩家草稿" description="玩家用一句话生成了以下草稿，对方正在等待审核结果：通过后完整角色卡才会发给申请玩家，退回会立即通知对方。">
-                <div className="grid gap-2">{hostCharacterDrafts.map((review) => <div key={review.jobId} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-900/60 bg-amber-950/10 p-3 text-sm">
-                  <div><b>{review.character.name}</b><p className="mt-1 text-xs text-zinc-500">申请玩家：{review.requesterName} · {review.character.occupation || "未指定职业"}</p></div>
-                  <div className="flex gap-2">
-                    <Button onClick={() => onApproveHostCharacterDraft?.(review.jobId)}>通过并发给玩家</Button>
-                    <Button variant="secondary" onClick={() => {
-                      if (!confirmDiscardChanges(`打开“${review.character.name}”的审核草稿`)) return;
-                      setDraft(review.character);
-                      setPrivateNotes("");
-                      setCleanSnapshot(undefined);
-                      setPendingRoomSnapshot(undefined);
-                      setRoomEditBaseUpdatedAt(null);
-                      setAiDraftNotice("这是玩家草稿的预览；要把角色卡交到玩家手里，请回到上方待审列表点“通过并发给玩家”。");
-                    }}>查看</Button>
-                    <Button variant="ghost" onClick={() => onRejectHostCharacterDraft?.(review.jobId)}>退回</Button>
+            {isV2 && sessionV2?.isHost && hostCharacterRequests.length > 0 && (
+              <Section title="AI 车卡申请" description="玩家想借用你这台机器的 AI 生成角色卡。同意后立即开始生成，结果直接交给玩家；生成出什么样的角色由玩家自己决定。">
+                <div className="grid gap-2">{hostCharacterRequests.map((request) => <div key={request.jobId} className="grid gap-2 rounded-lg border border-amber-900/60 bg-amber-950/10 p-3 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <b>{request.requesterName}{request.playerName !== request.requesterName ? `（${request.playerName}）` : ""}</b>
+                    <div className="flex gap-2">
+                      <Button onClick={() => onApproveHostCharacterRequest?.(request.jobId)}>同意并开始生成</Button>
+                      <Button variant="ghost" onClick={() => onRejectHostCharacterRequest?.(request.jobId)}>拒绝</Button>
+                    </div>
                   </div>
+                  <details>
+                    <summary className="cursor-pointer text-xs text-zinc-500">想生成：{Array.from(request.prompt).slice(0, 80).join("")}{Array.from(request.prompt).length > 80 ? "…" : ""}</summary>
+                    <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-zinc-400">{request.prompt}</p>
+                  </details>
                 </div>)}</div>
               </Section>
             )}

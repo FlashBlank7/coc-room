@@ -473,19 +473,25 @@ export function validateBridgeHttpRequest(
   expectedOrigin: string,
   expectedSessionToken: string,
 ): void {
+  // The page may be opened as 127.0.0.1, localhost, or [::1] — all the same
+  // loopback dev server. Only the port has to match; rejecting a localhost
+  // page while listening on 127.0.0.1 broke every browser call.
   const origin = headerValue(request.headers, "origin");
-  if (origin !== expectedOrigin) {
-    throw new BridgeHttpError(403, "INVALID_ORIGIN", "本地 AI 桥只接受当前 Vite 页面");
+  if (!isLoopbackEquivalentOrigin(origin, expectedOrigin)) {
+    throw new BridgeHttpError(403, "INVALID_ORIGIN", "本地 AI 桥只接受当前 Vite 页面（请通过 127.0.0.1 或 localhost 打开）");
   }
-  if (headerValue(request.headers, "host") !== new URL(expectedOrigin).host) {
+  const host = headerValue(request.headers, "host");
+  if (!isLoopbackEquivalentOrigin(`http://${host ?? ""}`, expectedOrigin)) {
     throw new BridgeHttpError(403, "INVALID_HOST", "本地 AI 桥 Host 无效");
   }
   const suppliedSessionToken = headerValue(request.headers, LOCAL_AI_BRIDGE_HEADER);
   if (!isMatchingSessionToken(suppliedSessionToken, expectedSessionToken)) {
-    throw new BridgeHttpError(403, "INVALID_BRIDGE_SESSION", "本地 AI 桥开发会话无效");
+    throw new BridgeHttpError(403, "INVALID_BRIDGE_SESSION", "本地 AI 桥开发会话无效：页面拿到的会话令牌已过期，刷新页面即可");
   }
+  // Browsers that send Sec-Fetch-Site must claim same-origin; ones that omit
+  // it entirely are allowed — the token above is the real gate.
   const fetchSite = headerValue(request.headers, "sec-fetch-site");
-  if (fetchSite !== "same-origin") {
+  if (fetchSite !== undefined && fetchSite !== "same-origin") {
     throw new BridgeHttpError(403, "CROSS_SITE_REQUEST", "本地 AI 桥拒绝跨站请求");
   }
   if (request.method === "POST") {
@@ -493,6 +499,22 @@ export function validateBridgeHttpRequest(
     if (contentType !== "application/json") {
       throw new BridgeHttpError(415, "JSON_REQUIRED", "本地 AI 桥只接受 JSON 请求");
     }
+  }
+}
+
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+export function isLoopbackEquivalentOrigin(candidate: string | undefined, expectedOrigin: string): boolean {
+  if (!candidate) return false;
+  try {
+    const actual = new URL(candidate);
+    const expected = new URL(expectedOrigin);
+    if (actual.protocol !== expected.protocol) return false;
+    if ((actual.port || "80") !== (expected.port || "80")) return false;
+    if (actual.hostname === expected.hostname) return true;
+    return LOOPBACK_HOSTNAMES.has(actual.hostname) && LOOPBACK_HOSTNAMES.has(expected.hostname);
+  } catch {
+    return false;
   }
 }
 

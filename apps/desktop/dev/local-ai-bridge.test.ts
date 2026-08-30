@@ -24,7 +24,7 @@ const origin = "http://127.0.0.1:1420";
 const sessionToken = "a".repeat(43);
 
 describe("local AI bridge boundary", () => {
-  it("requires the exact Vite origin, custom header, and same-origin fetch metadata", () => {
+  it("accepts any loopback spelling of the Vite origin and requires the session header", () => {
     expect(() => validateBridgeHttpRequest({
       method: "POST",
       headers: {
@@ -40,10 +40,16 @@ describe("local AI bridge boundary", () => {
       method: "POST",
       headers: { host: "127.0.0.1:1420", origin: "https://attacker.invalid", "content-type": "application/json", "x-coc-room-local-ai": sessionToken },
     }, origin, sessionToken)).toThrow("只接受当前 Vite 页面");
+    // A page opened as localhost is the same loopback dev server; both the
+    // Origin and Host headers must be accepted in either spelling.
     expect(() => validateBridgeHttpRequest({
       method: "POST",
-      headers: { host: "localhost:1420", origin, "content-type": "application/json", "x-coc-room-local-ai": sessionToken, "sec-fetch-site": "same-origin" },
-    }, origin, sessionToken)).toThrow("Host 无效");
+      headers: { host: "localhost:1420", origin: "http://localhost:1420", "content-type": "application/json", "x-coc-room-local-ai": sessionToken, "sec-fetch-site": "same-origin" },
+    }, origin, sessionToken)).not.toThrow();
+    expect(() => validateBridgeHttpRequest({
+      method: "POST",
+      headers: { host: "localhost:1421", origin: "http://localhost:1421", "content-type": "application/json", "x-coc-room-local-ai": sessionToken, "sec-fetch-site": "same-origin" },
+    }, origin, sessionToken)).toThrow("只接受当前 Vite 页面");
     expect(() => validateBridgeHttpRequest({
       method: "POST",
       headers: { host: "127.0.0.1:1420", origin, "content-type": "application/json" },
@@ -52,10 +58,12 @@ describe("local AI bridge boundary", () => {
       method: "POST",
       headers: { host: "127.0.0.1:1420", origin, "content-type": "application/json", "x-coc-room-local-ai": sessionToken, "sec-fetch-site": "cross-site" },
     }, origin, sessionToken)).toThrow("拒绝跨站请求");
+    // Browsers that never send Sec-Fetch-Site are still same-origin here; the
+    // session token is the real gate.
     expect(() => validateBridgeHttpRequest({
       method: "POST",
       headers: { host: "127.0.0.1:1420", origin, "content-type": "application/json", "x-coc-room-local-ai": sessionToken },
-    }, origin, sessionToken)).toThrow("拒绝跨站请求");
+    }, origin, sessionToken)).not.toThrow();
 
     expect(() => validateBridgeHttpRequest({
       method: "POST",

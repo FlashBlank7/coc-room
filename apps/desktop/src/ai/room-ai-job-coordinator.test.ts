@@ -87,8 +87,9 @@ describe("RoomAiJobCoordinator", () => {
         command: "shell",
       },
     });
-    await vi.waitFor(() => expect(statuses.at(-1)?.message).toContain("等待 KP 审核"));
-    coordinator.approveDraft("00000000-0000-4000-8000-000000000011");
+    expect(statuses.at(-1)?.message).toContain("等待 KP 同意");
+    coordinator.approveRequest("00000000-0000-4000-8000-000000000011");
+    await vi.waitFor(() => expect(statuses.at(-1)?.status).toBe("completed"));
 
     expect(executed).toMatchObject({
       provider: "deepseek",
@@ -145,54 +146,58 @@ describe("RoomAiJobCoordinator", () => {
     await expect(atLimit).rejects.toThrow("房间 AI 草稿代理已经关闭");
   });
 
-  it("holds a remote draft for KP review instead of completing it to the player", async () => {
+  it("holds a remote request for KP approval and spends no host AI before consent", async () => {
     const session = fakeSession(true, hostSeat);
     const statuses: AiJobStatus[] = [];
     (session.sendAiJobStatusToSeat as ReturnType<typeof vi.fn>).mockImplementation((_seatId, value) => {
       statuses.push(value);
       return true;
     });
+    const executeCharacterDraft = vi.fn(async () => character(playerSeat.seatId, "Alice"));
     const reviews: Array<{ seat: SeatV2; status: AiJobStatus }> = [];
     const coordinator = new RoomAiJobCoordinator({
       session,
-      executor: { executeCharacterDraft: async () => character(playerSeat.seatId, "Alice") },
+      executor: { executeCharacterDraft },
       provider: "codex",
       model: "",
       onHostStatus: (seat, status) => { reviews.push({ seat, status }); },
     });
 
     coordinator.handleWireMessage(playerSeat, draftRequest("00000000-0000-4000-8000-000000000021"));
-    await vi.waitFor(() => expect(reviews.at(-1)?.status.status).toBe("completed"));
 
+    // Nothing runs and nothing completes until the KP consents.
+    expect(executeCharacterDraft).not.toHaveBeenCalled();
     expect(statuses.map(({ status }) => status)).not.toContain("completed");
     const notice = statuses.at(-1)!;
-    expect(notice.status).toBe("running");
-    expect(notice.message).toContain("等待 KP 审核");
-    expect((notice.result as { pendingReview?: boolean }).pendingReview).toBe(true);
-    expect(reviews.at(-1)?.seat.seatId).toBe(playerSeat.seatId);
+    expect(notice.status).toBe("queued");
+    expect(notice.message).toContain("等待 KP 同意");
+    expect((notice.result as { pendingApproval?: boolean }).pendingApproval).toBe(true);
+    const review = reviews.at(-1)!;
+    expect(review.seat.seatId).toBe(playerSeat.seatId);
+    expect(review.status.result).toMatchObject({ approvalRequest: true, prompt: "一名医生", playerName: "Alice" });
     coordinator.shutdown();
   });
 
-  it("approves a held draft end to end so the player promise resolves with the character", async () => {
+  it("approves a request end to end so the player promise resolves with the character", async () => {
     const bridge = bridgedCoordinators();
 
     const result = bridge.player.requestCharacterDraft("一名医生", "Alice");
-    await vi.waitFor(() => expect(bridge.playerStages.at(-1)).toContain("等待 KP 审核"));
+    await vi.waitFor(() => expect(bridge.playerStages.at(-1)).toContain("等待 KP 同意"));
     expect(bridge.reviewJobIds).toHaveLength(1);
 
-    expect(bridge.host.approveDraft(bridge.reviewJobIds[0]!)).toBe(true);
+    expect(bridge.host.approveRequest(bridge.reviewJobIds[0]!)).toBe(true);
     await expect(result).resolves.toMatchObject({ ownerPeerId: playerSeat.seatId, playerName: "Alice" });
     bridge.shutdown();
   });
 
-  it("returns a rejected draft to the player with the KP's reason", async () => {
+  it("returns a rejected request to the player with the KP's reason", async () => {
     const bridge = bridgedCoordinators();
 
     const result = bridge.player.requestCharacterDraft("一名医生", "Alice");
     await vi.waitFor(() => expect(bridge.reviewJobIds).toHaveLength(1));
 
-    expect(bridge.host.rejectDraft(bridge.reviewJobIds[0]!, "职业与本团年代不符")).toBe(true);
-    await expect(result).rejects.toThrow("KP 退回了这份草稿：职业与本团年代不符");
+    expect(bridge.host.rejectRequest(bridge.reviewJobIds[0]!, "职业与本团年代不符")).toBe(true);
+    await expect(result).rejects.toThrow("KP 拒绝了这次 AI 车卡申请：职业与本团年代不符");
     bridge.shutdown();
   });
 
@@ -210,7 +215,6 @@ describe("RoomAiJobCoordinator", () => {
     });
 
     coordinator.handleWireMessage(playerSeat, draftRequest("00000000-0000-4000-8000-000000000031"));
-    await vi.waitFor(() => expect(reviews.at(-1)?.status).toBe("completed"));
 
     const delivered: AiJobStatus[] = [];
     sendMock.mockImplementation((_seatId, value) => {
@@ -218,12 +222,13 @@ describe("RoomAiJobCoordinator", () => {
       return true;
     });
     coordinator.flushOutbox(playerSeat.seatId);
-    // Earlier queued/running statuses were superseded per job; only the latest survives.
+    // Only the latest status per job survives in the outbox.
     expect(delivered).toHaveLength(1);
-    expect(delivered[0]!.message).toContain("等待 KP 审核");
+    expect(delivered[0]!.message).toContain("等待 KP 同意");
 
     sendMock.mockImplementation(() => false);
-    coordinator.approveDraft("00000000-0000-4000-8000-000000000031");
+    coordinator.approveRequest("00000000-0000-4000-8000-000000000031");
+    await vi.waitFor(() => expect(reviews.at(-1)?.status).toBe("completed"));
     sendMock.mockImplementation((_seatId, value) => {
       delivered.push(value);
       return true;
@@ -251,15 +256,14 @@ describe("RoomAiJobCoordinator", () => {
     const jobId = "00000000-0000-4000-8000-000000000041";
 
     coordinator.handleWireMessage(playerSeat, draftRequest(jobId));
-    await vi.waitFor(() => expect(reviews.at(-1)?.status).toBe("completed"));
     const sentBeforeReplay = sent.length;
 
-    // While held for review: the replay gets the waiting notice again.
+    // While awaiting approval: the replay gets the waiting notice again.
     coordinator.handleWireMessage(playerSeat, draftRequest(jobId));
     expect(sent).toHaveLength(sentBeforeReplay + 1);
-    expect(sent.at(-1)!.status.message).toContain("等待 KP 审核");
-    // The replay must not create a second review row.
-    expect(reviews.filter((review) => review.status === "completed")).toHaveLength(1);
+    expect(sent.at(-1)!.status.message).toContain("等待 KP 同意");
+    // The replay must not create a second approval row.
+    expect(reviews.filter((review) => (review.result as { approvalRequest?: boolean } | undefined)?.approvalRequest)).toHaveLength(1);
 
     // A different seat replaying the same jobId gets nothing.
     const rival: SeatV2 = { seatId: "seat-player-0002", role: "player", displayName: "Mallory", extensions: {} };
@@ -267,7 +271,8 @@ describe("RoomAiJobCoordinator", () => {
     expect(sent).toHaveLength(sentBeforeReplay + 1);
 
     // After approval the terminal result is re-sent on replay.
-    coordinator.approveDraft(jobId);
+    coordinator.approveRequest(jobId);
+    await vi.waitFor(() => expect(reviews.at(-1)?.status).toBe("completed"));
     coordinator.handleWireMessage(playerSeat, draftRequest(jobId));
     expect(sent.at(-1)!.status).toMatchObject({ status: "completed" });
     expect(sent.at(-1)!.seatId).toBe(playerSeat.seatId);
@@ -315,11 +320,11 @@ describe("RoomAiJobCoordinator", () => {
     coordinator.handleWireMessage(hostSeat, {
       kind: "ai.job.status",
       jobId: sent!.jobId,
-      status: "running",
-      message: "草稿已生成，等待 KP 审核",
-      result: { pendingReview: true },
+      status: "queued",
+      message: "已发送申请，等待 KP 同意用房主的 AI 生成",
+      result: { pendingApproval: true },
     });
-    expect(stages).toEqual(["草稿已生成，等待 KP 审核"]);
+    expect(stages).toEqual(["已发送申请，等待 KP 同意用房主的 AI 生成"]);
     vi.advanceTimersByTime(5_999);
     await Promise.resolve();
     expect(settled).toBeUndefined();
@@ -327,7 +332,7 @@ describe("RoomAiJobCoordinator", () => {
     vi.advanceTimersByTime(2);
     await Promise.resolve();
     await Promise.resolve();
-    expect(settled?.message).toBe("KP 尚未审核；若 KP 通过草稿，这里会再次提示载入，也可稍后重新申请");
+    expect(settled?.message).toBe("KP 尚未同意这次 AI 车卡申请；可以稍后重新申请，或当面和 KP 说一声");
     coordinator.shutdown();
   });
 
@@ -378,7 +383,7 @@ function bridgedCoordinators() {
     provider: "codex",
     model: "",
     onHostStatus: (_seat, status) => {
-      if (status.status === "completed") reviewJobIds.push(status.jobId);
+      if ((status.result as { approvalRequest?: boolean } | undefined)?.approvalRequest) reviewJobIds.push(status.jobId);
     },
   });
   const playerSession = fakeSession(false, playerSeat, {

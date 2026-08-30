@@ -24,12 +24,13 @@ interface CreatedRelayRoom {
 }
 
 /**
- * Proves the reworked draft-review wire flow over the real relay: the player's
- * request reaches the host coordinator, the review notice comes back as a
- * non-terminal status, and approve/reject each settle the player promise.
+ * Proves the request-approval wire flow over the real relay: the player's
+ * request reaches the host coordinator and waits for KP consent, the waiting
+ * notice comes back as a non-terminal status, and approve/reject each settle
+ * the player promise (approve runs the AI and delivers directly).
  */
 liveDescribe("character draft review over the live relay", () => {
-  it("holds a remote draft for review, then approve delivers and reject notifies", async () => {
+  it("holds a remote request for approval, then approve generates and reject notifies", async () => {
     if (!relayOrigin) throw new Error("COC_ROOM_LIVE_RELAY_URL is required");
     const created = await createRelayRoom(relayOrigin, "draft-review-host-123");
     const hostRepository = new MemoryRepository();
@@ -59,7 +60,8 @@ liveDescribe("character draft review over the live relay", () => {
           }),
         },
         onHostStatus: (_seat, status) => {
-          if (status.status === "completed") heldJobIds.push(status.jobId);
+          const result = status.result as { approvalRequest?: boolean } | undefined;
+          if (result?.approvalRequest) heldJobIds.push(status.jobId);
         },
       });
       host.onUnhandledWireMessage = (fromSeat, message) => {
@@ -78,18 +80,18 @@ liveDescribe("character draft review over the live relay", () => {
         playerCoordinator.handleWireMessage(fromSeat, message);
       };
 
-      // 1. Approve path: request → host executes → held for review → approved.
+      // 1. Approve path: request → held for KP consent → approved → host executes → delivered.
       const approved = playerCoordinator.requestCharacterDraft(
         "1920 年代的图书馆管理员，擅长图书馆使用与聆听。",
         "Review Player",
       );
-      await waitUntil(() => heldJobIds.length === 1, errors, "host did not hold the first draft for review");
+      await waitUntil(() => heldJobIds.length === 1, errors, "host did not hold the first request for approval");
       await waitUntil(
-        () => playerNotices.some((notice) => notice.includes("等待 KP 审核")),
+        () => playerNotices.some((notice) => notice.includes("等待 KP 同意")),
         errors,
-        "player never saw the review notice",
+        "player never saw the approval-wait notice",
       );
-      expect(hostCoordinator.approveDraft(heldJobIds[0]!)).toBe(true);
+      expect(hostCoordinator.approveRequest(heldJobIds[0]!)).toBe(true);
       const character = await approved;
       expect(character.ownerPeerId).toBe(invitation.seatId);
       expect(character.playerName).toBe("Review Player");
@@ -97,9 +99,9 @@ liveDescribe("character draft review over the live relay", () => {
       // 2. Reject path: the player promise fails with the keeper's reason.
       const rejected = playerCoordinator.requestCharacterDraft("第二位调查员。", "Review Player");
       rejected.catch(() => undefined);
-      await waitUntil(() => heldJobIds.length === 2, errors, "host did not hold the second draft");
-      expect(hostCoordinator.rejectDraft(heldJobIds[1]!, "先和 KP 商量职业")).toBe(true);
-      await expect(rejected).rejects.toThrow("KP 退回了这份草稿：先和 KP 商量职业");
+      await waitUntil(() => heldJobIds.length === 2, errors, "host did not hold the second request");
+      expect(hostCoordinator.rejectRequest(heldJobIds[1]!, "先和 KP 商量职业")).toBe(true);
+      await expect(rejected).rejects.toThrow("KP 拒绝了这次 AI 车卡申请：先和 KP 商量职业");
 
       expect(errors).toEqual([]);
       hostCoordinator.shutdown();

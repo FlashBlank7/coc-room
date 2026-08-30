@@ -123,8 +123,8 @@ vi.mock("./ai/room-ai-job-coordinator", () => ({
     shutdown() {}
     flushOutbox() {}
     resendPendingRequests() {}
-    approveDraft() { return false; }
-    rejectDraft() { return false; }
+    approveRequest() { return false; }
+    rejectRequest() { return false; }
     async requestCharacterDraft() { throw new Error("not used"); }
   },
 }));

@@ -758,7 +758,7 @@ describe("CharactersView permissions and editing", () => {
 });
 
 describe("CharactersView AI draft review", () => {
-  it("gives the KP approve, preview and return actions for a pending player draft", () => {
+  it("gives the KP approve and reject actions for a pending AI usage request", () => {
     const hostRoom: RoomRecord = {
       ...createRoom("host", "host-local"),
       id: "character-room-host",
@@ -779,21 +779,22 @@ describe("CharactersView AI draft review", () => {
     render(<CharactersView
       session={session}
       worldV2={createRoomWorldStateV2(hostRoom.id)}
-      hostCharacterDrafts={[{
+      hostCharacterRequests={[{
         jobId: "job-review-0001",
         requesterSeatId: "seat-player-v2",
         requesterName: "Alice",
-        character: createReadyCharacter("draft-review-1", "seat-player-v2", "雾中来客", "Alice"),
+        playerName: "Alice",
+        prompt: "1920 年代的图书馆管理员，擅长图书馆使用与聆听。",
       }]}
-      onApproveHostCharacterDraft={onApprove}
-      onRejectHostCharacterDraft={onReject}
+      onApproveHostCharacterRequest={onApprove}
+      onRejectHostCharacterRequest={onReject}
     />);
 
-    expect(screen.getByText(/通过后完整角色卡才会发给申请玩家/)).toBeTruthy();
-    expect(screen.getByText(/申请玩家：Alice/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "通过并发给玩家" }));
+    expect(screen.getByText(/结果直接交给玩家/)).toBeTruthy();
+    expect(screen.getByText(/想生成：1920 年代的图书馆管理员/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "同意并开始生成" }));
     expect(onApprove).toHaveBeenCalledWith("job-review-0001");
-    fireEvent.click(screen.getByRole("button", { name: "退回" }));
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
     expect(onReject).toHaveBeenCalledWith("job-review-0001");
   });
 
@@ -860,16 +861,16 @@ describe("CharactersView AI draft review", () => {
       session={session}
       worldV2={createRoomWorldStateV2(v2Room.id)}
       requestCharacterDraft={requestCharacterDraft}
-      aiDraftStage="草稿已生成，等待 KP 审核"
+      aiDraftStage="已发送申请，等待 KP 同意用房主的 AI 生成"
     />);
 
     fireEvent.change(screen.getByPlaceholderText(/1920 年代东京/), { target: { value: "谨慎的女记者" } });
-    fireEvent.click(screen.getByRole("button", { name: "生成待审核草稿" }));
-    expect(await screen.findByText("草稿已生成，等待 KP 审核")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "用 AI 生成草稿" }));
+    expect(await screen.findByText("已发送申请，等待 KP 同意用房主的 AI 生成")).toBeTruthy();
 
-    await act(async () => { generation.reject(new Error("KP 退回了这份草稿：职业与本团年代不符")); });
-    expect(await screen.findByText(/KP 退回了这份草稿：职业与本团年代不符/)).toBeTruthy();
-    expect(screen.queryByText("草稿已生成，等待 KP 审核")).toBeNull();
+    await act(async () => { generation.reject(new Error("KP 拒绝了这次 AI 车卡申请：职业与本团年代不符")); });
+    expect(await screen.findByText(/KP 拒绝了这次 AI 车卡申请：职业与本团年代不符/)).toBeTruthy();
+    expect(screen.queryByText("已发送申请，等待 KP 同意用房主的 AI 生成")).toBeNull();
   });
 });
 
