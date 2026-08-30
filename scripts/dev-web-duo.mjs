@@ -387,8 +387,16 @@ async function reserveAvailablePort() {
 }
 
 async function assertPortsAvailable(options) {
+  // Just-terminated children (workerd in particular) can hold their socket for
+  // a moment after taskkill, so poll briefly instead of failing on the first
+  // probe; a genuinely occupied port still fails after the grace window.
   for (const [label, port] of [["KP", options.kpPort], ["玩家", options.playerPort], ["中继", options.relayPort]]) {
-    if (!(await canListen(port))) throw new Error(`${label} 端口 ${port} 已被占用`);
+    let free = false;
+    for (let attempt = 0; attempt < 20 && !free; attempt += 1) {
+      free = await canListen(port);
+      if (!free) await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+    }
+    if (!free) throw new Error(`${label} 端口 ${port} 已被占用`);
   }
 }
 
