@@ -85,7 +85,7 @@ def test_parse_file_refuses_to_write_when_live_codex_has_zero_validated_fragment
     assert not output.exists()
 
 
-def test_first_chunk_probe_uses_production_chunk_size_and_writes_no_module(
+def test_parse_file_defaults_write_a_full_module_draft(
     monkeypatch, tmp_path: Path
 ) -> None:
     module = _load_parse_file_module()
@@ -109,6 +109,7 @@ def test_first_chunk_probe_uses_production_chunk_size_and_writes_no_module(
             captured["config"] = config
             return result
 
+    output = tmp_path / "draft.cocmod.json"
     monkeypatch.setattr(module, "load_source_path", lambda _path: loaded)
     monkeypatch.setattr(module, "ModuleParser", FakeParser)
     monkeypatch.setattr(
@@ -117,15 +118,11 @@ def test_first_chunk_probe_uses_production_chunk_size_and_writes_no_module(
         [
             "parse_file.py",
             str(tmp_path / "input.zip"),
+            str(output),
             "--provider",
             "codex",
             "--model",
             "gpt-test",
-            "--probe-first-chunk",
-            "--max-chunk-chars",
-            "6000",
-            "--codex-timeout-fallback-chunk-chars",
-            "6000",
         ],
     )
 
@@ -133,8 +130,10 @@ def test_first_chunk_probe_uses_production_chunk_size_and_writes_no_module(
     config = captured["config"]
     assert len(config.source_text) == 8_000
     assert config.source_sha256 == loaded.sha256
-    assert config.codex_probe_first_chunk is True
-    assert list(tmp_path.glob("*.cocmod.json")) == []
+    assert config.max_chunk_chars == 30_000
+    assert config.max_retries == 3
+    assert config.codex_timeout_seconds == 3_600.0
+    assert output.exists()
 
 
 def test_parse_file_reports_a_safe_provider_code_without_a_traceback_or_output(

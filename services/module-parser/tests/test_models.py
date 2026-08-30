@@ -83,10 +83,10 @@ def test_player_description_is_optional_and_bounded(
         id="entity:test", name="Test", player_description="  \n"
     ).player_description is None
     assert model(
-        id="entity:test", name="Test", player_description="x" * 20_000
-    ).player_description == "x" * 20_000
-    with pytest.raises(ValidationError, match="20000"):
-        model(id="entity:test", name="Test", player_description="x" * 20_001)
+        id="entity:test", name="Test", player_description="x" * 100_000
+    ).player_description == "x" * 100_000
+    with pytest.raises(ValidationError, match="100000"):
+        model(id="entity:test", name="Test", player_description="x" * 100_001)
 
 
 def test_manual_corrections_replace_lists_and_revalidate() -> None:
@@ -107,32 +107,55 @@ def test_codex_provider_does_not_require_an_api_key() -> None:
     config = ParseConfig(source_text="# Test", provider="codex", model="")
     assert config.provider == "codex"
     assert config.api_key is None
-    assert config.codex_timeout_seconds == 900.0
+    assert config.codex_timeout_seconds == 3_600.0
     assert config.codex_heartbeat_seconds == 15.0
-    assert config.codex_auto_shrink_on_timeout is True
-    assert config.codex_timeout_fallback_chunk_chars == 6_000
+    assert config.max_chunk_chars == 30_000
+    assert config.max_retries == 3
+    assert config.max_output_tokens == 32_000
 
 
 @pytest.mark.parametrize(
     "updates",
     [
         {"codex_timeout_seconds": 29.9},
-        {"codex_timeout_seconds": 1_800.1},
+        {"codex_timeout_seconds": 86_400.1},
         {"codex_heartbeat_seconds": 4.9},
         {"codex_heartbeat_seconds": 60.1},
-        {
-            "codex_timeout_fallback_chunk_chars": 2_000,
-            "codex_timeout_fallback_overlap_chars": 2_000,
-        },
+        {"max_chunk_chars": 999},
+        {"max_chunk_chars": 1_000_001},
+        {"max_retries": 21},
+        {"max_output_tokens": 512_001},
+        {"max_chunk_chars": 2_000, "chunk_overlap_chars": 2_000},
     ],
 )
-def test_codex_recovery_settings_have_hard_bounds(updates: dict[str, object]) -> None:
+def test_generation_settings_have_hard_bounds(updates: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         ParseConfig(
             source_text="# Test",
             provider="codex",
             model="",
             **updates,
+        )
+
+
+@pytest.mark.parametrize(
+    "removed_field",
+    [
+        "max_codex_chunks",
+        "max_codex_attempts",
+        "codex_auto_shrink_on_timeout",
+        "codex_timeout_fallback_chunk_chars",
+        "codex_timeout_fallback_overlap_chars",
+        "codex_probe_first_chunk",
+    ],
+)
+def test_removed_quota_fields_are_rejected(removed_field: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ParseConfig(
+            source_text="# Test",
+            provider="codex",
+            model="",
+            **{removed_field: 1},
         )
 
 

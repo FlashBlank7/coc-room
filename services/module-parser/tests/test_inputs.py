@@ -9,6 +9,7 @@ import pytest
 from docx import Document
 from PIL import Image, PngImagePlugin
 
+from coc_module_parser import inputs
 from coc_module_parser.inputs import InputError, docx_to_markdown, load_source_path
 
 
@@ -126,16 +127,20 @@ def test_zip_allows_one_main_document_with_static_image_attachments(
 
 
 @pytest.mark.parametrize("entry_name", ["assets/map.svg", "notes/readme.json"])
-def test_zip_rejects_svg_and_unknown_attachments(
+def test_zip_skips_svg_and_unknown_attachments_with_a_warning(
     tmp_path: Path, entry_name: str
 ) -> None:
     path = tmp_path / "unsupported.zip"
     write_zip(path, {"scenario.md": b"# module", entry_name: b"not accepted"})
 
-    with pytest.raises(InputError) as caught:
-        load_source_path(path)
+    loaded = load_source_path(path)
 
-    assert caught.value.code == "UNSUPPORTED_ARCHIVE_ENTRY"
+    assert loaded.name == "scenario.md"
+    assert loaded.text == "# module"
+    assert any(
+        "1 unsupported file(s); they were skipped" in warning
+        for warning in loaded.warnings
+    )
 
 
 def test_zip_rejects_animated_image_attachment(tmp_path: Path) -> None:
@@ -161,7 +166,12 @@ def test_zip_rejects_image_with_mismatched_extension(tmp_path: Path) -> None:
     assert caught.value.code == "UNSAFE_ARCHIVE_IMAGE"
 
 
-def test_zip_rejects_high_compression_ratio_before_image_decode(tmp_path: Path) -> None:
+def test_zip_rejects_high_compression_ratio_before_image_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Honest DEFLATE tops out near 1032:1, below the production ratio limit,
+    # so the guard is exercised against a lowered threshold instead.
+    monkeypatch.setattr(inputs, "MAX_COMPRESSION_RATIO", 500)
     path = tmp_path / "bomb.zip"
     write_zip(
         path,
@@ -217,12 +227,25 @@ def test_zip_rejects_path_traversal(tmp_path: Path) -> None:
     assert caught.value.code == "UNSAFE_ARCHIVE"
 
 
-def test_zip_rejects_multiple_documents(tmp_path: Path) -> None:
+def test_zip_merges_multiple_documents_in_name_order(tmp_path: Path) -> None:
     path = tmp_path / "many.zip"
-    write_zip(path, {"one.md": b"# one", "two.txt": b"two"})
+    write_zip(path, {"b-two.txt": b"two", "a-one.md": b"# one"})
+
+    loaded = load_source_path(path)
+
+    assert loaded.name == "many.zip"
+    assert loaded.text == "## a-one.md\n\n# one\n\n---\n\n## b-two.txt\n\ntwo"
+    assert loaded.pdf_pages == ()
+    assert loaded.is_pdf is False
+    assert any("merged in name order" in warning for warning in loaded.warnings)
+
+
+def test_zip_with_no_supported_document_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "no-docs.zip"
+    write_zip(path, {"notes/readme.json": b"{}"})
     with pytest.raises(InputError) as caught:
         load_source_path(path)
-    assert caught.value.code == "MULTI_SOURCE_ARCHIVE"
+    assert caught.value.code == "EMPTY_ARCHIVE"
 
 
 def test_docx_rejects_macro_payload() -> None:

@@ -6,9 +6,12 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from coc_module_parser import npc_context
 from coc_module_parser.cli import run_stream
 from coc_module_parser.npc_context import (
     MAX_NPC_CONTEXT_MESSAGE_CHARS,
+    MAX_NPC_CONTEXT_MESSAGES,
+    MAX_NPC_CONTEXT_PINS,
     NpcReplyOutputV1,
     PrepareNpcReplyTaskV1,
     build_npc_context,
@@ -32,52 +35,62 @@ def _events(output: io.StringIO) -> list[dict[str, object]]:
     return [json.loads(line) for line in output.getvalue().splitlines()]
 
 
-def test_context_keeps_only_the_latest_40_messages_in_chronological_order() -> None:
+def test_context_keeps_only_the_newest_capped_messages_in_chronological_order() -> None:
     messages = [
         {"id": f"m-{index}", "role": "human", "content": str(index)}
-        for index in range(45)
+        for index in range(MAX_NPC_CONTEXT_MESSAGES + 5)
     ]
     context = build_npc_context(_task(messages=messages))
 
-    assert len(context.messages) == 40
+    assert len(context.messages) == MAX_NPC_CONTEXT_MESSAGES
     assert [message.id for message in context.messages] == [
-        f"m-{index}" for index in range(5, 45)
+        f"m-{index}" for index in range(5, MAX_NPC_CONTEXT_MESSAGES + 5)
     ]
-    assert context.selection.available_message_count == 45
+    assert context.selection.available_message_count == MAX_NPC_CONTEXT_MESSAGES + 5
     assert context.selection.omitted_message_count == 5
 
 
 def test_context_keeps_complete_messages_and_does_not_backfill_across_a_gap() -> None:
     messages = [
         {"id": "old-small", "role": "human", "content": "a" * 10},
-        {"id": "does-not-fit", "role": "npc", "content": "b" * 10_000},
-        {"id": "newest", "role": "human", "content": "c" * 15_000},
+        {"id": "does-not-fit", "role": "npc", "content": "b" * 20_000},
+        {
+            "id": "newest",
+            "role": "human",
+            "content": "c" * (MAX_NPC_CONTEXT_MESSAGE_CHARS - 10_000),
+        },
     ]
     context = build_npc_context(_task(messages=messages))
 
     assert [message.id for message in context.messages] == ["newest"]
     assert context.messages[0].truncated_prefix is False
-    assert context.selection.message_char_count == 15_000
+    assert context.selection.message_char_count == MAX_NPC_CONTEXT_MESSAGE_CHARS - 10_000
     assert context.selection.omitted_message_count == 2
 
 
-def test_oversized_newest_message_keeps_its_latest_unicode_code_points() -> None:
+def test_oversized_newest_message_keeps_its_latest_unicode_code_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The per-message model cap now equals the full context budget, so an
+    # over-budget newest message can only be exercised with a lowered budget.
+    budget = 24
+    monkeypatch.setattr(npc_context, "MAX_NPC_CONTEXT_MESSAGE_CHARS", budget)
     prefix = "discard-me"
-    newest = prefix + "🦋" * MAX_NPC_CONTEXT_MESSAGE_CHARS
+    newest = prefix + "🦋" * budget
     context = build_npc_context(
         _task(messages=[{"id": "latest", "role": "human", "content": newest}])
     )
 
-    assert context.messages[0].content == "🦋" * MAX_NPC_CONTEXT_MESSAGE_CHARS
-    assert len(context.messages[0].content) == MAX_NPC_CONTEXT_MESSAGE_CHARS
+    assert context.messages[0].content == "🦋" * budget
+    assert len(context.messages[0].content) == budget
     assert context.messages[0].truncated_prefix is True
     assert context.selection.truncated_newest_message is True
 
 
-def test_task_rejects_more_than_twelve_explicit_pins() -> None:
+def test_task_rejects_more_explicit_pins_than_the_cap() -> None:
     pins = [
         {"id": f"pin-{index}", "title": "Pin", "content": "Only this data"}
-        for index in range(13)
+        for index in range(MAX_NPC_CONTEXT_PINS + 1)
     ]
     with pytest.raises(ValidationError, match="too_long"):
         _task(pins=pins)

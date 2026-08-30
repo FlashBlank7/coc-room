@@ -7,16 +7,16 @@ from pydantic import AliasChoices, ConfigDict, Field, model_validator
 from .models import NPCV1, StrictModel
 
 
-MAX_NPC_CONTEXT_PINS = 12
-MAX_NPC_CONTEXT_MESSAGES = 40
-MAX_NPC_CONTEXT_MESSAGE_CHARS = 24_000
-MAX_NPC_PIN_TOTAL_CHARS = 120_000
+MAX_NPC_CONTEXT_PINS = 64
+MAX_NPC_CONTEXT_MESSAGES = 200
+MAX_NPC_CONTEXT_MESSAGE_CHARS = 100_000
+MAX_NPC_PIN_TOTAL_CHARS = 400_000
 
 
 class NpcContextPinV1(StrictModel):
     id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=300)
-    content: str = Field(min_length=1, max_length=20_000)
+    content: str = Field(min_length=1, max_length=100_000)
 
 
 class NpcPanelMessageV1(StrictModel):
@@ -93,13 +93,13 @@ class NpcReplyOutputV1(StrictModel):
 
     spoken_text: str = Field(
         min_length=1,
-        max_length=4_000,
+        max_length=20_000,
         validation_alias=AliasChoices("spokenText", "spoken_text"),
         serialization_alias="spokenText",
     )
     stage_direction: str | None = Field(
         default=None,
-        max_length=2_000,
+        max_length=10_000,
         validation_alias=AliasChoices("stageDirection", "stage_direction"),
         serialization_alias="stageDirection",
     )
@@ -119,7 +119,7 @@ class PrepareNpcReplyTaskV1(StrictModel):
         default_factory=list,
         max_length=MAX_NPC_CONTEXT_PINS,
     )
-    messages: list[NpcPanelMessageV1] = Field(default_factory=list, max_length=500)
+    messages: list[NpcPanelMessageV1] = Field(default_factory=list, max_length=2_000)
     mock_response: NpcReplyOutputV1 | None = Field(
         default=None,
         validation_alias=AliasChoices("mockResponse", "mock_response"),
@@ -137,9 +137,8 @@ def build_npc_context(task: PrepareNpcReplyTaskV1) -> NpcContextWindowV1:
     """Build the only context shape an NPC provider adapter is allowed to receive.
 
     Messages are considered newest-first but returned in chronological order. Complete
-    messages are retained until the 24,000-code-point budget would be exceeded. The only
-    partial-message case is a newest message that alone exceeds the budget; its newest
-    24,000 code points are retained and explicitly marked as prefix-truncated. Older
+    messages are retained until the character budget would be exceeded. The only
+    partial-message case is a newest message that alone exceeds the budget; its newest in-budget code points are retained and explicitly marked as prefix-truncated. Older
     messages are never summarized or backfilled across a skipped message.
     """
 

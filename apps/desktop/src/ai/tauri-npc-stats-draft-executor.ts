@@ -98,8 +98,8 @@ export function validateNpcStatsDraftRequest(candidate: NpcStatsDraftRequestV1):
   }
   if (!isIdentifier(candidate.npcId)) throw new Error("NPC ID 无效");
   validateText(candidate.name, 1, 300, "NPC 名称");
-  validateText(candidate.description, 0, 30_000, "NPC 描述");
-  validateText(candidate.guidance, 0, 8_000, "NPC 补充要求");
+  validateText(candidate.description, 0, 100_000, "NPC 描述");
+  validateText(candidate.guidance, 0, 50_000, "NPC 补充要求");
   if (typeof candidate.model !== "string" || !/^[A-Za-z0-9._-]{0,100}$/.test(candidate.model)) {
     throw new Error("NPC 属性草稿模型名称无效");
   }

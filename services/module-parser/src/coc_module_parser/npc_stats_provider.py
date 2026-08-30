@@ -55,8 +55,8 @@ class GenerateNpcStatsDraftTaskV1(StrictModel):
         serialization_alias="npcId",
     )
     name: str = Field(min_length=1, max_length=300)
-    description: str = Field(default="", max_length=30_000)
-    guidance: str = Field(default="", max_length=8_000)
+    description: str = Field(default="", max_length=100_000)
+    guidance: str = Field(default="", max_length=50_000)
     api_key: SecretStr | None = Field(
         default=None,
         exclude=True,
@@ -75,8 +75,8 @@ class NpcStatsProviderInputV1(StrictModel):
     """The complete and only story data sent to DeepSeek or Codex."""
 
     name: str = Field(min_length=1, max_length=300)
-    description: str = Field(default="", max_length=30_000)
-    guidance: str = Field(default="", max_length=8_000)
+    description: str = Field(default="", max_length=100_000)
+    guidance: str = Field(default="", max_length=50_000)
 
 
 class NpcCharacteristicDraftV1(StrictModel):
@@ -196,7 +196,7 @@ def _parse_npc_stats_output(raw: str, provider: str) -> NpcStatsProviderOutputV1
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}"
-            for item in exc.errors(include_input=False)[:8]
+            for item in exc.errors(include_input=False)[:32]
         )
         raise InvalidStructureError(f"NPC stats schema validation failed: {errors}") from exc
 
@@ -219,8 +219,8 @@ class DeepSeekNpcStatsDraftProvider:
     api_key: SecretStr = field(repr=False)
     model: str = DEFAULT_DEEPSEEK_NPC_MODEL
     base_url: str = "https://api.deepseek.com"
-    max_output_tokens: int = 2_048
-    timeout_seconds: float = 120.0
+    max_output_tokens: int = 8_192
+    timeout_seconds: float = 600.0
     client: httpx.Client | None = field(default=None, repr=False)
 
     def generate(self, provider_input: str) -> NpcStatsProviderOutputV1:
@@ -322,7 +322,7 @@ class CodexNpcStatsDraftProvider(CodexNpcReplyProvider):
                 "env": _codex_environment(),
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
-                "timeout": min(self.timeout_seconds, 20.0),
+                "timeout": min(self.timeout_seconds, 60.0),
                 "check": False,
             }
             if os.name == "nt":

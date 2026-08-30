@@ -213,10 +213,10 @@ export function validateCodexImageJob(candidate: CodexImageJob): CodexImageJob {
   if (!CODEX_IMAGE_JOB_KINDS.includes(candidate.kind as CodexImageJobKind)) {
     throw invalidRequest("图片任务类型不受支持。");
   }
-  const description = normalizeTextField(candidate.description, "画面描述", 4_000, false);
+  const description = normalizeTextField(candidate.description, "画面描述", 20_000, false);
   const style = candidate.style === undefined
     ? undefined
-    : normalizeTextField(candidate.style, "视觉风格", 500, true);
+    : normalizeTextField(candidate.style, "视觉风格", 2_000, true);
   const aspectRatio = candidate.aspectRatio ?? defaultAspectRatio(candidate.kind);
   if (!(["square", "landscape", "portrait"] as const).includes(aspectRatio)) {
     throw invalidRequest("图片宽高比不受支持。");

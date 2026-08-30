@@ -300,9 +300,9 @@ def _source_refs(
 
 def _append_features(description: str, features: list[str]) -> str:
     if not features:
-        return description[:20_000]
+        return description[:100_000]
     suffix = "\n\n" + "\n".join(f"- {value}" for value in features)
-    return (description + suffix)[:20_000]
+    return (description + suffix)[:100_000]
 
 
 def _unique_ids(values: list[str], limit: int) -> list[str]:
@@ -359,8 +359,8 @@ def to_canonical_package(
             id=handout_by_clue[clue.id],
             name=clue.title[:240],
             title=clue.title[:240],
-            description=clue.content[:20_000],
-            content=(clue.handout_text or "")[:50_000],
+            description=clue.content[:100_000],
+            content=(clue.handout_text or "")[:200_000],
             sourceRefs=_source_refs(clue.source_refs, source_id),
         )
         for clue in package.clues
@@ -374,13 +374,13 @@ def to_canonical_package(
             continue
         for scene_id in handout.scene_ids:
             handouts_by_scene.setdefault(scene_id, []).append(handout.id)
-    overview = package.overview[:50_000]
+    overview = package.overview[:200_000]
     source_summary = re.sub(
         r"(?m)^<!-- coc-room-pdf-page:\d+ -->\s*",
         "",
         normalized_text,
     ).strip()
-    summary = (package.overview or source_summary)[:8_000]
+    summary = (package.overview or source_summary)[:50_000]
     authors = [package.metadata.author[:160]] if package.metadata.author else []
     language = package.metadata.language or "zh-CN"
     if len(language) < 2:
@@ -413,7 +413,7 @@ def to_canonical_package(
                 title=chapter.title[:240],
                 order=index,
                 sceneIds=chapter.scene_ids[:500],
-                notes=chapter.summary[:20_000],
+                notes=chapter.summary[:100_000],
             )
             for index, chapter in enumerate(package.chapters[:500])
         ],
@@ -421,8 +421,8 @@ def to_canonical_package(
             CanonicalSceneV1(
                 id=scene.id,
                 name=scene.title[:240],
-                description=scene.summary[:20_000],
-                synopsis=scene.summary[:20_000],
+                description=scene.summary[:100_000],
+                synopsis=scene.summary[:100_000],
                 locationIds=scene.location_ids[:100],
                 npcIds=scene.npc_ids[:200],
                 clueIds=scene.clue_ids[:200],
@@ -444,7 +444,7 @@ def to_canonical_package(
                     200,
                 ),
                 suggestedCheckIds=scene.suggested_check_ids[:100],
-                keeperNotes="\n\n".join(scene.keeper_notes)[:20_000],
+                keeperNotes="\n\n".join(scene.keeper_notes)[:100_000],
                 sourceRefs=_source_refs(scene.source_refs, source_id),
             )
             for scene in package.scenes[:2_000]
@@ -464,10 +464,10 @@ def to_canonical_package(
             CanonicalNpcV1(
                 id=npc.id,
                 name=npc.name[:240],
-                description=npc.description[:20_000],
+                description=npc.description[:100_000],
                 playerDescription=npc.player_description,
                 role=npc.role[:1_000],
-                motivation="\n".join(npc.motivations)[:4_000],
+                motivation="\n".join(npc.motivations)[:20_000],
                 traits=[trait[:500] for trait in npc.traits[:100] if trait],
                 character=(
                     CanonicalCharacterV1(
@@ -487,8 +487,8 @@ def to_canonical_package(
             CanonicalClueV1(
                 id=clue.id,
                 name=clue.title[:240],
-                description=clue.content[:20_000],
-                revealText=(clue.handout_text or "")[:20_000],
+                description=clue.content[:100_000],
+                revealText=(clue.handout_text or "")[:100_000],
                 isCore=clue.is_core,
                 sourceRefs=_source_refs(clue.source_refs, source_id),
             )
@@ -500,9 +500,9 @@ def to_canonical_package(
                 id=check.id,
                 skill=check.skill[:160],
                 difficulty=check.difficulty.value,
-                purpose=check.purpose[:4_000],
-                onSuccess=check.success[:8_000],
-                onFailure=check.failure[:8_000],
+                purpose=check.purpose[:20_000],
+                onSuccess=check.success[:50_000],
+                onFailure=check.failure[:50_000],
                 sourceRefs=_source_refs(check.source_refs, source_id),
             )
             for check in package.suggested_checks[:5_000]
@@ -511,7 +511,7 @@ def to_canonical_package(
             CanonicalKeeperNoteV1(
                 id=note.id,
                 title=note.title[:240],
-                content=note.content[:50_000],
+                content=note.content[:200_000],
                 relatedEntityIds=note.scene_ids[:200],
                 sourceRefs=_source_refs(note.source_refs, source_id),
             )
@@ -526,7 +526,7 @@ def to_canonical_package(
                 fromEntityId=relation.source_id,
                 toEntityId=relation.target_id,
                 kind=relation.relation[:120],
-                description=relation.description[:4_000],
+                description=relation.description[:20_000],
                 sourceRefs=_source_refs(relation.source_refs, source_id),
             )
             for relation in package.relations[:20_000]

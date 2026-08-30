@@ -36,17 +36,17 @@ use windows_sys::Win32::{
 
 const KEYRING_SERVICE: &str = "org.coc-room.desktop";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
-const NPC_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
-const SIDECAR_STDIN_TIMEOUT: Duration = Duration::from_secs(15);
+const NPC_REPLY_TIMEOUT: Duration = Duration::from_secs(1800);
+const SIDECAR_STDIN_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_NPC_REPLY_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-const MAX_NPC_REPLY_STDOUT_BYTES: usize = 256 * 1024;
-const MAX_NPC_REPLY_STDERR_BYTES: usize = 64 * 1024;
-const MAX_CONCURRENT_NPC_REPLIES: usize = 4;
-const MAX_PINS: usize = 12;
-const MAX_PIN_CHARS: usize = 120_000;
-const MAX_MESSAGES: usize = 40;
-const MAX_MESSAGE_CHARS: usize = 24_000;
+const MAX_NPC_REPLY_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NPC_REPLY_STDOUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_NPC_REPLY_STDERR_BYTES: usize = 1024 * 1024;
+const MAX_CONCURRENT_NPC_REPLIES: usize = 16;
+const MAX_PINS: usize = 64;
+const MAX_PIN_CHARS: usize = 400_000;
+const MAX_MESSAGES: usize = 200;
+const MAX_MESSAGE_CHARS: usize = 100_000;
 
 #[derive(Default)]
 pub(crate) struct NpcReplyExecutionState {
@@ -771,13 +771,13 @@ fn validate_request(request: &NpcReplyRequest) -> Result<(), String> {
     }
 
     if request.pins.len() > MAX_PINS {
-        return Err("NPC 上下文最多挂载 12 条资料".to_string());
+        return Err("NPC 上下文挂载资料数量超过上限".to_string());
     }
     let mut pin_chars = 0usize;
     for pin in &request.pins {
         validate_identifier(&pin.id, "NPC 挂载资料 ID")?;
         validate_text(&pin.title, 1, 300, "NPC 挂载资料标题")?;
-        validate_text(&pin.content, 1, 20_000, "NPC 挂载资料正文")?;
+        validate_text(&pin.content, 1, 100_000, "NPC 挂载资料正文")?;
         pin_chars = pin_chars
             .checked_add(pin.title.chars().count() + pin.content.chars().count())
             .ok_or_else(|| "NPC 挂载资料超过安全上限".to_string())?;
@@ -787,7 +787,7 @@ fn validate_request(request: &NpcReplyRequest) -> Result<(), String> {
     }
 
     if request.messages.len() > MAX_MESSAGES {
-        return Err("NPC 面板上下文最多包含 40 条消息".to_string());
+        return Err("NPC 面板上下文消息数量超过上限".to_string());
     }
     let mut message_chars = 0usize;
     for message in &request.messages {
@@ -802,7 +802,7 @@ fn validate_request(request: &NpcReplyRequest) -> Result<(), String> {
             .ok_or_else(|| "NPC 消息上下文超过安全上限".to_string())?;
     }
     if message_chars > MAX_MESSAGE_CHARS {
-        return Err("NPC 面板上下文超过 24,000 字符".to_string());
+        return Err("NPC 面板上下文超过字符上限".to_string());
     }
     Ok(())
 }
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_than_twenty_four_thousand_unicode_characters() {
+    fn rejects_messages_over_the_context_character_budget() {
         let mut candidate = request();
         candidate.messages[0].content = "🦋".repeat(MAX_MESSAGE_CHARS + 1);
         assert!(validate_request(&candidate).is_err());

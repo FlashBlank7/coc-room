@@ -2095,7 +2095,8 @@ describe("RoomViewV2 board creation", () => {
     const advancedDetails = screen.getByText("高级设置").closest("details") as HTMLDetailsElement;
     expect(contextDetails.open).toBe(false);
     expect(advancedDetails.open).toBe(false);
-    expect(screen.getByText(/最多 12 条资料/).closest("details")).toBe(contextDetails);
+    expect(screen.getByText(/每次回应会读取当前 NPC 卡、KP 挂载的资料（最多 64 条）和本对话最近的消息/).closest("details")).toBe(contextDetails);
+    expect(screen.getByText(/已挂载资料 · \d+\/64/).closest("details")).toBe(contextDetails);
     expect(screen.getByLabelText("AI 提供者").closest("details")).toBe(advancedDetails);
     expect(screen.getByLabelText("发布方式").closest("details")).toBe(advancedDetails);
   });

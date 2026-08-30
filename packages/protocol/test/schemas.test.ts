@@ -70,7 +70,7 @@ describe("shared schemas", () => {
     playerDescriptions.locations[0]!.playerDescription = "玩家看到的门厅";
     playerDescriptions.npcs[0]!.playerDescription = "穿着黑色礼服的老人";
     expect(modulePackageSchema.safeParse(playerDescriptions).success).toBe(true);
-    playerDescriptions.locations[0]!.playerDescription = "x".repeat(20_001);
+    playerDescriptions.locations[0]!.playerDescription = "x".repeat(100_001);
     expect(modulePackageSchema.safeParse(playerDescriptions).success).toBe(false);
     const invalid = moduleFixture();
     invalid.scenes[0]?.locationIds.push("missing-location");

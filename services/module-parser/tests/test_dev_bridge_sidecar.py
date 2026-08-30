@@ -47,6 +47,26 @@ def test_bridge_rejects_browser_credentials_commands_and_provider_endpoints() ->
             bridge.validate_request({**base, forbidden: "should-not-cross-boundary"})
 
 
+def test_bridge_parse_module_accepts_bounded_generation_settings() -> None:
+    request = {
+        "id": "parse_02",
+        "action": "parse_module",
+        "source_text": "# Test",
+        "source_name": "test.md",
+        "provider": "codex",
+        "model": "",
+        "mock": True,
+        "max_chunk_chars": 30_000,
+        "chunk_overlap_chars": 500,
+        "max_retries": 3,
+        "max_output_tokens": 32_000,
+        "codex_timeout_seconds": 3_600,
+        "codex_heartbeat_seconds": 15,
+    }
+
+    assert bridge.validate_request(request) == request
+
+
 def test_bridge_accepts_only_paths_below_its_private_temporary_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

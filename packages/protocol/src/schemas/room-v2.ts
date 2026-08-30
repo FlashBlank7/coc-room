@@ -372,9 +372,9 @@ export const npcInteractionSessionV1Schema = z
       .array(z.object({
         pinId: entityIdSchema,
         title: z.string().min(1).max(240),
-        body: z.string().max(20_000),
+        body: z.string().max(100_000),
       }).strict())
-      .max(12)
+      .max(64)
       .default([]),
     startedAt: isoDateTimeSchema,
     endedAt: isoDateTimeSchema.optional(),

@@ -48,8 +48,8 @@ interface PendingClientRequest {
   timer: ReturnType<typeof globalThis.setTimeout>;
 }
 
-const MAX_PROMPT_CODE_POINTS = 8_000;
-const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_PROMPT_CODE_POINTS = 100_000;
+const DEFAULT_TIMEOUT_MS = 600_000;
 
 /**
  * Host-controlled broker for room AI drafts. Remote peers can request the
@@ -76,9 +76,9 @@ export class RoomAiJobCoordinator {
     this.executor = options.executor;
     this.provider = options.provider;
     this.model = options.model.trim();
-    this.maxConcurrent = clampInteger(options.maxConcurrent ?? 2, 1, 4);
-    this.maxQueued = clampInteger(options.maxQueued ?? 16, 1, 64);
-    this.timeoutMs = clampInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1_000, 10 * 60_000);
+    this.maxConcurrent = clampInteger(options.maxConcurrent ?? 4, 1, 64);
+    this.maxQueued = clampInteger(options.maxQueued ?? 64, 1, 1024);
+    this.timeoutMs = clampInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1_000, 60 * 60_000);
     this.onHostStatus = options.onHostStatus;
   }
 

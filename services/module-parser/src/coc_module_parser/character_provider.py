@@ -51,7 +51,7 @@ class GenerateCharacterDraftTaskV1(StrictModel):
 
     provider: Literal["deepseek", "codex"]
     model: str = Field(default="", max_length=100)
-    prompt: str = Field(min_length=1, max_length=12_000)
+    prompt: str = Field(min_length=1, max_length=100_000)
     player_name: str = Field(
         min_length=1,
         max_length=160,
@@ -80,7 +80,7 @@ class GenerateCharacterDraftTaskV1(StrictModel):
 class CharacterDraftInputV1(StrictModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True, populate_by_name=True)
 
-    prompt: str = Field(min_length=1, max_length=12_000)
+    prompt: str = Field(min_length=1, max_length=100_000)
     player_name: str = Field(
         min_length=1,
         max_length=160,
@@ -357,7 +357,7 @@ def _parse_character_draft_output(raw: str, provider: str) -> CharacterDraftProv
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}"
-            for item in exc.errors(include_input=False)[:8]
+            for item in exc.errors(include_input=False)[:32]
         )
         raise InvalidStructureError(f"character draft schema validation failed: {errors}") from exc
 
@@ -379,8 +379,8 @@ class DeepSeekCharacterDraftProvider:
     api_key: SecretStr = field(repr=False)
     model: str = DEFAULT_DEEPSEEK_NPC_MODEL
     base_url: str = "https://api.deepseek.com"
-    max_output_tokens: int = 4_096
-    timeout_seconds: float = 120.0
+    max_output_tokens: int = 8_192
+    timeout_seconds: float = 600.0
     client: httpx.Client | None = field(default=None, repr=False)
 
     def generate(self, provider_input: str) -> CharacterDraftProviderOutputV1:
@@ -482,7 +482,7 @@ class CodexCharacterDraftProvider(CodexNpcReplyProvider):
                 "env": _codex_environment(),
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
-                "timeout": min(self.timeout_seconds, 20.0),
+                "timeout": min(self.timeout_seconds, 60.0),
                 "check": False,
             }
             if os.name == "nt":

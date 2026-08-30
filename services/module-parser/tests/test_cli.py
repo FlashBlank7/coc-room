@@ -76,25 +76,43 @@ def test_flat_desktop_contract_and_progress_order() -> None:
     ]
 
 
-def test_parse_request_accepts_bounded_codex_recovery_settings() -> None:
+def test_parse_request_accepts_bounded_generation_settings() -> None:
     config, _loaded = cli_module._parse_config(
         {
             "source_text": "# Test",
             "provider": "codex",
             "mock": True,
-            "codex_timeout_seconds": 720,
+            "codex_timeout_seconds": 7_200,
             "codex_heartbeat_seconds": 20,
-            "codex_auto_shrink_on_timeout": False,
-            "codex_timeout_fallback_chunk_chars": 4_000,
-            "codex_timeout_fallback_overlap_chars": 200,
+            "max_chunk_chars": 60_000,
+            "chunk_overlap_chars": 800,
+            "max_retries": 5,
+            "max_output_tokens": 64_000,
         }
     )
 
-    assert config.codex_timeout_seconds == 720
+    assert config.codex_timeout_seconds == 7_200
     assert config.codex_heartbeat_seconds == 20
-    assert config.codex_auto_shrink_on_timeout is False
-    assert config.codex_timeout_fallback_chunk_chars == 4_000
-    assert config.codex_timeout_fallback_overlap_chars == 200
+    assert config.max_chunk_chars == 60_000
+    assert config.chunk_overlap_chars == 800
+    assert config.max_retries == 5
+    assert config.max_output_tokens == 64_000
+
+
+def test_parse_request_ignores_removed_quota_settings() -> None:
+    config, _loaded = cli_module._parse_config(
+        {
+            "source_text": "# Test",
+            "provider": "codex",
+            "mock": True,
+            "max_codex_attempts": 1,
+            "max_codex_chunks": 1,
+            "codex_probe_first_chunk": True,
+        }
+    )
+
+    assert config.max_chunk_chars == 30_000
+    assert config.max_retries == 3
 
 
 def test_sidecar_result_preserves_observed_codex_usage(

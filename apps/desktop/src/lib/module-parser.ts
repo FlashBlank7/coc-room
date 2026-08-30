@@ -336,7 +336,7 @@ export async function parseModule(
 async function fileToBridgeWire(file: File, signal?: AbortSignal): Promise<{ name: string; byteLength: number; sha256: string; dataBase64: string }> {
   throwIfModuleParserCancelled(signal);
   const extension = file.name.toLowerCase().match(/\.[^.]+$/u)?.[0] ?? "";
-  const maximum = extension === ".pdf" ? 50 * 1024 * 1024 : 25 * 1024 * 1024;
+  const maximum = extension === ".pdf" ? 200 * 1024 * 1024 : 100 * 1024 * 1024;
   if (file.size < 1 || file.size > maximum) throw new Error(`模组文件为空或超过 ${maximum / 1024 / 1024} MiB 上限`);
   const bytes = new Uint8Array(await file.arrayBuffer());
   try {

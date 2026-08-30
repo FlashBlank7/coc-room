@@ -14,7 +14,6 @@ from .models import CodexEvidenceFragmentV1, CodexWorldFragmentV1, ModuleFragmen
 
 
 CACHE_VERSION = "module-fragment-cache-v5-codex-staged"
-TIMEOUT_SPLIT_PLAN_VERSION = "codex-timeout-split-plan-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +44,6 @@ class CacheIdentity:
         return hashlib.sha256(encoded).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
-class TimeoutSplitPlan:
-    max_chunk_chars: int
-    overlap_chars: int
-
-
 class ExtractionCache:
     """Validated fragment cache. Its API deliberately has no credential argument."""
 
@@ -59,9 +52,6 @@ class ExtractionCache:
 
     def _path(self, identity: CacheIdentity) -> Path:
         return self.root / identity.key()[:2] / f"{identity.key()}.json"
-
-    def _split_plan_path(self, identity: CacheIdentity) -> Path:
-        return self.root / "plans" / identity.key()[:2] / f"{identity.key()}.json"
 
     def load(self, identity: CacheIdentity) -> ModuleFragmentV1 | None:
         path = self._path(identity)
@@ -118,59 +108,6 @@ class ExtractionCache:
                 "identity": identity.canonical(),
                 "stage": stage,
                 "fragment": fragment.model_dump(mode="json"),
-            },
-        )
-
-    def load_timeout_split_plan(
-        self, identity: CacheIdentity
-    ) -> TimeoutSplitPlan | None:
-        path = self._split_plan_path(identity)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                payload.get("version") != TIMEOUT_SPLIT_PLAN_VERSION
-                or payload.get("identity") != identity.canonical()
-            ):
-                return None
-            max_chunk_chars = payload["max_chunk_chars"]
-            overlap_chars = payload["overlap_chars"]
-            if (
-                isinstance(max_chunk_chars, bool)
-                or not isinstance(max_chunk_chars, int)
-                or isinstance(overlap_chars, bool)
-                or not isinstance(overlap_chars, int)
-                or not 1_000 <= max_chunk_chars < identity.max_chunk_chars
-                or not 0 <= overlap_chars < max_chunk_chars
-            ):
-                return None
-            return TimeoutSplitPlan(
-                max_chunk_chars=max_chunk_chars,
-                overlap_chars=overlap_chars,
-            )
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return None
-
-    def store_timeout_split_plan(
-        self,
-        identity: CacheIdentity,
-        *,
-        max_chunk_chars: int,
-        overlap_chars: int,
-    ) -> None:
-        if (
-            isinstance(max_chunk_chars, bool)
-            or isinstance(overlap_chars, bool)
-            or not 1_000 <= max_chunk_chars < identity.max_chunk_chars
-            or not 0 <= overlap_chars < max_chunk_chars
-        ):
-            raise ValueError("invalid Codex timeout split plan")
-        self._atomic_store(
-            self._split_plan_path(identity),
-            {
-                "version": TIMEOUT_SPLIT_PLAN_VERSION,
-                "identity": identity.canonical(),
-                "max_chunk_chars": max_chunk_chars,
-                "overlap_chars": overlap_chars,
             },
         )
 

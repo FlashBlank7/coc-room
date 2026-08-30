@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS,
+  NPC_CONTEXT_MAX_MESSAGES,
   NpcInteractionBroker,
   TauriNpcReplyProvider,
   selectNpcPanelMessages,
@@ -30,25 +31,36 @@ const ids = {
 afterEach(() => vi.useRealTimers());
 
 describe("selectNpcPanelMessages", () => {
-  it("keeps at most 40 recent messages and measures astral text as Unicode code points", () => {
-    const messages = Array.from({ length: 45 }, (_, index) => ({
+  it(`keeps at most ${NPC_CONTEXT_MAX_MESSAGES} recent messages and measures astral text as Unicode code points`, () => {
+    const total = NPC_CONTEXT_MAX_MESSAGES + 10;
+    const smallMessages = Array.from({ length: total }, (_, index) => ({
       id: `message-${index}`,
       role: "human" as const,
-      content: index === 44 ? "🦋".repeat(30_000) : `old-${index}`,
+      content: `old-${index}`,
     }));
+
+    const capped = selectNpcPanelMessages(smallMessages);
+
+    expect(capped).toHaveLength(NPC_CONTEXT_MAX_MESSAGES);
+    expect(capped[0]?.id).toBe("message-10");
+    expect(capped.at(-1)?.id).toBe(`message-${total - 1}`);
+
+    const messages = smallMessages.map((message, index) => (index === total - 1
+      ? { ...message, content: "🦋".repeat(NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS + 20_000) }
+      : message));
 
     const selected = selectNpcPanelMessages(messages);
 
     expect(selected).toHaveLength(1);
-    expect(selected[0]?.id).toBe("message-44");
+    expect(selected[0]?.id).toBe(`message-${total - 1}`);
     expect([...selected[0]!.content]).toHaveLength(NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS);
     expect(selected[0]?.content).toBe("🦋".repeat(NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS));
   });
 
   it("uses the newest contiguous suffix without skipping an over-budget older message", () => {
     const selected = selectNpcPanelMessages([
-      { id: "old", role: "human", content: "x".repeat(24_000) },
-      { id: "middle", role: "npc", content: "y".repeat(23_999) },
+      { id: "old", role: "human", content: "x".repeat(NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS) },
+      { id: "middle", role: "npc", content: "y".repeat(NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS - 1) },
       { id: "new", role: "human", content: "z" },
     ]);
     expect(selected.map(({ id }) => id)).toEqual(["middle", "new"]);

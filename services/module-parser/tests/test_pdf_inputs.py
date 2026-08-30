@@ -19,7 +19,7 @@ from coc_module_parser.inputs import (
     inject_pdf_visual_transcripts,
     load_source_path,
 )
-from coc_module_parser.models import ModuleFragmentV1
+from coc_module_parser.models import ModuleFragmentV1, ParseConfig
 
 
 def _add_page(writer: PdfWriter, text: str | None = None) -> None:
@@ -87,8 +87,8 @@ def test_scanned_pdf_page_is_rendered_to_bounded_png_metadata(tmp_path: Path) ->
     assert page.render_media_type == "image/png"
     assert page.render_sha256 is not None and len(page.render_sha256) == 64
     assert page.render_byte_length is not None and page.render_byte_length > 0
-    assert page.render_width is not None and page.render_width <= 1_600
-    assert page.render_height is not None and page.render_height <= 1_600
+    assert page.render_width is not None and page.render_width <= inputs.PDF_RENDER_MAX_EDGE
+    assert page.render_height is not None and page.render_height <= inputs.PDF_RENDER_MAX_EDGE
 
 
 def test_mixed_pdf_distinguishes_digital_low_text_and_scanned_pages(
@@ -116,18 +116,11 @@ def test_mixed_pdf_distinguishes_digital_low_text_and_scanned_pages(
     )
 
 
-def test_pdf_rendering_is_batched_to_four_low_text_pages(tmp_path: Path) -> None:
+def test_pdf_rendering_covers_all_low_text_pages(tmp_path: Path) -> None:
     loaded = load_source_path(
         _write(tmp_path / "batch.pdf", _pdf_bytes(*([None] * 6)))
     )
-    assert [page.render_status for page in loaded.pdf_pages] == [
-        "rendered",
-        "rendered",
-        "rendered",
-        "rendered",
-        "pending",
-        "pending",
-    ]
+    assert [page.render_status for page in loaded.pdf_pages] == ["rendered"] * 6
 
 
 def test_explicit_pdf_visual_page_selection_returns_requested_pngs(tmp_path: Path) -> None:
@@ -148,7 +141,8 @@ def test_explicit_pdf_visual_page_selection_returns_requested_pngs(tmp_path: Pat
         rendered = base64.b64decode(page["dataBase64"], validate=True)
         assert rendered.startswith(b"\x89PNG\r\n\x1a\n")
         assert len(rendered) == page["byteLength"]
-        assert page["width"] <= 1_600 and page["height"] <= 1_600
+        assert page["width"] <= inputs.PDF_RENDER_MAX_EDGE
+        assert page["height"] <= inputs.PDF_RENDER_MAX_EDGE
 
 
 def test_pdf_visual_page_selection_reads_the_validated_document_inside_a_safe_zip(
@@ -196,8 +190,11 @@ def test_encrypted_pdf_is_rejected(tmp_path: Path) -> None:
     assert caught.value.code == "ENCRYPTED_PDF"
 
 
-def test_pdf_page_limit_is_enforced(tmp_path: Path) -> None:
-    path = _write(tmp_path / "too-many.pdf", _pdf_bytes(*([None] * 301)))
+def test_pdf_page_limit_is_enforced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inputs, "MAX_PDF_PAGES", 2)
+    path = _write(tmp_path / "too-many.pdf", _pdf_bytes(*([None] * 3)))
     with pytest.raises(InputError) as caught:
         load_source_path(path)
     assert caught.value.code == "PDF_PAGE_LIMIT"
@@ -238,8 +235,11 @@ def test_pdf_jsonl_result_exposes_page_metadata_for_source_ref_mapping(
     assert "coc-room-pdf-page" not in event["module"]["metadata"]["summary"]
 
 
-def test_pdf_jsonl_route_rejects_deepseek_even_in_mock_mode(tmp_path: Path) -> None:
-    path = _write(tmp_path / "module.pdf", _pdf_bytes(None))
+def test_pdf_jsonl_route_parses_with_any_provider_using_extracted_text(
+    tmp_path: Path,
+) -> None:
+    text = "A digital module page with enough characters to avoid image rendering. " * 3
+    path = _write(tmp_path / "module.pdf", _pdf_bytes(text))
     output = io.StringIO()
     request = {
         "id": "pdf",
@@ -249,10 +249,22 @@ def test_pdf_jsonl_route_rejects_deepseek_even_in_mock_mode(tmp_path: Path) -> N
         "mock": True,
     }
 
-    run_stream(io.StringIO(json.dumps(request) + "\n"), output)
+    assert run_stream(io.StringIO(json.dumps(request) + "\n"), output) == 0
     event = json.loads(output.getvalue().splitlines()[-1])
-    assert event["type"] == "error"
-    assert event["error"]["code"] == "PDF_CODEX_REQUIRED"
+    assert event["type"] == "result"
+    assert event["sourceInputMediaType"] == "application/pdf"
+    assert [page["pageNumber"] for page in event["sourcePages"]] == [1]
+
+
+def test_auto_vision_selection_returns_all_needs_vision_pages(tmp_path: Path) -> None:
+    loaded = load_source_path(
+        _write(tmp_path / "scans.pdf", _pdf_bytes(*([None] * 6)))
+    )
+    config = ParseConfig(source_text=loaded.text, provider="codex", model="")
+
+    selected = parser_cli._pdf_visual_page_numbers({}, config, loaded)
+
+    assert selected == (1, 2, 3, 4, 5, 6)
 
 
 def test_visual_transcripts_are_page_scoped_and_keep_text_ranges_valid(

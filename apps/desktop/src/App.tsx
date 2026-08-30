@@ -280,7 +280,7 @@ export function App() {
               requesterSeatId: seat.seatId,
               requesterName: seat.displayName,
               character: parsed.data,
-            }].slice(-16));
+            }].slice(-200));
           },
         });
         attempt.aiCoordinator = aiCoordinator;
@@ -364,7 +364,7 @@ export function App() {
             publish: (proposal) => next.submit(proposal),
             onStatus: (status) => {
               if (!active || sessionV2Ref.current !== next) return;
-              setNpcJobStatuses((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), status].slice(-32));
+              setNpcJobStatuses((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), status].slice(-200));
               if (status.status === "failed") {
                 const npcSession = latestWorld.npcSessions.get(status.sessionId);
                 if (npcSession) {
@@ -378,7 +378,7 @@ export function App() {
             },
             onShadowReply: (reply) => {
               if (!active || sessionV2Ref.current !== next) return;
-              setNpcShadowReplies((current) => [...current.filter(({ jobId }) => jobId !== reply.jobId), reply].slice(-16));
+              setNpcShadowReplies((current) => [...current.filter(({ jobId }) => jobId !== reply.jobId), reply].slice(-200));
             },
           });
           attempt.npcBroker = npcBroker;

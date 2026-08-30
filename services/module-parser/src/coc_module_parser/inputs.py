@@ -33,19 +33,19 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     ".png": ("PNG", "image/png"),
     ".webp": ("WEBP", "image/webp"),
 }
-MAX_SOURCE_BYTES = 25 * 1024 * 1024
-MAX_PDF_SOURCE_BYTES = 50 * 1024 * 1024
-MAX_PDF_PAGES = 300
-MAX_PDF_EXTRACTED_CHARS = 5_000_000
-MAX_PDF_RENDERED_PAGES = 4
+MAX_SOURCE_BYTES = 100 * 1024 * 1024
+MAX_PDF_SOURCE_BYTES = 500 * 1024 * 1024
+MAX_PDF_PAGES = 2_000
+MAX_PDF_EXTRACTED_CHARS = 50_000_000
+MAX_PDF_RENDERED_PAGES = 256
 PDF_LOW_TEXT_CHARS = 80
-PDF_RENDER_MAX_EDGE = 1_600
-MAX_ZIP_ENTRIES = 128
-MAX_ZIP_EXPANDED_BYTES = 50 * 1024 * 1024
+PDF_RENDER_MAX_EDGE = 3_200
+MAX_ZIP_ENTRIES = 2_048
+MAX_ZIP_EXPANDED_BYTES = 500 * 1024 * 1024
 MAX_DOCX_ENTRIES = 10_000
-MAX_DOCX_EXPANDED_BYTES = 100 * 1024 * 1024
-MAX_ENTRY_BYTES = 25 * 1024 * 1024
-MAX_COMPRESSION_RATIO = 500
+MAX_DOCX_EXPANDED_BYTES = 500 * 1024 * 1024
+MAX_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 2_000
 MAX_IMAGE_EDGE = 8_192
 MAX_IMAGE_PIXELS = 32_000_000
 
@@ -421,7 +421,7 @@ def _render_pdf_page(
             or height <= 0
         ):
             raise InputError("PDF page has invalid dimensions", code="INVALID_PDF")
-        scale = min(2.0, PDF_RENDER_MAX_EDGE / max(width, height))
+        scale = min(4.0, PDF_RENDER_MAX_EDGE / max(width, height))
         if scale <= 0 or not math.isfinite(scale):
             raise InputError("PDF page has invalid dimensions", code="INVALID_PDF")
         bitmap = page.render(scale=scale)
@@ -454,9 +454,9 @@ def render_pdf_page_selection(
     """Render an explicit, bounded 1-based PDF page selection for visual review."""
 
     if len(data) > MAX_PDF_SOURCE_BYTES:
-        raise InputError("PDF exceeds the 50 MiB size limit", code="PDF_SOURCE_LIMIT")
+        raise InputError("PDF exceeds the size limit", code="PDF_SOURCE_LIMIT")
     if not page_numbers or len(page_numbers) > MAX_PDF_RENDERED_PAGES:
-        raise InputError("select between one and four PDF pages", code="PDF_PAGE_SELECTION")
+        raise InputError("PDF page selection is empty or too large", code="PDF_PAGE_SELECTION")
     if any(isinstance(value, bool) or not isinstance(value, int) for value in page_numbers):
         raise InputError("PDF page numbers must be integers", code="PDF_PAGE_SELECTION")
     if len(set(page_numbers)) != len(page_numbers):
@@ -471,7 +471,7 @@ def render_pdf_page_selection(
         if page_count == 0:
             raise InputError("PDF contains no pages", code="EMPTY_PDF")
         if page_count > MAX_PDF_PAGES:
-            raise InputError("PDF exceeds the 300 page limit", code="PDF_PAGE_LIMIT")
+            raise InputError("PDF exceeds the page limit", code="PDF_PAGE_LIMIT")
         if any(value < 1 or value > page_count for value in page_numbers):
             raise InputError("PDF page selection is out of range", code="PDF_PAGE_SELECTION")
 
@@ -483,7 +483,7 @@ def render_pdf_page_selection(
                 width, height = page.get_size()
                 if not all(math.isfinite(value) and value > 0 for value in (width, height)):
                     raise InputError("PDF page has invalid dimensions", code="INVALID_PDF")
-                scale = min(2.0, PDF_RENDER_MAX_EDGE / max(width, height))
+                scale = min(4.0, PDF_RENDER_MAX_EDGE / max(width, height))
                 bitmap = page.render(scale=scale)
                 image = bitmap.to_pil()
                 output = BytesIO()
@@ -530,7 +530,7 @@ def render_pdf_path_selection(
         size_limit = MAX_PDF_SOURCE_BYTES if extension == ".pdf" else MAX_SOURCE_BYTES
         if size > size_limit:
             raise InputError(
-                "PDF exceeds the 50 MiB size limit"
+                "PDF exceeds the size limit"
                 if extension == ".pdf"
                 else "source file exceeds the size limit",
                 code="PDF_SOURCE_LIMIT" if extension == ".pdf" else "SOURCE_LIMIT",
@@ -542,9 +542,18 @@ def render_pdf_path_selection(
         raise InputError("source file could not be read", code="SOURCE_READ_ERROR") from exc
 
     if extension == ".zip":
-        data, document_name, _attachments = _read_zip_source(data)
-        if Path(document_name).suffix.lower() != ".pdf":
-            raise InputError("visual page selection requires a PDF", code="INVALID_SOURCE")
+        docs, _skipped, _attachments = _read_zip_source(data)
+        pdf_docs = [
+            (nested, name)
+            for nested, name in docs
+            if Path(name).suffix.lower() == ".pdf"
+        ]
+        if len(pdf_docs) != 1:
+            raise InputError(
+                "visual page selection requires exactly one PDF in the archive",
+                code="INVALID_SOURCE",
+            )
+        data = pdf_docs[0][0]
     return render_pdf_page_selection(data, page_numbers)
 
 
@@ -654,7 +663,7 @@ def pdf_to_markdown(data: bytes) -> tuple[str, tuple[PDFPageMetadata, ...]]:
     """
 
     if len(data) > MAX_PDF_SOURCE_BYTES:
-        raise InputError("PDF exceeds the 50 MiB size limit", code="PDF_SOURCE_LIMIT")
+        raise InputError("PDF exceeds the size limit", code="PDF_SOURCE_LIMIT")
     try:
         reader = PdfReader(BytesIO(data), strict=True)
         if reader.is_encrypted:
@@ -667,7 +676,7 @@ def pdf_to_markdown(data: bytes) -> tuple[str, tuple[PDFPageMetadata, ...]]:
     if page_count == 0:
         raise InputError("PDF contains no pages", code="EMPTY_PDF")
     if page_count > MAX_PDF_PAGES:
-        raise InputError("PDF exceeds the 300 page limit", code="PDF_PAGE_LIMIT")
+        raise InputError("PDF exceeds the page limit", code="PDF_PAGE_LIMIT")
 
     extracted_pages: list[str] = []
     total_chars = 0
@@ -794,8 +803,10 @@ def _load_supported_bytes(data: bytes, name: str, *, raw_sha256: str) -> LoadedS
 
 def _read_zip_source(
     data: bytes,
-) -> tuple[bytes, str, tuple[SourceAttachmentMetadata, ...]]:
-    """Return the single validated document and path-free attachment metadata.
+) -> tuple[
+    list[tuple[bytes, str]], tuple[str, ...], tuple[SourceAttachmentMetadata, ...]
+]:
+    """Return the validated documents, skipped entry names, and attachment metadata.
 
     Text extraction and bounded PDF page rendering must cross the same archive
     boundary. Keeping that validation here prevents a second path from merely
@@ -812,7 +823,7 @@ def _read_zip_source(
             )
             documents: list[tuple[ZipInfo, str]] = []
             images: list[tuple[ZipInfo, str]] = []
-            has_unsupported_entry = False
+            skipped: list[str] = []
             for info in entries:
                 if info.is_dir():
                     continue
@@ -825,19 +836,14 @@ def _read_zip_source(
                 elif extension in SUPPORTED_IMAGE_EXTENSIONS:
                     images.append((info, extension))
                 else:
-                    has_unsupported_entry = True
-            if has_unsupported_entry:
+                    skipped.append(name)
+            if not documents:
                 raise InputError(
-                    "archive contains an unsupported file type",
-                    code="UNSUPPORTED_ARCHIVE_ENTRY",
+                    "archive contains no supported document",
+                    code="EMPTY_ARCHIVE",
                 )
-            if len(documents) != 1:
-                raise InputError(
-                    "archive must contain exactly one supported document",
-                    code="MULTI_SOURCE_ARCHIVE",
-                )
-            info, repaired_name = documents[0]
-            nested = archive.read(info)
+            documents.sort(key=lambda item: item[1])
+            docs = [(archive.read(info), name) for info, name in documents]
             attachments = tuple(
                 _validate_static_image_attachment(archive.read(image_info), extension)
                 for image_info, extension in images
@@ -845,25 +851,47 @@ def _read_zip_source(
     except (BadZipFile, NotImplementedError, RuntimeError) as exc:
         raise InputError("file is not a valid ZIP archive", code="INVALID_ZIP") from exc
 
-    return nested, repaired_name, attachments
+    return docs, tuple(skipped), attachments
 
 
 def _load_zip(data: bytes, archive_name: str, *, raw_sha256: str) -> LoadedSource:
-    del archive_name
-    nested, repaired_name, attachments = _read_zip_source(data)
+    docs, skipped, attachments = _read_zip_source(data)
 
-    loaded = _load_supported_bytes(nested, repaired_name, raw_sha256=raw_sha256)
-    attachment_warnings: tuple[str, ...] = ()
+    warnings: list[str] = []
+    if len(docs) == 1:
+        nested, repaired_name = docs[0]
+        loaded = _load_supported_bytes(nested, repaired_name, raw_sha256=raw_sha256)
+    else:
+        parts: list[str] = []
+        for nested, name in docs:
+            part = _load_supported_bytes(nested, name, raw_sha256=raw_sha256)
+            parts.append(f"## {Path(name).name}\n\n{part.text}")
+        loaded = LoadedSource(
+            text="\n\n---\n\n".join(parts),
+            name=Path(archive_name).name,
+            sha256=raw_sha256,
+            media_type="text/markdown",
+            input_media_type="text/markdown",
+            pdf_pages=(),
+        )
+        warnings.append(
+            f"Archive contains {len(docs)} documents; their extracted text was "
+            "merged in name order. PDF page vision is unavailable for merged archives."
+        )
+    if skipped:
+        warnings.append(
+            f"Archive contains {len(skipped)} unsupported file(s); they were skipped."
+        )
     if attachments:
-        attachment_warnings = (
+        warnings.append(
             f"Archive includes {len(attachments)} validated static image attachment(s); "
             "they were excluded from AI parsing and returned as path-free metadata."
-        ),
+        )
     return replace(
         loaded,
         sha256=raw_sha256,
         attachments=attachments,
-        warnings=attachment_warnings,
+        warnings=tuple(warnings),
     )
 
 

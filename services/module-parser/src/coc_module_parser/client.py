@@ -25,7 +25,6 @@ from .models import (
     ClueV1,
     CodexEvidenceFragmentV1,
     CodexWorldFragmentV1,
-    EntityRelationV1,
     FragmentMetadataV1,
     HandoutV1,
     KeeperNoteV1,
@@ -121,20 +120,20 @@ CODEX_PDF_VISUAL_INSTRUCTIONS = (
     "plugins, or any other tool. Return only the JSON object required by the output schema."
 )
 
-MAX_CODEX_RESULT_BYTES = 8 * 1024 * 1024
-MAX_CODEX_EVENT_BYTES = 16 * 1024 * 1024
-MAX_CODEX_PAYLOAD_JSON_BYTES = 4 * 1024 * 1024
-CODEX_ERROR_STALL_GRACE_SECONDS = 45.0
+MAX_CODEX_RESULT_BYTES = 64 * 1024 * 1024
+MAX_CODEX_EVENT_BYTES = 64 * 1024 * 1024
+MAX_CODEX_PAYLOAD_JSON_BYTES = 32 * 1024 * 1024
+CODEX_ERROR_STALL_GRACE_SECONDS = 300.0
 # A CLI can stay alive by emitting the same non-terminal `error` event over
 # and over. Those events prove liveness, not useful generation progress. Give
 # transient reconnects time to recover, but do not make a keeper wait for the
 # full task timeout when no normal turn/item event ever resumes.
-CODEX_REPORTED_ERROR_MAX_SECONDS = 120.0
+CODEX_REPORTED_ERROR_MAX_SECONDS = 900.0
 CODEX_EVENT_POLL_SECONDS = 1.0
-MAX_PDF_VISUAL_PAGE_BYTES = 16 * 1024 * 1024
-MAX_PDF_VISUAL_TOTAL_BYTES = 32 * 1024 * 1024
-MAX_PDF_VISUAL_TEXT_CHARS = 60_000
-MAX_PDF_VISUAL_DESCRIPTION_CHARS = 30_000
+MAX_PDF_VISUAL_PAGE_BYTES = 64 * 1024 * 1024
+MAX_PDF_VISUAL_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_PDF_VISUAL_TEXT_CHARS = 200_000
+MAX_PDF_VISUAL_DESCRIPTION_CHARS = 100_000
 
 
 class ExtractionError(RuntimeError):
@@ -385,7 +384,7 @@ def _parse_model_output(
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}"
-            for item in exc.errors(include_input=False)[:8]
+            for item in exc.errors(include_input=False)[:32]
         )
         raise InvalidStructureError(
             f"{schema_label} schema validation failed: {errors}"
@@ -491,7 +490,7 @@ class DeepSeekResponsesExtractor:
         if previous_error:
             correction = (
                 "\nThe previous attempt failed validation. Correct this issue without adding "
-                f"unsupported fields: {previous_error[:1_000]}"
+                f"unsupported fields: {previous_error[:8_000]}"
             )
         payload = {
             "model": self.model,
@@ -603,22 +602,18 @@ class CodexCliExtractor:
 
     model: str = ""
     executable: str = "codex"
-    timeout_seconds: float = 900.0
+    timeout_seconds: float = 3_600.0
     heartbeat_seconds: float = 15.0
-    max_output_tokens: int = 16_000
+    max_output_tokens: int = 32_000
     runner: CodexRunner | None = field(default=None, repr=False)
     name: str = "codex-cli"
     base_url: str = "local://codex-cli"
     extraction_prompt_version: str = CODEX_EXTRACTION_PROMPT_VERSION
-    cacheable: bool = field(default=False, init=False)
+    cacheable: bool = field(default=True, init=False)
     cache_max_output_tokens: int = field(default=0, init=False)
     supports_staged_codex: bool = field(default=True, init=False)
     _ready: bool = field(default=False, init=False, repr=False)
     _last_usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        requested_model = self.model.strip()
-        self.cacheable = bool(requested_model and requested_model != "codex-default")
 
     @staticmethod
     def output_schema() -> dict[str, Any]:
@@ -746,8 +741,6 @@ class CodexCliExtractor:
             "--json",
             "--config",
             'web_search="disabled"',
-            "--config",
-            'model_reasoning_effort="low"',
             "--config",
             f"developer_instructions={json.dumps(developer_instructions)}",
             "--config",
@@ -1054,7 +1047,7 @@ class CodexCliExtractor:
                                         )
                                         raise ProviderResponseError(
                                             "Codex CLI turn failed",
-                                            retryable=False,
+                                            retryable=True,
                                             code="CODEX_TURN_FAILED",
                                         )
                                     kill_and_reap()
@@ -1066,7 +1059,7 @@ class CodexCliExtractor:
                                     )
                                     raise ProviderResponseError(
                                         "Codex CLI timed out",
-                                        retryable=False,
+                                        retryable=True,
                                         code="CODEX_TIMEOUT",
                                     )
                                 # Inspect terminal JSONL events promptly even when UI
@@ -1111,7 +1104,7 @@ class CodexCliExtractor:
                                         )
                                         raise ProviderResponseError(
                                             "Codex CLI turn failed",
-                                            retryable=False,
+                                            retryable=True,
                                             code="CODEX_TURN_FAILED",
                                         )
                                     current_time = time.monotonic()
@@ -1136,7 +1129,7 @@ class CodexCliExtractor:
                                         )
                                         raise ProviderResponseError(
                                             "Codex CLI stopped making progress after an error event",
-                                            retryable=False,
+                                            retryable=True,
                                             code="CODEX_CLI_STALLED",
                                         )
                                     now = time.monotonic()
@@ -1162,7 +1155,7 @@ class CodexCliExtractor:
                         )
                         raise ProviderResponseError(
                             "Codex CLI turn failed",
-                            retryable=False,
+                            retryable=True,
                             code="CODEX_TURN_FAILED",
                         ) from exc
                     self._report_progress(
@@ -1173,7 +1166,7 @@ class CodexCliExtractor:
                     )
                     raise ProviderResponseError(
                         "Codex CLI timed out",
-                        retryable=False,
+                        retryable=True,
                         code="CODEX_TIMEOUT",
                     ) from exc
                 except OSError as exc:
@@ -1188,7 +1181,7 @@ class CodexCliExtractor:
             if turn_failed:
                 raise ProviderResponseError(
                     "Codex CLI turn failed",
-                    retryable=False,
+                    retryable=True,
                     code="CODEX_TURN_FAILED",
                 )
             if (
@@ -1205,7 +1198,7 @@ class CodexCliExtractor:
             ):
                 raise ProviderResponseError(
                     "Codex CLI stopped making progress after an error event",
-                    retryable=False,
+                    retryable=True,
                     code="CODEX_CLI_STALLED",
                 )
             if observed_events == 0:
@@ -1299,8 +1292,8 @@ class CodexCliExtractor:
     def _validated_pdf_visual_payload(
         rendered_pages: tuple[dict[str, object], ...] | list[dict[str, object]],
     ) -> tuple[tuple[int, bytes, str], ...]:
-        if not rendered_pages or len(rendered_pages) > 4:
-            raise InvalidStructureError("PDF vision requires between one and four pages")
+        if not rendered_pages:
+            raise InvalidStructureError("PDF vision requires at least one page")
         validated: list[tuple[int, bytes, str]] = []
         seen: set[int] = set()
         total_bytes = 0
@@ -1316,7 +1309,7 @@ class CodexCliExtractor:
             if (
                 isinstance(page_number, bool)
                 or not isinstance(page_number, int)
-                or not 1 <= page_number <= 300
+                or not 1 <= page_number <= 10_000
                 or page_number in seen
                 or page.get("mediaType") != "image/png"
                 or not isinstance(encoded, str)
@@ -1330,8 +1323,8 @@ class CodexCliExtractor:
                 or not isinstance(width, int)
                 or isinstance(height, bool)
                 or not isinstance(height, int)
-                or not 1 <= width <= 1_600
-                or not 1 <= height <= 1_600
+                or not 1 <= width <= 8_192
+                or not 1 <= height <= 8_192
             ):
                 raise InvalidStructureError("PDF vision page descriptor is invalid")
             if len(encoded) > ((MAX_PDF_VISUAL_PAGE_BYTES + 2) // 3) * 4 + 4:
@@ -1433,7 +1426,7 @@ class CodexCliExtractor:
                 "source_chunk_id": chunk.id,
                 "source_start": chunk.start,
                 "source_end": chunk.end,
-                "previous_validation_error": previous_error[:1_000]
+                "previous_validation_error": previous_error[:8_000]
                 if previous_error
                 else None,
                 "target_schema": target_schema,
@@ -1472,7 +1465,7 @@ class CodexCliExtractor:
                 "source_start": chunk.start,
                 "source_end": chunk.end,
                 "extraction_stage": stage,
-                "previous_validation_error": previous_error[:1_000]
+                "previous_validation_error": previous_error[:8_000]
                 if previous_error
                 else None,
                 "target_schema": target_schema,

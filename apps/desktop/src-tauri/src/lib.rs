@@ -56,11 +56,11 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const KEYRING_SERVICE: &str = "org.coc-room.desktop";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
-const MAX_SOURCE_FILE_BYTES: u64 = 25 * 1024 * 1024;
-const MAX_PDF_SOURCE_FILE_BYTES: u64 = 50 * 1024 * 1024;
-const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const MAX_SIDECAR_STDOUT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SIDECAR_STDERR_BYTES: usize = 64 * 1024;
+const MAX_SOURCE_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_PDF_SOURCE_FILE_BYTES: u64 = 200 * 1024 * 1024;
+const MODULE_PARSER_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+const MAX_SIDECAR_STDOUT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SIDECAR_STDERR_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_PROBE_BYTES: u64 = 4 * 1024;
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const SIDECAR_STDIN_TIMEOUT: Duration = Duration::from_secs(30);

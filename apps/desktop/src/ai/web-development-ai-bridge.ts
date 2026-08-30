@@ -1,9 +1,9 @@
 const BRIDGE_PREFIX = "/__coc_room_local_ai/v1";
 const BRIDGE_TOKEN_META = "coc-room-local-ai-token";
 const BRIDGE_TOKEN_HEADER = "x-coc-room-local-ai";
-const MAX_RESPONSE_BYTES = 384 * 1024;
-const MAX_ERROR_BYTES = 16 * 1024;
-const MAX_MESSAGES = 64;
+const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+const MAX_ERROR_BYTES = 1024 * 1024;
+const MAX_MESSAGES = 100_000;
 
 export type WebDevelopmentAiRoute =
   | "character-draft"

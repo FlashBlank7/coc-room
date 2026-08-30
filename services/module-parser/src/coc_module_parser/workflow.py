@@ -73,53 +73,6 @@ _USAGE_FIELDS = (
     "reasoning_output_tokens",
 )
 
-# ``max_chunk_chars`` is a useful upper bound for mostly Latin text, but it
-# substantially underestimates the prompt load of CJK-heavy PDF extraction:
-# one normalized character commonly occupies three UTF-8 bytes.  Keep the
-# source portion of each live Codex request below a conservative byte budget
-# before adding the fixed instructions and target schema.  The floor matches
-# ParseConfig's minimum chunk size and the 500-character rounding keeps cache
-# identities stable instead of changing for tiny source edits.
-CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT = 9_000
-CODEX_CHUNK_CHAR_FLOOR = 1_000
-CODEX_CHUNK_CHAR_ROUNDING = 500
-
-
-def _codex_safe_chunk_chars(
-    text: str,
-    *,
-    max_chunk_chars: int,
-    overlap_chars: int,
-) -> int:
-    """Return a deterministic char cap whose segmented chunks fit the byte budget.
-
-    This is deliberately a local sizing heuristic, not tokenization and not a
-    provider call.  It leaves ordinary Latin inputs at their configured cap and
-    only lowers dense multilingual inputs whose actual UTF-8 payload is larger.
-    """
-
-    candidate = max(max_chunk_chars, CODEX_CHUNK_CHAR_FLOOR)
-    while candidate > CODEX_CHUNK_CHAR_FLOOR:
-        bounded_overlap = min(overlap_chars, candidate - 1)
-        chunks = segment_text(text, candidate, bounded_overlap)
-        largest = max(
-            (len(chunk.text.encode("utf-8")) for chunk in chunks),
-            default=0,
-        )
-        if largest <= CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT:
-            return candidate
-        scaled = int(candidate * CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT / largest)
-        rounded = (scaled // CODEX_CHUNK_CHAR_ROUNDING) * CODEX_CHUNK_CHAR_ROUNDING
-        next_candidate = max(CODEX_CHUNK_CHAR_FLOOR, rounded)
-        if next_candidate >= candidate:
-            next_candidate = max(
-                CODEX_CHUNK_CHAR_FLOOR,
-                candidate - CODEX_CHUNK_CHAR_ROUNDING,
-            )
-        candidate = next_candidate
-    return candidate
-
-
 def _merge_provider_usage(total: dict[str, int], observed: dict[str, int]) -> None:
     for key in _USAGE_FIELDS:
         value = observed.get(key)
@@ -555,66 +508,19 @@ class ModuleParser:
         config = state["config"]
         max_chunk_chars = config.max_chunk_chars
         overlap_chars = config.chunk_overlap_chars
-        codex_utf8_soft_limit_applied = False
-        if (
-            not config.mock
-            and config.provider == "codex"
-            and config.codex_auto_shrink_on_timeout
-        ):
-            # Avoid paying for a predictably oversized first attempt. The timeout
-            # fallback setting doubles as the conservative live-Codex initial cap;
-            # a timeout at this size can still halve the document once more.
-            max_chunk_chars = min(
-                max_chunk_chars, config.codex_timeout_fallback_chunk_chars
-            )
-            overlap_chars = min(
-                overlap_chars,
-                config.codex_timeout_fallback_overlap_chars,
-                max_chunk_chars - 1,
-            )
-            safe_chunk_chars = _codex_safe_chunk_chars(
-                state["normalized_text"],
-                max_chunk_chars=max_chunk_chars,
-                overlap_chars=overlap_chars,
-            )
-            if safe_chunk_chars < max_chunk_chars:
-                max_chunk_chars = safe_chunk_chars
-                overlap_chars = min(overlap_chars, max_chunk_chars - 1)
-                codex_utf8_soft_limit_applied = True
         chunks = segment_text(
             state["normalized_text"],
             max_chunk_chars,
             overlap_chars,
         )
-        if (
-            not config.mock
-            and config.provider == "codex"
-            and len(chunks) > config.max_codex_chunks
-        ):
-            raise ProviderResponseError(
-                "Codex input would require too many chunks; split the source into smaller modules",
-                retryable=False,
-                code="CODEX_INPUT_TOO_LARGE",
-            )
-        full_chunk_count = len(chunks)
-        if config.codex_probe_first_chunk and chunks:
-            chunks = chunks[:1]
         reporter(
             "segment",
             0.18,
             f"Prepared {len(chunks)} source chunk(s)",
             {
                 "chunk_count": len(chunks),
-                "full_chunk_count": full_chunk_count,
-                "probe_first_chunk": config.codex_probe_first_chunk,
                 "max_chunk_chars": max_chunk_chars,
                 "overlap_chars": overlap_chars,
-                "codex_utf8_soft_limit_applied": codex_utf8_soft_limit_applied,
-                "codex_source_chunk_utf8_soft_limit": (
-                    CODEX_SOURCE_CHUNK_UTF8_SOFT_LIMIT
-                    if not config.mock and config.provider == "codex"
-                    else None
-                ),
             },
         )
         return {
@@ -688,8 +594,6 @@ class ModuleParser:
                 extraction_stage=stage,
             )
 
-        budget_issue_recorded = False
-        provider_stopped = False
         extract_stage = getattr(extractor, "extract_stage")
         for index, chunk in enumerate(chunks):
             fraction = index / max(len(chunks), 1)
@@ -730,69 +634,16 @@ class ModuleParser:
                             },
                         )
 
-            missing_stages = [
-                stage for stage, _model in stages if stage not in stage_results
-            ]
-            if (
-                not provider_stopped
-                and attempts + len(missing_stages) > config.max_codex_attempts
-            ):
-                provider_stopped = True
-                if not budget_issue_recorded:
-                    issues.append(
-                        ParseIssueV1(
-                            severity=IssueSeverity.ERROR,
-                            code="CODEX_CALL_LIMIT",
-                            stage="extract",
-                            message=(
-                                "The remaining Codex call budget cannot complete both "
-                                "uncached stages for this chunk; no partial chunk was merged."
-                            ),
-                            chunk_id=chunk.id,
-                            retryable=False,
-                        )
-                    )
-                    budget_issue_recorded = True
-
             chunk_usage: dict[str, int] = {}
             chunk_failed = False
             for stage, expected_model in stages:
                 if stage in stage_results:
                     continue
-                if provider_stopped:
-                    chunk_failed = True
-                    break
 
                 previous_error: str | None = None
                 failures: list[ExtractionError] = []
                 result: CodexWorldFragmentV1 | CodexEvidenceFragmentV1 | None = None
                 for retry in range(config.max_retries + 1):
-                    remaining_siblings = sum(
-                        1
-                        for later_stage, _later_model in stages
-                        if later_stage not in stage_results and later_stage != stage
-                    )
-                    if (
-                        attempts + 1 + remaining_siblings
-                        > config.max_codex_attempts
-                    ):
-                        if not budget_issue_recorded:
-                            issues.append(
-                                ParseIssueV1(
-                                    severity=IssueSeverity.ERROR,
-                                    code="CODEX_CALL_LIMIT",
-                                    stage="extract",
-                                    message=(
-                                        "The remaining Codex call budget cannot finish this "
-                                        "chunk atomically; no partial chunk was merged."
-                                    ),
-                                    chunk_id=chunk.id,
-                                    retryable=False,
-                                )
-                            )
-                            budget_issue_recorded = True
-                        provider_stopped = True
-                        break
                     attempts += 1
 
                     def provider_progress(
@@ -856,16 +707,6 @@ class ModuleParser:
                         break
                     except ExtractionError as exc:
                         failures.append(exc)
-                        if (
-                            isinstance(exc, ProviderResponseError)
-                            and exc.code in {"CODEX_TIMEOUT", "CODEX_CLI_STALLED"}
-                        ):
-                            # Both conditions mean this invocation made no usable
-                            # progress.  Preserve validated sibling stages in cache,
-                            # stop issuing new paid calls, and return a repairable
-                            # partial draft instead of crashing the whole import.
-                            provider_stopped = True
-                            break
                         if isinstance(exc, ProviderResponseError) and not exc.retryable:
                             raise
                         previous_error = f"{exc.code}: {str(exc)}"
@@ -900,27 +741,20 @@ class ModuleParser:
 
                 if result is None:
                     last = failures[-1] if failures else None
-                    issue_code = (
-                        "CODEX_TIMEOUT"
-                        if provider_stopped
-                        and isinstance(last, ProviderResponseError)
-                        and last.code == "CODEX_TIMEOUT"
-                        else (last.code if last else "CODEX_CALL_LIMIT")
-                    )
-                    if issue_code != "CODEX_CALL_LIMIT" or not budget_issue_recorded:
-                        issues.append(
-                            ParseIssueV1(
-                                severity=IssueSeverity.ERROR,
-                                code=issue_code,
-                                stage="extract",
-                                message=(
-                                    f"Chunk {chunk.id} {stage} stage did not complete; "
-                                    "its other stage was not merged into the module draft."
-                                ),
-                                chunk_id=chunk.id,
-                                retryable=bool(last and last.retryable),
-                            )
+                    issue_code = last.code if last else "EXTRACTION_FAILED"
+                    issues.append(
+                        ParseIssueV1(
+                            severity=IssueSeverity.ERROR,
+                            code=issue_code,
+                            stage="extract",
+                            message=(
+                                f"Chunk {chunk.id} {stage} stage did not complete; "
+                                "its other stage was not merged into the module draft."
+                            ),
+                            chunk_id=chunk.id,
+                            retryable=bool(last and last.retryable),
                         )
+                    )
                     chunk_failed = True
                     break
 
@@ -1001,11 +835,8 @@ class ModuleParser:
             separators=(",", ":"),
         )
         schema_sha = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()
-        budget_issue_recorded = False
-        provider_stopped = False
         active_max_chunk_chars = state["chunk_max_chars"]
         active_overlap_chars = state["chunk_overlap_chars"]
-        fallback_applied = False
 
         def identity_for(
             chunk: TextChunk, *, max_chunk_chars: int, overlap_chars: int
@@ -1036,62 +867,7 @@ class ModuleParser:
                 schema_sha256=schema_sha,
             )
 
-        original_first_identity = (
-            identity_for(
-                chunks[0],
-                max_chunk_chars=active_max_chunk_chars,
-                overlap_chars=active_overlap_chars,
-            )
-            if chunks
-            else None
-        )
-        if (
-            cache is not None
-            and original_first_identity is not None
-            and config.provider == "codex"
-            and not config.mock
-            and config.codex_auto_shrink_on_timeout
-            and cache.load(original_first_identity) is None
-        ):
-            split_plan = cache.load_timeout_split_plan(original_first_identity)
-            if split_plan is not None:
-                planned_chunks = segment_text(
-                    state["normalized_text"],
-                    split_plan.max_chunk_chars,
-                    split_plan.overlap_chars,
-                )
-                if len(planned_chunks) <= config.max_codex_chunks:
-                    chunks = planned_chunks
-                    active_max_chunk_chars = split_plan.max_chunk_chars
-                    active_overlap_chars = split_plan.overlap_chars
-                    fallback_applied = True
-                    issues.append(
-                        ParseIssueV1(
-                            severity=IssueSeverity.INFO,
-                            code="CODEX_SPLIT_PLAN_RESTORED",
-                            stage="extract",
-                            message=(
-                                "Reused the smaller chunk plan recorded after an earlier "
-                                "Codex timeout."
-                            ),
-                            chunk_id=chunks[0].id if chunks else None,
-                        )
-                    )
-                    reporter(
-                        "extract",
-                        0.19,
-                        f"Restored {len(chunks)} smaller Codex chunk(s) from cache",
-                        {
-                            "event": "codex_split_plan_restored",
-                            "chunk_count": len(chunks),
-                            "max_chunk_chars": active_max_chunk_chars,
-                            "overlap_chars": active_overlap_chars,
-                        },
-                    )
-
-        index = 0
-        while index < len(chunks):
-            chunk = chunks[index]
+        for index, chunk in enumerate(chunks):
             fraction = index / max(len(chunks), 1)
             reporter(
                 "extract",
@@ -1113,53 +889,13 @@ class ModuleParser:
                     f"Loaded chunk {index + 1}/{len(chunks)} from cache",
                     {"chunk_id": chunk.id, "cached": True},
                 )
-                index += 1
-                continue
-
-            if provider_stopped:
-                index += 1
-                continue
-
-            # Exhausting the provider-call budget must not discard later cache hits.
-            # Keep scanning every chunk, but never invoke Codex again for cache misses.
-            if (
-                not config.mock
-                and config.provider == "codex"
-                and attempts >= config.max_codex_attempts
-            ):
-                if not budget_issue_recorded:
-                    issues.append(
-                        ParseIssueV1(
-                            severity=IssueSeverity.ERROR,
-                            code="CODEX_CALL_LIMIT",
-                            stage="extract",
-                            message=(
-                                "Codex call budget was exhausted; uncached content requires "
-                                "manual repair or a new explicitly started parse."
-                            ),
-                            chunk_id=chunk.id,
-                            retryable=False,
-                        )
-                    )
-                    budget_issue_recorded = True
-                index += 1
                 continue
 
             previous_error: str | None = None
             fragment: ModuleFragmentV1 | None = None
             failures: list[ExtractionError] = []
-            budget_exhausted = False
-            fallback_requested = False
-            timeout_stopped_provider = False
             chunk_usage: dict[str, int] = {}
             for retry in range(config.max_retries + 1):
-                if (
-                    not config.mock
-                    and config.provider == "codex"
-                    and attempts >= config.max_codex_attempts
-                ):
-                    budget_exhausted = True
-                    break
                 attempts += 1
 
                 def provider_progress(
@@ -1208,29 +944,6 @@ class ModuleParser:
                     break
                 except ExtractionError as exc:
                     failures.append(exc)
-                    if (
-                        isinstance(exc, ProviderResponseError)
-                        and exc.code == "CODEX_TIMEOUT"
-                    ):
-                        fallback_max_chars = min(
-                            config.codex_timeout_fallback_chunk_chars,
-                            max(active_max_chunk_chars // 2, 1_000),
-                        )
-                        can_fallback = (
-                            config.provider == "codex"
-                            and not config.mock
-                            and config.codex_auto_shrink_on_timeout
-                            and not fallback_applied
-                            and index == 0
-                            and not fragments
-                            and chunk.start == 0
-                            and fallback_max_chars < active_max_chunk_chars
-                        )
-                        if can_fallback:
-                            fallback_requested = True
-                        else:
-                            timeout_stopped_provider = True
-                        break
                     if isinstance(exc, ProviderResponseError) and not exc.retryable:
                         raise
                     previous_error = f"{exc.code}: {str(exc)}"
@@ -1247,112 +960,7 @@ class ModuleParser:
                     _merge_provider_usage(provider_usage, observed_usage)
                     _merge_provider_usage(chunk_usage, observed_usage)
 
-            if fallback_requested:
-                fallback_max_chars = min(
-                    config.codex_timeout_fallback_chunk_chars,
-                    max(active_max_chunk_chars // 2, 1_000),
-                )
-                fallback_overlap_chars = min(
-                    config.codex_timeout_fallback_overlap_chars,
-                    fallback_max_chars - 1,
-                )
-                fallback_chunks = segment_text(
-                    state["normalized_text"],
-                    fallback_max_chars,
-                    fallback_overlap_chars,
-                )
-                if len(fallback_chunks) > config.max_codex_chunks:
-                    raise ProviderResponseError(
-                        "Smaller Codex chunks would exceed the configured chunk limit",
-                        retryable=False,
-                        code="CODEX_INPUT_TOO_LARGE",
-                    )
-                if cache is not None and original_first_identity is not None:
-                    cache.store_timeout_split_plan(
-                        original_first_identity,
-                        max_chunk_chars=fallback_max_chars,
-                        overlap_chars=fallback_overlap_chars,
-                    )
-                issues.append(
-                    ParseIssueV1(
-                        severity=IssueSeverity.INFO,
-                        code="CODEX_TIMEOUT_RESEGMENTED",
-                        stage="extract",
-                        message=(
-                            "The first Codex chunk timed out, so the document was safely "
-                            f"resegmented into {len(fallback_chunks)} smaller chunks."
-                        ),
-                        chunk_id=chunk.id,
-                    )
-                )
-                reporter(
-                    "extract",
-                    0.2,
-                    (
-                        "First Codex chunk timed out; continuing with "
-                        f"{len(fallback_chunks)} smaller chunks"
-                    ),
-                    {
-                        "event": "codex_timeout_resegmented",
-                        "previous_chunk_id": chunk.id,
-                        "chunk_count": len(fallback_chunks),
-                        "max_chunk_chars": fallback_max_chars,
-                        "overlap_chars": fallback_overlap_chars,
-                    },
-                )
-                chunks = fallback_chunks
-                active_max_chunk_chars = fallback_max_chars
-                active_overlap_chars = fallback_overlap_chars
-                fallback_applied = True
-                index = 0
-                continue
-
-            if timeout_stopped_provider:
-                issues.append(
-                    ParseIssueV1(
-                        severity=IssueSeverity.ERROR,
-                        code="CODEX_TIMEOUT",
-                        stage="extract",
-                        message=(
-                            f"Chunk {chunk.id} timed out; validated cached chunks were kept "
-                            "and no further uncached Codex calls were started."
-                        ),
-                        chunk_id=chunk.id,
-                        retryable=False,
-                    )
-                )
-                provider_stopped = True
-                reporter(
-                    "extract",
-                    0.2 + 0.42 * fraction,
-                    "Codex timed out; preserving validated chunks for a resumable retry",
-                    {
-                        "event": "codex_timeout_paused",
-                        "chunk_id": chunk.id,
-                    },
-                )
-                index += 1
-                continue
-
             if fragment is None:
-                if budget_exhausted:
-                    if not budget_issue_recorded:
-                        issues.append(
-                            ParseIssueV1(
-                                severity=IssueSeverity.ERROR,
-                                code="CODEX_CALL_LIMIT",
-                                stage="extract",
-                                message=(
-                                    "Codex call budget was exhausted while retrying this chunk; "
-                                    "uncached content was left for manual repair."
-                                ),
-                                chunk_id=chunk.id,
-                                retryable=False,
-                            )
-                        )
-                        budget_issue_recorded = True
-                    index += 1
-                    continue
                 last = failures[-1] if failures else None
                 issues.append(
                     ParseIssueV1(
@@ -1367,7 +975,6 @@ class ModuleParser:
                         retryable=bool(last and last.retryable),
                     )
                 )
-                index += 1
                 continue
             fragments.append(fragment)
             if cache:
@@ -1382,7 +989,6 @@ class ModuleParser:
                     "usage": chunk_usage,
                 },
             )
-            index += 1
 
         reporter("extract", 0.64, "Entity extraction complete", None)
         return {

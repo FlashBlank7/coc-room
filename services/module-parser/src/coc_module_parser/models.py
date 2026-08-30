@@ -61,17 +61,17 @@ class ModuleMetadataV1(StrictModel):
 class ChapterV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
-    summary: str = Field(default="", max_length=10_000)
+    summary: str = Field(default="", max_length=100_000)
     scene_ids: list[str] = Field(default_factory=list)
 
 
 class LocationV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     name: str = Field(min_length=1, max_length=300)
-    description: str = Field(default="", max_length=30_000)
+    description: str = Field(default="", max_length=100_000)
     player_description: str | None = Field(
         default=None,
-        max_length=20_000,
+        max_length=100_000,
         description=(
             "Conservative spoiler-free first-impression text containing only facts an "
             "investigator can immediately perceive. Null when no safe wording is supported."
@@ -118,10 +118,10 @@ class CharacterV1(StrictModel):
 class NPCV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     name: str = Field(min_length=1, max_length=300)
-    description: str = Field(default="", max_length=30_000)
+    description: str = Field(default="", max_length=100_000)
     player_description: str | None = Field(
         default=None,
-        max_length=20_000,
+        max_length=100_000,
         description=(
             "Conservative spoiler-free first-impression text containing only immediately "
             "perceptible appearance or behavior. Null when no safe wording is supported."
@@ -157,12 +157,12 @@ class ClueV1(StrictModel):
     title: str = Field(min_length=1, max_length=300)
     content: str = Field(
         min_length=1,
-        max_length=30_000,
+        max_length=100_000,
         description="Keeper-facing clue details, including hidden meaning and consequences.",
     )
     handout_text: str | None = Field(
         default=None,
-        max_length=30_000,
+        max_length=200_000,
         description=(
             "Exact player-safe text explicitly present in the source. Leave null when the "
             "source does not provide a handout or player-facing wording."
@@ -187,9 +187,9 @@ class SuggestedCheckV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     skill: str = Field(min_length=1, max_length=200)
     difficulty: CheckDifficulty = CheckDifficulty.REGULAR
-    purpose: str = Field(default="", max_length=2_000)
-    success: str = Field(default="", max_length=10_000)
-    failure: str = Field(default="", max_length=10_000)
+    purpose: str = Field(default="", max_length=20_000)
+    success: str = Field(default="", max_length=50_000)
+    failure: str = Field(default="", max_length=50_000)
     scene_id: str | None = None
     source_refs: list[SourceRefV1] = Field(default_factory=list)
 
@@ -197,7 +197,7 @@ class SuggestedCheckV1(StrictModel):
 class SceneV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
-    summary: str = Field(default="", max_length=30_000)
+    summary: str = Field(default="", max_length=100_000)
     location_ids: list[str] = Field(default_factory=list)
     npc_ids: list[str] = Field(default_factory=list)
     clue_ids: list[str] = Field(default_factory=list)
@@ -210,10 +210,10 @@ class SceneV1(StrictModel):
 class HandoutV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=240)
-    description: str = Field(default="", max_length=20_000)
+    description: str = Field(default="", max_length=100_000)
     content: str = Field(
         min_length=1,
-        max_length=50_000,
+        max_length=200_000,
         description="Exact player-facing document text from the source, not a keeper summary.",
     )
     scene_ids: list[str] = Field(default_factory=list)
@@ -224,14 +224,14 @@ class EntityRelationV1(StrictModel):
     source_id: str = Field(pattern=ENTITY_ID_PATTERN)
     target_id: str = Field(pattern=ENTITY_ID_PATTERN)
     relation: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=2_000)
+    description: str = Field(default="", max_length=20_000)
     source_refs: list[SourceRefV1] = Field(default_factory=list)
 
 
 class KeeperNoteV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
-    content: str = Field(min_length=1, max_length=30_000)
+    content: str = Field(min_length=1, max_length=100_000)
     scene_ids: list[str] = Field(default_factory=list)
     source_refs: list[SourceRefV1] = Field(default_factory=list)
 
@@ -253,7 +253,7 @@ class ModulePackageV1(StrictModel):
     module_id: str = Field(pattern=ENTITY_ID_PATTERN)
     metadata: ModuleMetadataV1
     source: SourceDocumentV1
-    overview: str = Field(default="", max_length=50_000)
+    overview: str = Field(default="", max_length=200_000)
     chapters: list[ChapterV1] = Field(default_factory=list)
     scenes: list[SceneV1] = Field(default_factory=list)
     locations: list[LocationV1] = Field(default_factory=list)
@@ -431,7 +431,7 @@ class ParseResultV1(StrictModel):
 
 
 class ParseConfig(StrictModel):
-    source_text: str = Field(min_length=1, max_length=5_000_000)
+    source_text: str = Field(min_length=1, max_length=50_000_000)
     source_name: str = Field(default="pasted-text.md", min_length=1, max_length=260)
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_media_type: Literal["text/plain", "text/markdown"] = "text/markdown"
@@ -441,22 +441,12 @@ class ParseConfig(StrictModel):
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     base_url: str = Field(default="https://api.deepseek.com", max_length=500)
     codex_executable: Path | None = None
-    max_chunk_chars: int = Field(default=12_000, ge=1_000, le=100_000)
+    max_chunk_chars: int = Field(default=30_000, ge=1_000, le=1_000_000)
     chunk_overlap_chars: int = Field(default=500, ge=0, le=10_000)
-    max_retries: int = Field(default=2, ge=0, le=5)
-    max_output_tokens: int = Field(default=16_000, ge=1_000, le=64_000)
-    max_codex_chunks: int = Field(default=64, ge=1, le=128)
-    max_codex_attempts: int = Field(default=96, ge=1, le=192)
-    codex_timeout_seconds: float = Field(default=900.0, ge=30.0, le=1_800.0)
+    max_retries: int = Field(default=3, ge=0, le=20)
+    max_output_tokens: int = Field(default=32_000, ge=1_000, le=512_000)
+    codex_timeout_seconds: float = Field(default=3_600.0, ge=30.0, le=86_400.0)
     codex_heartbeat_seconds: float = Field(default=15.0, ge=5.0, le=60.0)
-    codex_auto_shrink_on_timeout: bool = True
-    codex_timeout_fallback_chunk_chars: int = Field(
-        default=6_000, ge=1_000, le=50_000
-    )
-    codex_timeout_fallback_overlap_chars: int = Field(
-        default=250, ge=0, le=10_000
-    )
-    codex_probe_first_chunk: bool = False
     cache_dir: Path | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -464,14 +454,6 @@ class ParseConfig(StrictModel):
     def validate_chunking(self) -> ParseConfig:
         if self.chunk_overlap_chars >= self.max_chunk_chars:
             raise ValueError("chunk_overlap_chars must be smaller than max_chunk_chars")
-        if (
-            self.codex_timeout_fallback_overlap_chars
-            >= self.codex_timeout_fallback_chunk_chars
-        ):
-            raise ValueError(
-                "codex_timeout_fallback_overlap_chars must be smaller than "
-                "codex_timeout_fallback_chunk_chars"
-            )
         if not self.mock and self.provider == "deepseek" and self.api_key is None:
             raise ValueError("api_key is required for the DeepSeek provider")
         if not self.mock and self.provider == "deepseek" and not self.model.strip():

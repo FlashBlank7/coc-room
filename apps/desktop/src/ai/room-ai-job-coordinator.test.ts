@@ -123,13 +123,17 @@ describe("RoomAiJobCoordinator", () => {
     coordinator.shutdown();
   });
 
-  it("rejects descriptions over 8,000 Unicode code points before transport", async () => {
+  it("rejects descriptions over 100,000 Unicode code points before transport", async () => {
     const session = fakeSession(false, playerSeat);
     const coordinator = new RoomAiJobCoordinator({ session, provider: "codex", model: "" });
-    await expect(coordinator.requestCharacterDraft("蝶".repeat(8_001), "Alice"))
-      .rejects.toThrow("8000");
+    await expect(coordinator.requestCharacterDraft("蝶".repeat(100_001), "Alice"))
+      .rejects.toThrow("100000");
     expect(session.sendAiJobRequest).not.toHaveBeenCalled();
+
+    const atLimit = coordinator.requestCharacterDraft("蝶".repeat(100_000), "Alice");
+    expect(session.sendAiJobRequest).toHaveBeenCalledTimes(1);
     coordinator.shutdown();
+    await expect(atLimit).rejects.toThrow("房间 AI 草稿代理已经关闭");
   });
 });
 

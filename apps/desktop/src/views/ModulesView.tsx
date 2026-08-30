@@ -327,7 +327,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   }, [draft, modules, openModule, pendingRoomModule, recoveryChecked, recoveryDraft, selectedModuleId, showStoredModule]);
 
   useEffect(() => {
-    if (!recoveryChecked || !draftDirty || isMockDraft || !parsedDraft?.success) return;
+    if (!recoveryChecked || !draftDirty || !parsedDraft?.success) return;
     const modulePackage = parsedDraft.data;
     const recoveryGeneration = draftRecoveryGenerationRef.current;
     const timer = globalThis.setTimeout(() => {
@@ -426,9 +426,9 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     if (!confirmReplaceDraft("选择新的原文")) return;
     try {
       if (!/\.(txt|md|markdown|docx|pdf|zip)$/i.test(file.name)) {
-        throw new Error("仅支持 TXT、Markdown、DOCX、PDF 或只含一个文档的安全 ZIP");
+        throw new Error("仅支持 TXT、Markdown、DOCX、PDF 或安全 ZIP");
       }
-      const maximum = /\.pdf$/i.test(file.name) ? 50 * 1024 * 1024 : 25 * 1024 * 1024;
+      const maximum = /\.pdf$/i.test(file.name) ? 200 * 1024 * 1024 : 100 * 1024 * 1024;
       if (file.size < 1 || file.size > maximum) throw new Error(`文件为空或超过 ${maximum / 1024 / 1024} MiB 上限`);
       setPdfVisualPages([]);
       setSourceName(file.name);
@@ -608,10 +608,6 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   };
 
   const saveDraft = async () => {
-    if (isMockDraft) {
-      setWorkflowError({ step: "review", message: "模拟结果只用于检查界面，不能保存为正式备团资料。请使用 Codex 或 DeepSeek 完成真实整理。" });
-      return;
-    }
     setSavingDraft(true);
     setWorkflowError(undefined);
     try {
@@ -1197,7 +1193,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     </div>
                     <p className="mt-2 text-sm text-zinc-300">
                       {isMockDraft
-                        ? "这份内置示例只用于检查编辑流程，不是真实解析结果，也不能保存或用于跑团。请返回左侧使用 Codex 或 DeepSeek 整理原文。"
+                        ? "这是离线模拟结果（未调用 Codex 或 DeepSeek）。可以直接保存使用，也可以返回左侧做真实整理。"
                         : draftOrigin === "parsed"
                           ? "先看下方的“开团前检查”，确认开场、关键人物和线索没有明显遗漏；有问题就点“检查并修正”。"
                           : "确认这次修改没有误删内容，再保存。旧内容会自动保留，可以随时找回。"}
@@ -1209,9 +1205,9 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     )}
                     {!isMockDraft && draftRecoveryNotice && <p role="status" className="mt-2 text-xs text-emerald-300">{draftRecoveryNotice}</p>}
                   </div>
-                  <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || savingDraft || isMockDraft}>
+                  <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || savingDraft}>
                     {savingDraft ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                    {savingDraft ? "正在保存" : isMockDraft ? "模拟结果不能保存" : draftOrigin === "parsed" ? "确认并保存备团资料" : "保存修改"}
+                    {savingDraft ? "正在保存" : draftOrigin === "parsed" ? "确认并保存备团资料" : "保存修改"}
                   </Button>
                 </div>
                 {warnings.length > 0 && (
@@ -1272,7 +1268,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                 <h2 className="font-semibold">检查整理结果</h2>
                 <p className="text-xs text-zinc-500">
                   {draftDirty && isMockDraft
-                    ? "当前是内置模拟数据，只能检查界面；不会保存或用于跑团。"
+                    ? "当前是离线模拟数据，可以保存后直接使用。"
                     : draftDirty && draftOrigin === "parsed"
                     ? "这还是草稿。先确认关键场景、人物和线索，再保存。"
                     : selectedModuleId && selectedRevision

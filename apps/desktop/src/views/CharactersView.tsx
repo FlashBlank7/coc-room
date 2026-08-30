@@ -145,7 +145,6 @@ export function CharactersView({
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiDraftNotice, setAiDraftNotice] = useState<string>();
-  const [rulesConfirmed, setRulesConfirmed] = useState(false);
   const [savingTarget, setSavingTarget] = useState<"personal" | "room">();
   const [roomEditBaseUpdatedAt, setRoomEditBaseUpdatedAt] = useState<string | null | "unknown">(
     ownRoomCharacter?.updatedAt ?? null,
@@ -200,7 +199,6 @@ export function CharactersView({
     && skill.value > 0
   ));
   const characterReady = identityReady && attributesReady && skillsReady;
-  const needsRulesConfirmation = Boolean(currentRoom && !selectedRoomCharacter && characterReady && !rulesConfirmed);
   const backgroundStarted = Object.values(draft.background).some((value) => value.trim().length > 0);
   const hasActiveStatus = Object.values(draft.status).some(Boolean);
   const awaitingPersonalLibrary = Boolean(
@@ -227,10 +225,6 @@ export function CharactersView({
       ? { href: "#character-attributes", label: "检查九项属性", detail: "按本团采用的车卡方式填写数值。" }
       : !skillsReady
         ? { href: "#character-skills", label: "添加常用技能", detail: "至少添加一项你最常使用的技能。" }
-        : needsRulesConfirmation
-          ? selectedPersonalRecord
-            ? { href: "#character-save-actions", label: `确认是否带入“${draft.name}”`, detail: "已选中这台电脑最近使用的调查员。和 KP 核对本团的车卡方式后即可加入现场。" }
-            : { href: "#character-save-actions", label: "和 KP 确认这张卡", detail: "确认属性生成与技能点分配符合本团采用的规则。" }
         : {
             href: "#character-save-actions",
             label: currentRoom ? "可以带入房间" : "基本资料可以保存",
@@ -269,7 +263,6 @@ export function CharactersView({
     setCleanSnapshot(characterDraftSnapshot(recent.character, recent.privateNotes));
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(roomCharacters.find((character) => character.id === recent.characterId)?.updatedAt ?? null);
-    setRulesConfirmed(false);
     setError(undefined);
   }, [currentRoom, dirty, personalCharacters, personalLibraryReady, roomCharacters, selectedPersonalRecord, selectedRoomCharacter, session?.isHost]);
 
@@ -339,7 +332,6 @@ export function CharactersView({
     setCleanSnapshot(characterDraftSnapshot(next, nextPrivateNotes));
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(roomCharacters.some((character) => character.id === next.id) ? next.updatedAt : null);
-    setRulesConfirmed(false);
     setError(preservedPreviousDraft
       ? "调查环境或席位已经切换；上一处的未保存草稿仍留在它自己的恢复点，不会带入这里。"
       : undefined);
@@ -407,7 +399,6 @@ export function CharactersView({
         ? recoverableDraft.baseRoomUpdatedAt ?? null
         : currentRoom ? "unknown" : null,
     );
-    setRulesConfirmed(false);
     setRecoverableDraft(undefined);
     setError(undefined);
   };
@@ -419,7 +410,6 @@ export function CharactersView({
     setCleanSnapshot(characterDraftSnapshot(character, notes));
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(roomCharacters.some((roomCharacter) => roomCharacter.id === character.id) ? character.updatedAt : null);
-    setRulesConfirmed(false);
     setError(undefined);
   };
 
@@ -427,7 +417,6 @@ export function CharactersView({
     updater: (current: Coc7Character) => Coc7Character,
     recalculateDerived = false,
   ) => {
-    setRulesConfirmed(false);
     setDraft((current) => {
       const next = updater(current);
       if (!recalculateDerived) return next;
@@ -590,7 +579,6 @@ export function CharactersView({
       if (!session.isHost && !isLocallyOwnedDraft) throw new Error("玩家只能把自己的角色带入房间");
       if (roomVersionConflict) throw new Error("房间里的角色卡已经更新，不能用旧编辑稿直接覆盖。请先备份草稿，再改用房间最新版。");
       if (!selectedRoomCharacter && !characterReady) throw new Error("请先填写姓名、职业、属性和至少一项常用技能");
-      if (!selectedRoomCharacter && !rulesConfirmed) throw new Error("带入房间前，请先确认这张卡符合本团采用的车卡规则");
       const character = prepareCharacterForSave(true);
       if (sessionV2) {
         await sessionV2.submitConfirmed({
@@ -637,7 +625,6 @@ export function CharactersView({
     setCleanSnapshot(undefined);
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(null);
-    setRulesConfirmed(false);
     setError(undefined);
   };
 
@@ -655,7 +642,6 @@ export function CharactersView({
       setCleanSnapshot(undefined);
       setPendingRoomSnapshot(undefined);
       setRoomEditBaseUpdatedAt(null);
-      setRulesConfirmed(false);
       setAiDraftNotice("这仍是未保存草稿。你可以只存进个人角色库；确认无误后，再选择是否带入当前房间。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -702,7 +688,6 @@ export function CharactersView({
     setCleanSnapshot(characterDraftSnapshot(character, imported.privateNotes));
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(null);
-    setRulesConfirmed(false);
     setError(undefined);
   };
 
@@ -839,7 +824,7 @@ export function CharactersView({
                     >
                       {selectedRoomCharacter
                         ? roomNeedsSync ? "去保存修改" : "去保存本机修改"
-                        : !characterReady ? "继续填写" : needsRulesConfirmation ? "去确认" : currentRoom ? "去带入房间" : "去保存"}
+                        : !characterReady ? "继续填写" : currentRoom ? "去带入房间" : "去保存"}
                     </a>
                   : <span role="status" className="inline-flex h-10 items-center text-sm text-zinc-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />读取角色库</span>}
               </div>
@@ -847,7 +832,6 @@ export function CharactersView({
                 <ReadinessStep ready={identityReady} label="1. 身份" pending="填写姓名与职业" />
                 <ReadinessStep ready={attributesReady} label="2. 属性已填" pending="填写属性数值" />
                 <ReadinessStep ready={skillsReady} label="3. 技能已填" pending="至少添加一项" />
-                {currentRoom && !selectedRoomCharacter && <ReadinessStep ready={rulesConfirmed} label="4. 团规确认" pending="与 KP 核对" />}
               </ol>
               <p className="mt-3 text-xs leading-5 text-zinc-500">这里检查的是跑团所需的基本字段，不会假定所有团都采用同一种属性生成或技能点规则。</p>
             </section>}
@@ -889,7 +873,7 @@ export function CharactersView({
                 <summary className="cursor-pointer font-medium text-zinc-200">想快速起步？用一句话生成草稿（可选）</summary>
                 <p className="mt-2 text-sm leading-6 text-zinc-400">描述年代、职业、性格和擅长的事。生成结果只会填入当前表单，确认前不会进入房间。</p>
                 <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
-                  <Textarea disabled={aiBusy || roomPaused} maxLength={8_000} className="min-h-28" value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="例如：1920 年代东京的谨慎女记者，擅长图书馆使用、心理学与摄影，害怕深海。" />
+                  <Textarea disabled={aiBusy || roomPaused} maxLength={100_000} className="min-h-28" value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="例如：1920 年代东京的谨慎女记者，擅长图书馆使用、心理学与摄影，害怕深海。" />
                   <Button className="justify-self-start" disabled={aiBusy || roomPaused || !aiPrompt.trim()} onClick={() => void generateCharacterDraft()}>
                     {aiBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成待审核草稿
                   </Button>
@@ -913,7 +897,6 @@ export function CharactersView({
                     setCleanSnapshot(undefined);
                     setPendingRoomSnapshot(undefined);
                     setRoomEditBaseUpdatedAt(null);
-                    setRulesConfirmed(false);
                     setAiDraftNotice("KP 正在审核玩家草稿；只有点击“带入当前房间”后，完整角色卡才会向房间发布。");
                   }}>打开审核</Button><Button variant="ghost" onClick={() => onDismissHostCharacterDraft?.(review.jobId)}>丢弃</Button></div>
                 </div>)}</div>
@@ -1116,17 +1099,6 @@ export function CharactersView({
             </Section>
 
             <div id="character-save-actions" className="sticky bottom-0 grid scroll-mt-6 gap-2 border-t border-zinc-800 bg-panel/95 py-4 backdrop-blur">
-              {currentRoom && !selectedRoomCharacter && canEdit && <label className={`flex items-start gap-3 rounded-lg border p-3 text-sm ${characterReady ? "border-amber-900/60 bg-amber-950/15 text-zinc-300" : "border-zinc-800 bg-zinc-950/60 text-zinc-500"}`}>
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  aria-label="已与 KP 确认属性和技能分配"
-                  disabled={!characterReady}
-                  checked={rulesConfirmed}
-                  onChange={(event) => setRulesConfirmed(event.target.checked)}
-                />
-                <span><b className="font-medium text-zinc-200">带入房间前确认</b><span className="mt-1 block text-xs leading-5 text-zinc-500">我已按本团采用的方式生成属性、分配职业/兴趣技能，并与 KP 核对。应用只检查基本字段，不会冒充完成规则校验。</span></span>
-              </label>}
               <div className="flex flex-wrap items-center gap-3">
                 {isLocallyOwnedDraft && (
                   <Button
@@ -1140,7 +1112,7 @@ export function CharactersView({
                 {currentRoom && (
                   <Button
                     onClick={() => void saveToCurrentRoom()}
-                    disabled={!canEdit || !session || roomPaused || roomVersionConflict || !roomNeedsSync || (!selectedRoomCharacter && (!characterReady || !rulesConfirmed))}
+                    disabled={!canEdit || !session || roomPaused || roomVersionConflict || !roomNeedsSync || (!selectedRoomCharacter && !characterReady)}
                   >
                     {savingTarget === "room" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                     {savingTarget === "room" ? "正在等待房间确认…" : selectedRoomCharacter

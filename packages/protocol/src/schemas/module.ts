@@ -13,7 +13,7 @@ export const moduleMetadataSchema = z
     authors: z.array(z.string().min(1).max(160)).max(32),
     language: z.string().min(2).max(35),
     source: z.string().max(500).optional(),
-    summary: z.string().max(8_000),
+    summary: z.string().max(50_000),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
   })
@@ -31,7 +31,7 @@ export const moduleSourceDocumentSchema = z
 const moduleEntityBase = z.object({
   id: entityIdSchema,
   name: z.string().min(1).max(240),
-  description: z.string().max(20_000),
+  description: z.string().max(100_000),
   sourceRefs: z.array(sourceReferenceSchema).max(100),
 });
 
@@ -41,34 +41,34 @@ export const moduleChapterSchema = z
     title: z.string().min(1).max(240),
     order: z.number().int().nonnegative(),
     sceneIds: z.array(entityIdSchema).max(500),
-    notes: z.string().max(20_000),
+    notes: z.string().max(100_000),
   })
   .strict();
 
 export const moduleSceneSchema = moduleEntityBase
   .extend({
-    synopsis: z.string().max(20_000),
+    synopsis: z.string().max(100_000),
     locationIds: z.array(entityIdSchema).max(100),
     npcIds: z.array(entityIdSchema).max(200),
     clueIds: z.array(entityIdSchema).max(200),
     handoutIds: z.array(entityIdSchema).max(200),
     suggestedCheckIds: z.array(entityIdSchema).max(100),
-    keeperNotes: z.string().max(20_000),
+    keeperNotes: z.string().max(100_000),
   })
   .strict();
 
 export const moduleLocationSchema = moduleEntityBase
   .extend({
-    playerDescription: z.string().max(20_000).optional(),
+    playerDescription: z.string().max(100_000).optional(),
     aliases: z.array(z.string().min(1).max(160)).max(50),
   })
   .strict();
 
 export const moduleNpcSchema = moduleEntityBase
   .extend({
-    playerDescription: z.string().max(20_000).optional(),
+    playerDescription: z.string().max(100_000).optional(),
     role: z.string().max(1_000),
-    motivation: z.string().max(4_000),
+    motivation: z.string().max(20_000),
     traits: z.array(z.string().min(1).max(500)).max(100),
     character: z
       .object({
@@ -84,7 +84,7 @@ export const moduleNpcSchema = moduleEntityBase
 
 export const moduleClueSchema = moduleEntityBase
   .extend({
-    revealText: z.string().max(20_000),
+    revealText: z.string().max(100_000),
     isCore: z.boolean(),
   })
   .strict();
@@ -92,7 +92,7 @@ export const moduleClueSchema = moduleEntityBase
 export const moduleHandoutSchema = moduleEntityBase
   .extend({
     title: z.string().min(1).max(240),
-    content: z.string().max(50_000),
+    content: z.string().max(200_000),
   })
   .strict();
 
@@ -101,9 +101,9 @@ export const moduleSuggestedCheckSchema = z
     id: entityIdSchema,
     skill: z.string().min(1).max(160),
     difficulty: z.enum(["regular", "hard", "extreme"]),
-    purpose: z.string().max(4_000),
-    onSuccess: z.string().max(8_000),
-    onFailure: z.string().max(8_000),
+    purpose: z.string().max(20_000),
+    onSuccess: z.string().max(50_000),
+    onFailure: z.string().max(50_000),
     sourceRefs: z.array(sourceReferenceSchema).max(100),
   })
   .strict();
@@ -112,7 +112,7 @@ export const moduleKeeperNoteSchema = z
   .object({
     id: entityIdSchema,
     title: z.string().min(1).max(240),
-    content: z.string().max(50_000),
+    content: z.string().max(200_000),
     relatedEntityIds: z.array(entityIdSchema).max(200),
     sourceRefs: z.array(sourceReferenceSchema).max(100),
   })
@@ -124,7 +124,7 @@ export const moduleEntityRelationSchema = z
     fromEntityId: entityIdSchema,
     toEntityId: entityIdSchema,
     kind: z.string().min(1).max(120),
-    description: z.string().max(4_000),
+    description: z.string().max(20_000),
     sourceRefs: z.array(sourceReferenceSchema).max(100),
   })
   .strict();
@@ -154,7 +154,7 @@ export const modulePackageSchema = z
     moduleId: entityIdSchema,
     revision: z.number().int().positive(),
     metadata: moduleMetadataSchema,
-    overview: z.string().max(50_000),
+    overview: z.string().max(200_000),
     sourceDocuments: z.array(moduleSourceDocumentSchema).max(100),
     chapters: z.array(moduleChapterSchema).max(500),
     scenes: z.array(moduleSceneSchema).max(2_000),

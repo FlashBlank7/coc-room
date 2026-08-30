@@ -99,9 +99,13 @@ describe("CodexImageExecutor", () => {
   it("uses portrait and landscape defaults while preserving Unicode limits", () => {
     expect(validateCodexImageJob({ kind: "npc", description: "角色" }).aspectRatio).toBe("portrait");
     expect(validateCodexImageJob({ kind: "location", description: "地点" }).aspectRatio).toBe("landscape");
-    expect(() => validateCodexImageJob({ kind: "cover", description: "蝶".repeat(4_001) })).toThrowError(
+    expect(validateCodexImageJob({ kind: "cover", description: "蝶".repeat(20_000) }).description)
+      .toHaveLength(20_000);
+    expect(() => validateCodexImageJob({ kind: "cover", description: "蝶".repeat(20_001) })).toThrowError(
       CodexImageExecutorError,
     );
+    expect(() => validateCodexImageJob({ kind: "cover", description: "封面", style: "雾".repeat(2_001) }))
+      .toThrowError(CodexImageExecutorError);
   });
 
   it("preserves structured quota and unsafe-path failures without provider fallback", async () => {

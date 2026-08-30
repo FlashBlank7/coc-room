@@ -106,12 +106,6 @@ def _parse_config(payload: dict[str, Any]) -> tuple[ParseConfig, LoadedSource]:
         loaded = load_source_text(
             payload["source_text"], payload.get("source_name", "pasted-text.md")
         )
-    provider = payload.get("provider", "deepseek")
-    if loaded.is_pdf and provider != "codex":
-        raise InputError(
-            "PDF sources require the Codex provider",
-            code="PDF_CODEX_REQUIRED",
-        )
     allowed = {
         "api_key",
         "provider",
@@ -123,13 +117,8 @@ def _parse_config(payload: dict[str, Any]) -> tuple[ParseConfig, LoadedSource]:
         "chunk_overlap_chars",
         "max_retries",
         "max_output_tokens",
-        "max_codex_chunks",
-        "max_codex_attempts",
         "codex_timeout_seconds",
         "codex_heartbeat_seconds",
-        "codex_auto_shrink_on_timeout",
-        "codex_timeout_fallback_chunk_chars",
-        "codex_timeout_fallback_overlap_chars",
         "cache_dir",
         "generated_at",
     }
@@ -153,7 +142,7 @@ def _pdf_visual_page_numbers(
         if loaded.is_pdf and config.provider == "codex" and not config.mock:
             return tuple(
                 page.page_number for page in loaded.pdf_pages if page.needs_vision
-            )[:4]
+            )
         return ()
     if not loaded.is_pdf:
         raise InputError(
@@ -167,13 +156,12 @@ def _pdf_visual_page_numbers(
     if (
         not isinstance(raw, list)
         or not raw
-        or len(raw) > 4
         or any(isinstance(page, bool) or not isinstance(page, int) for page in raw)
         or len(set(raw)) != len(raw)
         or any(page < 1 or page > len(loaded.pdf_pages) for page in raw)
     ):
         raise InputError(
-            "select between one and four unique PDF pages",
+            "select unique, in-range PDF pages",
             code="PDF_PAGE_SELECTION",
         )
     return tuple(raw)

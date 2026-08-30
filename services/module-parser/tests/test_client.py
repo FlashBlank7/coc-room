@@ -346,7 +346,10 @@ def test_codex_cli_uses_isolated_ephemeral_schema_run(monkeypatch: pytest.Monkey
         for index, value in enumerate(command)
         if value == "--config"
     ]
-    assert config_values[:2] == ['web_search="disabled"', 'model_reasoning_effort="low"']
+    assert config_values[0] == 'web_search="disabled"'
+    assert not any(
+        value.startswith("model_reasoning_effort") for value in config_values
+    )
     developer_config = next(
         value for value in config_values if value.startswith("developer_instructions=")
     )
@@ -384,7 +387,7 @@ def test_codex_cli_uses_isolated_ephemeral_schema_run(monkeypatch: pytest.Monkey
     assert CODEX_EXTRACTION_PROMPT_VERSION == (
         "codex-cli-fragment-v8-staged-compact-envelope"
     )
-    assert extractor.cacheable is False
+    assert extractor.cacheable is True
 
 
 def test_codex_pdf_visual_pages_use_only_verified_temporary_images() -> None:
@@ -833,12 +836,9 @@ def test_codex_source_cannot_escape_the_json_data_field() -> None:
     assert decoded["target_schema"] == codex_fragment_output_schema()
 
 
-@pytest.mark.parametrize(
-    ("model", "cacheable"),
-    [("", False), ("codex-default", False), ("gpt-explicit", True)],
-)
-def test_codex_cache_requires_an_explicit_model(model: str, cacheable: bool) -> None:
-    assert CodexCliExtractor(model=model).cacheable is cacheable
+@pytest.mark.parametrize("model", ["", "codex-default", "gpt-explicit"])
+def test_codex_extractor_is_always_cacheable(model: str) -> None:
+    assert CodexCliExtractor(model=model).cacheable is True
 
 
 def test_codex_cli_auth_failure_is_safe_and_not_retryable() -> None:
@@ -853,7 +853,7 @@ def test_codex_cli_auth_failure_is_safe_and_not_retryable() -> None:
     assert failure.value.code == "CODEX_NOT_AUTHENTICATED"
 
 
-def test_codex_cli_timeout_is_safe_and_not_retryable() -> None:
+def test_codex_cli_timeout_is_safe_and_retryable() -> None:
     calls = 0
 
     def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
@@ -868,7 +868,7 @@ def test_codex_cli_timeout_is_safe_and_not_retryable() -> None:
     with pytest.raises(ProviderResponseError, match="timed out") as failure:
         extractor.extract(CHUNK)
     assert calls == 2
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
     assert failure.value.code == "CODEX_TIMEOUT"
     assert "private output" not in str(failure.value)
 
@@ -884,7 +884,7 @@ def test_codex_cli_builtin_timeout_is_classified_as_timeout() -> None:
     with pytest.raises(ProviderResponseError, match="timed out") as failure:
         extractor.extract(CHUNK)
 
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
     assert failure.value.code == "CODEX_TIMEOUT"
     assert "private runner detail" not in str(failure.value)
 
@@ -1071,7 +1071,7 @@ def test_managed_codex_process_kills_stalled_error_event_and_hides_detail(
             progress=lambda phase, details: observed.append((phase, details)),
         )
 
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
     assert failure.value.code == "CODEX_CLI_STALLED"
     assert processes[0].killed is True
     assert any(details.get("cli_phase") == "reported_error" for _, details in observed)
@@ -1120,7 +1120,7 @@ def test_managed_codex_process_caps_a_continuous_error_streak(
         extractor.extract(CHUNK)
 
     assert failure.value.code == "CODEX_CLI_STALLED"
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
     assert processes[0].killed is True
     assert "private repeated detail" not in str(failure.value)
 
@@ -1169,7 +1169,7 @@ def test_managed_codex_process_kills_turn_failed_without_waiting_for_timeout(
         extractor.extract(CHUNK)
 
     assert time.monotonic() - started < 1.0
-    assert failure.value.retryable is False
+    assert failure.value.retryable is True
     assert failure.value.code == "CODEX_TURN_FAILED"
     assert processes[0].killed is True
     assert "private provider detail" not in str(failure.value)

@@ -17,6 +17,7 @@ from coc_module_parser.client import (
     TruncatedResponseError,
 )
 from coc_module_parser.npc_context import (
+    MAX_NPC_CONTEXT_MESSAGES,
     NpcContextSelectionV1,
     NpcReplyOutputV1,
 )
@@ -95,7 +96,7 @@ def test_deepseek_receives_only_bounded_panel_context_and_strict_schema() -> Non
             "role": "human",
             "content": "OUTSIDE-PANEL-WINDOW-SECRET" if index == 0 else f"old {index}",
         }
-        for index in range(41)
+        for index in range(MAX_NPC_CONTEXT_MESSAGES + 1)
     ]
     task = _task(messages=[*old_messages, {"id": "message:new", "role": "human", "content": "Answer me."}])
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -103,12 +104,12 @@ def test_deepseek_receives_only_bounded_panel_context_and_strict_schema() -> Non
     result = generate_npc_reply(task, deepseek_client=client)
 
     assert result.reply.spoken_text == "I keep this house."
-    assert result.selection.selected_message_count == 40
+    assert result.selection.selected_message_count == MAX_NPC_CONTEXT_MESSAGES
     request_body = json.loads(requests[0].content)
     provider_input = json.loads(request_body["input"])
     assert set(provider_input) == {"npcCard", "pins", "messages"}
     assert len(provider_input["pins"]) == 1
-    assert len(provider_input["messages"]) == 40
+    assert len(provider_input["messages"]) == MAX_NPC_CONTEXT_MESSAGES
     assert provider_input["messages"][-1]["content"] == "Answer me."
     assert "selection" not in provider_input
     assert "provider-secret-key" not in requests[0].content.decode("utf-8")

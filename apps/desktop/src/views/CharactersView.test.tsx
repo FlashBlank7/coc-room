@@ -58,9 +58,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加其他技能" }));
     fireEvent.change(screen.getByLabelText("技能名"), { target: { value: "图书馆使用" } });
     fireEvent.change(screen.getByLabelText("当前值"), { target: { value: "60" } });
-    expect(progress.textContent).toContain("和 KP 确认这张卡");
-    expect(screen.getByRole("link", { name: "去确认" }).getAttribute("href")).toBe("#character-save-actions");
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     expect(progress.textContent).toContain("可以带入房间");
     expect(screen.getByRole("link", { name: "去带入房间" }).getAttribute("href")).toBe("#character-save-actions");
   });
@@ -114,7 +111,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByText("调查笔记"));
     fireEvent.change(screen.getByLabelText("自由记录"), { target: { value: "在庭院里见过蝶影。" } });
 
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -162,7 +158,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "林蝶" } });
     fireEvent.change(screen.getByLabelText("职业"), { target: { value: "记者" } });
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
@@ -194,7 +189,7 @@ describe("CharactersView permissions and editing", () => {
 
     const firstVisit = render(<CharactersView session={session} />);
     await waitFor(() => expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("林蝶"));
-    expect(screen.getByLabelText("角色创建进度").textContent).toContain("确认是否带入“林蝶”");
+    expect(screen.getByLabelText("角色创建进度").textContent).toContain("可以带入房间");
     expect(submit).not.toHaveBeenCalled();
 
     firstVisit.unmount();
@@ -205,7 +200,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText("居住地"), { target: { value: "东京" } });
     expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false);
 
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -242,7 +236,6 @@ describe("CharactersView permissions and editing", () => {
     expect((screen.getByLabelText("仅自己可见") as HTMLTextAreaElement).value).toBe("这段恢复内容绝不能进入房间事件");
     expect(await (await getRepository()).listPersonalCharactersV2()).toHaveLength(0);
 
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
     await waitFor(() => expect(window.sessionStorage.length).toBe(0));
@@ -347,7 +340,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     fireEvent.change(screen.getByLabelText("仅自己可见"), { target: { value: "确认期间也不能消失" } });
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
 
@@ -385,7 +377,6 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     fireEvent.change(screen.getByLabelText("仅自己可见"), { target: { value: "拒绝后仍可恢复" } });
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
 
@@ -746,9 +737,7 @@ describe("CharactersView permissions and editing", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(true));
     expect(window.sessionStorage.length).toBe(0);
     expect(submit).not.toHaveBeenCalled();
-    expect((screen.getByRole("button", { name: "带入并回到现场" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.click(screen.getByLabelText("已与 KP 确认属性和技能分配"));
     expect((screen.getByRole("button", { name: "带入并回到现场" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());

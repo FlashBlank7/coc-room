@@ -16,23 +16,20 @@ const RENDER_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/render-pdf-pages`;
 const CHARACTER_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/character-draft`;
 const NPC_STATS_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-stats-draft`;
 const NPC_REPLY_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-reply`;
-const MAX_TEXT_CHARACTERS = 5_000_000;
-const MAX_REGULAR_SOURCE_BYTES = 25 * 1024 * 1024;
-const MAX_PDF_SOURCE_BYTES = 50 * 1024 * 1024;
-const MAX_REQUEST_BYTES = 72 * 1024 * 1024;
-const MAX_CHARACTER_DRAFT_REQUEST_BYTES = 64 * 1024;
-const MAX_NPC_STATS_DRAFT_REQUEST_BYTES = 192 * 1024;
-const MAX_NPC_REPLY_REQUEST_BYTES = 768 * 1024;
-const MAX_PARSE_STDOUT_BYTES = 16 * 1024 * 1024;
-const MAX_FIXED_AI_STDOUT_BYTES = 256 * 1024;
-// Four rendered pages can each legitimately approach the parser's 16 MiB
-// per-page safety bound before Base64 expansion. Keep this route-specific so
-// ordinary model output retains the much smaller limit.
-const MAX_PDF_RENDER_STDOUT_BYTES = 96 * 1024 * 1024;
-const MAX_STDERR_BYTES = 64 * 1024;
-export const SIDECAR_TOTAL_TIMEOUT_MS = 45 * 60 * 1_000;
-export const SIDECAR_IDLE_TIMEOUT_MS = 60 * 1_000;
-export const FIXED_AI_TIMEOUT_MS = 120 * 1_000;
+const MAX_TEXT_CHARACTERS = 50_000_000;
+const MAX_REGULAR_SOURCE_BYTES = 100 * 1024 * 1024;
+const MAX_PDF_SOURCE_BYTES = 200 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 300 * 1024 * 1024;
+const MAX_CHARACTER_DRAFT_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_NPC_STATS_DRAFT_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_NPC_REPLY_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_PARSE_STDOUT_BYTES = 256 * 1024 * 1024;
+const MAX_FIXED_AI_STDOUT_BYTES = 64 * 1024 * 1024;
+const MAX_PDF_RENDER_STDOUT_BYTES = 384 * 1024 * 1024;
+const MAX_STDERR_BYTES = 1024 * 1024;
+export const SIDECAR_TOTAL_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
+export const SIDECAR_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
+export const FIXED_AI_TIMEOUT_MS = 30 * 60 * 1_000;
 const ALLOWED_SOURCE_EXTENSIONS = new Set([".txt", ".md", ".markdown", ".docx", ".pdf", ".zip"]);
 const SIDECAR_INHERITED_ENVIRONMENT_KEYS = new Set([
   "APPDATA",
@@ -213,7 +210,8 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
     "coc-room",
     "module-parser",
   );
-  let taskRunning = false;
+  let runningTasks = 0;
+  const MAX_CONCURRENT_TASKS = 4;
   // This capability is created once per Vite server process. It is injected
   // only into that server's development HTML, never into a production build,
   // URL, cookie, persistent browser storage, or log line.
@@ -266,10 +264,10 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
           }
 
           if (pathname === PARSE_ROUTE && request.method === "POST") {
-            if (taskRunning) throw new BridgeHttpError(409, "PARSER_BUSY", "已有模组解析任务正在运行");
+            if (runningTasks >= MAX_CONCURRENT_TASKS) throw new BridgeHttpError(409, "PARSER_BUSY", "本地 AI 并发任务已满，请稍候");
             const raw = await readJsonBody(request, MAX_REQUEST_BYTES);
             const parsed = validateParseRequest(raw);
-            taskRunning = true;
+            runningTasks += 1;
             try {
               await withTemporarySource(parsed.sourceFile, tempRoot, async (sourcePath) => {
                 const payload = {
@@ -294,16 +292,16 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
                 });
               });
             } finally {
-              taskRunning = false;
+              runningTasks -= 1;
             }
             return;
           }
 
           if (pathname === RENDER_ROUTE && request.method === "POST") {
-            if (taskRunning) throw new BridgeHttpError(409, "PARSER_BUSY", "已有模组解析任务正在运行");
+            if (runningTasks >= MAX_CONCURRENT_TASKS) throw new BridgeHttpError(409, "PARSER_BUSY", "本地 AI 并发任务已满，请稍候");
             const raw = await readJsonBody(request, MAX_REQUEST_BYTES);
             const parsed = validateRenderRequest(raw);
-            taskRunning = true;
+            runningTasks += 1;
             try {
               await withTemporarySource(parsed.sourceFile, tempRoot, async (sourcePath) => {
                 await streamSidecar(response, {
@@ -322,7 +320,7 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
                 });
               });
             } finally {
-              taskRunning = false;
+              runningTasks -= 1;
             }
             return;
           }
@@ -332,7 +330,7 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
             || pathname === NPC_STATS_DRAFT_ROUTE
             || pathname === NPC_REPLY_ROUTE
           )) {
-            if (taskRunning) throw new BridgeHttpError(409, "LOCAL_AI_BUSY", "已有本地 AI 任务正在运行");
+            if (runningTasks >= MAX_CONCURRENT_TASKS) throw new BridgeHttpError(409, "LOCAL_AI_BUSY", "本地 AI 并发任务已满，请稍候");
             const requestLimit = pathname === CHARACTER_DRAFT_ROUTE
               ? MAX_CHARACTER_DRAFT_REQUEST_BYTES
               : pathname === NPC_STATS_DRAFT_ROUTE
@@ -375,7 +373,7 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
                 messages: parsed.messages,
               };
             }
-            taskRunning = true;
+            runningTasks += 1;
             try {
               await streamSidecar(response, {
                 command: resolveSidecarCommand(parserRoot),
@@ -387,7 +385,7 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
                 signal: disconnect.signal,
               });
             } finally {
-              taskRunning = false;
+              runningTasks -= 1;
             }
             return;
           }

@@ -40,7 +40,7 @@ from .npc_context import (
 
 
 DEFAULT_DEEPSEEK_NPC_MODEL = "deepseek-v4-flash"
-MAX_NPC_REPLY_RESULT_BYTES = 64 * 1024
+MAX_NPC_REPLY_RESULT_BYTES = 4 * 1024 * 1024
 
 NPC_REPLY_INSTRUCTIONS = (
     "Roleplay only the NPC described by the npcCard JSON value. Use only npcCard, pins, "
@@ -75,7 +75,7 @@ class GenerateNpcReplyTaskV1(StrictModel):
         default_factory=list,
         max_length=MAX_NPC_CONTEXT_PINS,
     )
-    messages: list[NpcPanelMessageV1] = Field(default_factory=list, max_length=500)
+    messages: list[NpcPanelMessageV1] = Field(default_factory=list, max_length=2_000)
     api_key: SecretStr | None = Field(
         default=None,
         exclude=True,
@@ -95,16 +95,16 @@ class GenerateNpcReplyTaskV1(StrictModel):
         validation_alias=AliasChoices("codexExecutable", "codex_executable"),
     )
     timeout_seconds: float = Field(
-        default=120.0,
+        default=600.0,
         ge=5.0,
-        le=300.0,
+        le=86_400.0,
         validation_alias=AliasChoices("timeoutSeconds", "timeout_seconds"),
         serialization_alias="timeoutSeconds",
     )
     max_output_tokens: int = Field(
-        default=2_048,
+        default=8_192,
         ge=128,
-        le=8_000,
+        le=512_000,
         validation_alias=AliasChoices("maxOutputTokens", "max_output_tokens"),
         serialization_alias="maxOutputTokens",
     )
@@ -184,7 +184,7 @@ def _parse_npc_reply_output(raw: str, provider: str) -> NpcReplyOutputV1:
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}"
-            for item in exc.errors(include_input=False)[:5]
+            for item in exc.errors(include_input=False)[:32]
         )
         raise InvalidStructureError(f"NPC reply schema validation failed: {errors}") from exc
 
@@ -203,8 +203,8 @@ class DeepSeekNpcReplyProvider:
     api_key: SecretStr = field(repr=False)
     model: str = DEFAULT_DEEPSEEK_NPC_MODEL
     base_url: str = "https://api.deepseek.com"
-    max_output_tokens: int = 2_048
-    timeout_seconds: float = 120.0
+    max_output_tokens: int = 8_192
+    timeout_seconds: float = 600.0
     client: httpx.Client | None = field(default=None, repr=False)
 
     def generate(self, context: NpcContextWindowV1) -> NpcReplyOutputV1:
@@ -287,7 +287,7 @@ class CodexNpcReplyProvider:
 
     model: str = ""
     executable: str = "codex"
-    timeout_seconds: float = 120.0
+    timeout_seconds: float = 600.0
     runner: CodexRunner | None = field(default=None, repr=False)
     _ready: bool = field(default=False, init=False, repr=False)
 
@@ -378,8 +378,6 @@ class CodexNpcReplyProvider:
             "--config",
             'web_search="disabled"',
             "--config",
-            'model_reasoning_effort="low"',
-            "--config",
             f"developer_instructions={json.dumps(NPC_REPLY_INSTRUCTIONS)}",
             "--config",
             "project_doc_max_bytes=0",
@@ -421,7 +419,7 @@ class CodexNpcReplyProvider:
                 "env": _codex_environment(),
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
-                "timeout": min(self.timeout_seconds, 20.0),
+                "timeout": min(self.timeout_seconds, 60.0),
                 "check": False,
             }
             if os.name == "nt":

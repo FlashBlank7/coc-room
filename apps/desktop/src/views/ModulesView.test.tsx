@@ -254,7 +254,7 @@ describe("ModulesView browser import", () => {
     await (await getRepository()).deleteModule(modulePackage.moduleId);
   });
 
-  it("keeps a simulated draft visibly separate and prevents it from entering the library", async () => {
+  it("keeps a simulated draft visibly labeled while letting it be saved to the library", async () => {
     render(<ModulesView />);
     fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), {
       target: { value: "需要先校对的模组正文" },
@@ -263,8 +263,9 @@ describe("ModulesView browser import", () => {
     fireEvent.click(screen.getByRole("button", { name: "使用模拟结果测试流程" }));
     const draftNotice = await screen.findByLabelText("模拟解析草稿");
     expect(within(draftNotice).getByText("模拟结果 · 未调用 Codex 或 DeepSeek")).not.toBeNull();
-    expect(within(draftNotice).getByText(/不是真实解析结果，也不能保存或用于跑团/)).not.toBeNull();
-    expect((within(draftNotice).getByRole("button", { name: "模拟结果不能保存" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(draftNotice).getByText(/可以直接保存使用/)).not.toBeNull();
+    const saveButton = within(draftNotice).getByRole("button", { name: "保存修改" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     fireEvent.click(screen.getByRole("button", { name: "使用模拟结果测试流程" }));
@@ -273,6 +274,13 @@ describe("ModulesView browser import", () => {
     expect(within(draftNotice).getByText("模拟结果 · 未调用 Codex 或 DeepSeek")).not.toBeNull();
     expect(screen.queryByLabelText("模组已保存")).toBeNull();
     expect(useAppStore.getState().modules).toHaveLength(0);
+
+    fireEvent.click(saveButton);
+
+    await screen.findByLabelText("模组已保存");
+    expect(useAppStore.getState().modules).toHaveLength(1);
+    const savedModuleId = useAppStore.getState().modules[0]?.moduleId;
+    if (savedModuleId) await (await getRepository()).deleteModule(savedModuleId);
   });
 
   it("blocks main navigation and browser close until a parsed draft is saved", async () => {

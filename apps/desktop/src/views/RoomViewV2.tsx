@@ -1293,7 +1293,6 @@ export function RoomViewV2({
       ...current,
       revision: current.revision + 1,
       status: "paused",
-      autoReply: false,
     };
   });
 
@@ -1304,7 +1303,6 @@ export function RoomViewV2({
       ...withoutEnd,
       revision: current.revision + 1,
       status: "active",
-      autoReply: false,
     };
   });
 
@@ -1323,7 +1321,7 @@ export function RoomViewV2({
     const title = npcPinTitle.trim();
     const body = npcPinBody.trim();
     if (!title || !body) throw new Error("挂载资料需要标题和正文");
-    if (current.pinnedContext.length >= 12) throw new Error("每个互动面板最多挂载 12 条资料");
+    if (current.pinnedContext.length >= 64) throw new Error("每个互动面板最多挂载 64 条资料");
     setNpcPinTitle("");
     setNpcPinBody("");
     return {
@@ -1914,7 +1912,7 @@ export function RoomViewV2({
           <p className="text-[11px] leading-4 text-zinc-500">助手只会读取这个人物的名称、公开描述和你的补充要求。结果先给 KP 检查，确认前不会改变房间里的资料。</p>
           <Field label="要补全哪位人物"><select aria-label="NPC 属性草稿目标" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={npcStatsTargetId} onChange={(event) => { setNpcStatsTargetId(event.target.value); setNpcStatsDraft(undefined); }}><option value="">选择人物</option>{[...world.entities.values()].filter((entity) => entity.kind === "npc").map((npc) => <option key={npc.entityId} value={npc.entityId}>{npc.name}</option>)}</select></Field>
           {[...world.entities.values()].every((entity) => entity.kind !== "npc") && <p className="rounded border border-dashed border-zinc-800 p-3 text-xs leading-5 text-zinc-500">还没有可选人物。先从模组导演台向房间介绍人物，或在“临时补充内容”中创建一位。</p>}
-          <Textarea aria-label="NPC 属性补充要求" value={npcStatsGuidance} maxLength={8_000} onChange={(event) => { setNpcStatsGuidance(event.target.value); setNpcStatsDraft(undefined); }} placeholder="例如：年迈但观察敏锐，不擅长战斗" />
+          <Textarea aria-label="NPC 属性补充要求" value={npcStatsGuidance} maxLength={50_000} onChange={(event) => { setNpcStatsGuidance(event.target.value); setNpcStatsDraft(undefined); }} placeholder="例如：年迈但观察敏锐，不擅长战斗" />
           <Button disabled={!npcStatsTargetId || npcStatsBusy} onClick={() => void generateNpcStatsDraft()}>{npcStatsBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成属性草稿</Button>
           <details className="rounded border border-zinc-800 px-3 py-2 text-xs text-zinc-500">
             <summary className="cursor-pointer">更换 AI 服务（通常不用改）</summary>
@@ -2138,15 +2136,15 @@ export function RoomViewV2({
             {session?.isHost && <details className="rounded-lg border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs">
               <summary className="cursor-pointer font-medium text-zinc-400 hover:text-zinc-200">上下文与安全边界</summary>
               <div className="mt-3 grid gap-3 border-t border-zinc-800 pt-3">
-                <p className="leading-5 text-zinc-500">每次回应只读取当前 NPC 卡、KP 明确挂载的最多 12 条资料，以及本对话最近 40 条消息（总计不超过 24,000 个字符）。不会读取大厅聊天、其他对话、完整模组、主持人笔记或本机文件。</p>
+                <p className="leading-5 text-zinc-500">每次回应会读取当前 NPC 卡、KP 挂载的资料（最多 64 条）和本对话最近的消息。不会读取大厅聊天、其他对话、完整模组、主持人笔记或本机文件。</p>
                 <div>
-                  <p className="mb-2 text-xs text-zinc-400">已挂载资料 · {activeNpcSession.pinnedContext.length}/12</p>
+                  <p className="mb-2 text-xs text-zinc-400">已挂载资料 · {activeNpcSession.pinnedContext.length}/64</p>
                   {activeNpcSession.pinnedContext.length === 0 && <p className="rounded bg-zinc-950 p-2 text-zinc-600">尚未挂载额外资料；助手只会参考 NPC 卡和本对话。</p>}
                   <div className="grid gap-1">{activeNpcSession.pinnedContext.map((pin) => <div key={pin.pinId} className="flex items-start justify-between gap-2 rounded bg-zinc-950 p-2 text-xs"><div><b>{pin.title}</b><p className="mt-1 line-clamp-2 text-zinc-500">{pin.body}</p></div>{!readOnly && activeNpcSession.status !== "closed" && <button className="shrink-0 text-red-300 hover:underline" onClick={() => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, pinnedContext: current.pinnedContext.filter((item) => item.pinId !== pin.pinId) }))}>移除</button>}</div>)}</div>
                   {!readOnly && activeNpcSession.status !== "closed" && <>
                     <Input className="mt-2" value={npcPinTitle} maxLength={240} onChange={(event) => setNpcPinTitle(event.target.value)} placeholder="资料标题" />
-                    <Textarea className="mt-2" value={npcPinBody} maxLength={20_000} onChange={(event) => setNpcPinBody(event.target.value)} placeholder="只有这里的正文会进入 NPC 上下文" />
-                    <Button className="mt-2" variant="secondary" disabled={!npcPinTitle.trim() || !npcPinBody.trim() || activeNpcSession.pinnedContext.length >= 12} onClick={() => void addNpcPin()}>挂载到这段交谈</Button>
+                    <Textarea className="mt-2" value={npcPinBody} maxLength={100_000} onChange={(event) => setNpcPinBody(event.target.value)} placeholder="只有这里的正文会进入 NPC 上下文" />
+                    <Button className="mt-2" variant="secondary" disabled={!npcPinTitle.trim() || !npcPinBody.trim() || activeNpcSession.pinnedContext.length >= 64} onClick={() => void addNpcPin()}>挂载到这段交谈</Button>
                   </>}
                 </div>
               </div>
@@ -2157,9 +2155,9 @@ export function RoomViewV2({
               <div className="mt-3 grid gap-3 border-t border-zinc-800 pt-3">
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <Field label="AI 提供者"><select disabled={readOnly || activeNpcSession.status === "closed"} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={activeNpcSession.provider} onChange={(event) => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, provider: event.target.value as "codex" | "deepseek" }))}><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select></Field>
-                  <Field label="发布方式"><select disabled={readOnly || activeNpcSession.status === "closed"} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={activeNpcSession.mode} onChange={(event) => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, mode: event.target.value as "shadow" | "autonomous" }))}><option value="shadow">先由 KP 审核</option><option value="autonomous">实验性自动发布</option></select></Field>
+                  <Field label="发布方式"><select disabled={readOnly || activeNpcSession.status === "closed"} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={activeNpcSession.mode} onChange={(event) => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, mode: event.target.value as "shadow" | "autonomous" }))}><option value="shadow">先由 KP 审核</option><option value="autonomous">自动发布</option></select></Field>
                 </div>
-                <p className="leading-5 text-zinc-600">“先由 KP 审核”会把草稿留在 KP 本机，确认后才让 NPC 说出；实验性自动发布仍可随时停止。</p>
+                <p className="leading-5 text-zinc-600">“先由 KP 审核”会把草稿留在 KP 本机，确认后才让 NPC 说出；自动发布让 NPC 直接开口，仍可随时停止。</p>
                 {activeNpcStatuses.length > 0 && <div className="grid gap-1">{activeNpcStatuses.slice(-3).map((status) => <p key={status.jobId} className={`rounded px-2 py-1 text-[11px] ${status.status === "failed" ? "bg-red-950/30 text-red-300" : status.status === "running" || status.status === "queued" ? "bg-amber-950/30 text-amber-200" : "bg-zinc-950 text-zinc-500"}`}>{status.message}</p>)}</div>}
               </div>
             </details>}

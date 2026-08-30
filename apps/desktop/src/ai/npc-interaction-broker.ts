@@ -13,10 +13,10 @@ import {
   type RoomWorldStateV2,
 } from "@coc-room/protocol";
 
-export const NPC_CONTEXT_MAX_PINS = 12;
-export const NPC_CONTEXT_MAX_MESSAGES = 40;
-export const NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS = 24_000;
-export const NPC_CONTEXT_MAX_PIN_CODE_POINTS = 120_000;
+export const NPC_CONTEXT_MAX_PINS = 64;
+export const NPC_CONTEXT_MAX_MESSAGES = 200;
+export const NPC_CONTEXT_MAX_MESSAGE_CODE_POINTS = 100_000;
+export const NPC_CONTEXT_MAX_PIN_CODE_POINTS = 400_000;
 
 export interface NpcReplyOutputV1 {
   spokenText: string;
@@ -150,9 +150,9 @@ export class NpcInteractionBroker {
     this.publish = options.publish;
     this.onStatus = options.onStatus;
     this.onShadowReply = options.onShadowReply;
-    this.maxConcurrent = boundedInteger(options.maxConcurrent ?? 1, 1, 4, "maxConcurrent");
-    this.maxQueued = boundedInteger(options.maxQueued ?? 16, 1, 128, "maxQueued");
-    this.timeoutMs = boundedInteger(options.timeoutMs ?? 90_000, 1, 10 * 60_000, "timeoutMs");
+    this.maxConcurrent = boundedInteger(options.maxConcurrent ?? 4, 1, 64, "maxConcurrent");
+    this.maxQueued = boundedInteger(options.maxQueued ?? 64, 1, 1024, "maxQueued");
+    this.timeoutMs = boundedInteger(options.timeoutMs ?? 600_000, 1, 60 * 60_000, "timeoutMs");
     this.randomUuid = options.randomUuid ?? (() => globalThis.crypto.randomUUID());
   }
 
@@ -589,11 +589,11 @@ function parseNpcReplyOutputV1(value: unknown): NpcReplyOutputV1 {
   if (keys.some((key) => !["spokenText", "stageDirection", "emotion"].includes(key))) {
     throw new InvalidNpcReplyError("NPC reply contains unsupported fields");
   }
-  if (typeof value.spokenText !== "string" || value.spokenText.length < 1 || value.spokenText.length > 4_000) {
+  if (typeof value.spokenText !== "string" || value.spokenText.length < 1 || value.spokenText.length > 20_000) {
     throw new InvalidNpcReplyError("NPC reply spokenText is invalid");
   }
   if (value.stageDirection !== undefined
-    && (typeof value.stageDirection !== "string" || value.stageDirection.length > 2_000)) {
+    && (typeof value.stageDirection !== "string" || value.stageDirection.length > 10_000)) {
     throw new InvalidNpcReplyError("NPC reply stageDirection is invalid");
   }
   if (value.emotion !== undefined
