@@ -1,5 +1,5 @@
 import { characteristicBandSuffix } from "../lib/characteristic-bands";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Check, Clapperboard, Copy, Dices, Download, FileText, FolderKanban, ImagePlus, Loader2, LogOut, Map, MoreHorizontal, Music, Plus, RefreshCw, Send, Sparkles, Square, UserRound, UsersRound, Volume2, VolumeX, Wrench, X } from "lucide-react";
 import {
   exportEventsV2ToHtml,
@@ -151,6 +151,48 @@ export function RoomViewV2({
   const [recordCategory, setRecordCategory] = useState<HumanRecordCategory>("all");
   const [recordQuery, setRecordQuery] = useState("");
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+  const [toolsWidth, setToolsWidth] = useState(() => {
+    try {
+      const raw = globalThis.localStorage?.getItem("coc-room:tools-width");
+      const stored = raw === null || raw === undefined ? Number.NaN : Number(raw);
+      return Number.isFinite(stored) ? Math.min(640, Math.max(280, stored)) : 360;
+    } catch {
+      return 360;
+    }
+  });
+  const toolsWidthRef = useRef(toolsWidth);
+  toolsWidthRef.current = toolsWidth;
+  const persistToolsWidth = () => {
+    try {
+      globalThis.localStorage?.setItem("coc-room:tools-width", String(toolsWidthRef.current));
+    } catch {
+      // Width memory is a per-device convenience only.
+    }
+  };
+  const beginToolsResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = toolsWidthRef.current;
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent: PointerEvent) => {
+      setToolsWidth(Math.min(640, Math.max(280, startWidth + (startX - moveEvent.clientX))));
+    };
+    const finish = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      persistToolsWidth();
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+  };
+  const resetToolsWidth = () => {
+    setToolsWidth(360);
+    toolsWidthRef.current = 360;
+    persistToolsWidth();
+  };
   const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
   const mobileToolsPanelRef = useRef<HTMLElement>(null);
   const mobileToolsCloseRef = useRef<HTMLButtonElement>(null);
@@ -1515,7 +1557,7 @@ export function RoomViewV2({
   };
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 grid-rows-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <div style={{ "--room-tools-width": `${toolsWidth}px` } as CSSProperties} className="grid h-full min-h-0 grid-cols-1 grid-rows-1 lg:grid-cols-[minmax(0,1fr)_var(--room-tools-width)]">
       <section aria-hidden={mobileToolsOpen ? true : undefined} className="flex min-h-0 flex-col lg:border-r lg:border-zinc-800">
         <header className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3 sm:px-5">
           <div className="min-w-0">
@@ -1905,8 +1947,17 @@ export function RoomViewV2({
         aria-modal={mobileToolsOpen ? true : undefined}
         aria-labelledby={mobileToolsOpen ? "mobile-room-tools-title" : undefined}
         aria-label={mobileToolsOpen ? undefined : session?.isHost ? "KP 导演台" : "调查员工具"}
-        className={`${mobileToolsOpen ? "fixed inset-x-0 bottom-16 top-0 z-40 block" : "hidden"} min-h-0 overflow-y-auto border-zinc-800 bg-zinc-950 p-4 lg:static lg:block lg:border-l lg:bg-zinc-950/30`}
+        className={`${mobileToolsOpen ? "fixed inset-x-0 bottom-16 top-0 z-40 block" : "hidden"} min-h-0 overflow-y-auto border-zinc-800 bg-zinc-950 p-4 lg:relative lg:block lg:border-l lg:bg-zinc-950/30`}
       >
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整工具栏宽度"
+          title="拖动调整宽度，双击复位"
+          onPointerDown={beginToolsResize}
+          onDoubleClick={resetToolsWidth}
+          className="absolute inset-y-0 left-0 z-20 hidden w-1.5 cursor-col-resize touch-none hover:bg-brass/40 active:bg-brass/60 lg:block"
+        />
         <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex items-center justify-between border-b border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur lg:hidden">
           <div><p className="text-[10px] font-semibold uppercase tracking-[.18em] text-brass">{session?.isHost ? "KP" : "调查员"}</p><h2 id="mobile-room-tools-title" className="font-serif text-lg">{session?.isHost ? "导演台" : "我的工具"}</h2></div>
           <button ref={mobileToolsCloseRef} type="button" aria-label="关闭工具" onClick={() => setMobileToolsOpen(false)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-ink"><X className="h-5 w-5" /></button>

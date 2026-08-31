@@ -55,6 +55,24 @@ describe("RoomViewV2 board creation", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("lets the tools sidebar be resized and reset by its drag separator", () => {
+    const room = roomRecord("room-v2-resizable-tools", "player");
+    const session = {
+      isHost: false,
+      submit: vi.fn(),
+      localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" },
+    } as unknown as RoomSessionV2;
+
+    const { container } = render(<RoomViewV2 room={room} session={session} views={[]} world={createRoomWorldStateV2(room.id)} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
+    const separator = screen.getByRole("separator", { name: "调整工具栏宽度" });
+    const grid = container.firstElementChild as HTMLElement;
+    expect(grid.style.getPropertyValue("--room-tools-width")).toBe("360px");
+
+    fireEvent.doubleClick(separator);
+    expect(grid.style.getPropertyValue("--room-tools-width")).toBe("360px");
+    expect(globalThis.localStorage.getItem("coc-room:tools-width")).toBe("360");
+  });
+
   it("turns a raw connection failure into a recoverable room message", () => {
     const setConnectionError = vi.fn();
     const session = {

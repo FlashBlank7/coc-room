@@ -17,6 +17,22 @@ import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
 import { CharactersView } from "./CharactersView";
 
+const imageMocks = vi.hoisted(() => ({
+  generateDraft: vi.fn(),
+}));
+
+vi.mock("../lib/codex-image-executor", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/codex-image-executor")>();
+  return {
+    ...actual,
+    codexImageExecutor: {
+      generateDraft: imageMocks.generateDraft,
+      cancel: vi.fn(),
+      probeCapabilities: vi.fn(),
+    },
+  };
+});
+
 const playerRoom = createRoom("player", "player-local");
 const hostPresence: ParticipantV1 = { peerId: playerRoom.hostPeerId, displayName: "Keeper", role: "host" };
 
@@ -837,6 +853,41 @@ describe("CharactersView AI draft review", () => {
     render(<CharactersView session={playerSession} worldV2={createRoomWorldStateV2(playerRoom2.id)} />);
     fireEvent.click(screen.getByRole("button", { name: "新建我的角色" }));
     expect(screen.queryByRole("button", { name: /按人设与当前模组生成人设图/ })).toBeNull();
+  });
+
+  it("lets the keeper pick a researched art style and sends its concept prompt", async () => {
+    imageMocks.generateDraft.mockRejectedValue(new Error("测试到此为止"));
+    const hostRoom: RoomRecord = {
+      ...createRoom("host", "host-local"),
+      id: "character-room-style",
+      protocolVersion: 2,
+      localSeatId: "seat-host-v2",
+      hostSeatId: "seat-host-v2",
+      seatCredentialVersion: 1,
+    };
+    useAppStore.setState({ currentRoom: hostRoom, activeView: "characters" });
+    const session = new RoomSessionV2({
+      room: hostRoom,
+      displayName: "Keeper",
+      repository: {} as never,
+      transport: {} as never,
+    });
+    render(<CharactersView session={session} worldV2={createRoomWorldStateV2(hostRoom.id)} />);
+    fireEvent.click(screen.getByRole("button", { name: "新建我的角色" }));
+
+    // Every style is offered with its preview image; picking one surfaces its
+    // concept set (概念集) and routes its researched prompt into the request.
+    expect(screen.getAllByRole("radio")).toHaveLength(6);
+    expect((screen.getByAltText("复古胶片画风预览") as HTMLImageElement).src).toContain("/portrait-styles/vintage-photo.webp");
+    fireEvent.click(screen.getByRole("radio", { name: /日系动画/ }));
+    expect(screen.getByText("赛璐璐平涂 cel shading")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /按人设与当前模组生成人设图/ }));
+    await waitFor(() => expect(imageMocks.generateDraft).toHaveBeenCalledOnce());
+    const request = imageMocks.generateDraft.mock.calls[0]![0] as { style?: string };
+    expect(request.style).toContain("赛璐璐平涂");
+    expect(request.style).toContain("硬边阴影");
+    expect(await screen.findByText(/人设图生成失败：测试到此为止/)).toBeTruthy();
   });
 
   it("shows the live draft stage while waiting and surfaces a KP rejection", async () => {

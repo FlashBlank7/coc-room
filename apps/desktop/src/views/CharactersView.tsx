@@ -24,6 +24,12 @@ import {
   verifyManagedAsset,
 } from "../lib/asset-store";
 import { codexImageExecutor, CodexImageExecutorError } from "../lib/codex-image-executor";
+import {
+  DEFAULT_PORTRAIT_STYLE_ID,
+  PORTRAIT_STYLES,
+  portraitStylePreviewSrc,
+  resolvePortraitStyle,
+} from "../lib/portrait-styles";
 
 type CharacteristicKey = keyof Coc7Character["characteristics"];
 type StatusKey = keyof Coc7Character["status"];
@@ -160,6 +166,21 @@ export function CharactersView({
   const [avatarUrl, setAvatarUrl] = useState<string>();
   const [portraitBusy, setPortraitBusy] = useState(false);
   const [portraitNotice, setPortraitNotice] = useState<string>();
+  const [portraitStyleId, setPortraitStyleId] = useState(() => {
+    try {
+      return globalThis.localStorage?.getItem("coc-room:portrait-style") ?? DEFAULT_PORTRAIT_STYLE_ID;
+    } catch {
+      return DEFAULT_PORTRAIT_STYLE_ID;
+    }
+  });
+  const selectPortraitStyle = (id: string) => {
+    setPortraitStyleId(id);
+    try {
+      globalThis.localStorage?.setItem("coc-room:portrait-style", id);
+    } catch {
+      // Per-viewer convenience only; a blocked store just loses the memory.
+    }
+  };
   const [savingTarget, setSavingTarget] = useState<"personal" | "room">();
   const [roomEditBaseUpdatedAt, setRoomEditBaseUpdatedAt] = useState<string | null | "unknown">(
     ownRoomCharacter?.updatedAt ?? null,
@@ -217,6 +238,7 @@ export function CharactersView({
       const generated = await codexImageExecutor.generateDraft({
         kind: "character",
         description: composePortraitDescription(),
+        style: resolvePortraitStyle(portraitStyleId).stylePrompt,
         aspectRatio: "portrait",
       }, portraitAuthorization);
       if (!isLocallyOwnedDraft) throw new Error("只能为自己的角色保存人设图");
@@ -1008,6 +1030,24 @@ export function CharactersView({
                   : <div className="grid h-36 w-28 place-items-center rounded border border-dashed border-zinc-700 text-xs text-zinc-600">暂无人设图</div>}
                 <div className="grid min-w-48 flex-1 gap-2">
                   <p className="text-xs leading-5 text-zinc-500">人设图保存在本机角色库，会随 .cocchar 一起导出。</p>
+                  {portraitAuthorization && <div role="radiogroup" aria-label="人设图画风" className="flex flex-wrap gap-2">
+                    {PORTRAIT_STYLES.map((style) => <button
+                      key={style.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={portraitStyleId === style.id}
+                      title={style.hint}
+                      disabled={portraitBusy}
+                      onClick={() => selectPortraitStyle(style.id)}
+                      className={`grid w-20 gap-1 rounded-lg border p-1.5 text-center transition-colors ${portraitStyleId === style.id ? "border-brass bg-brass/10" : "border-zinc-800 bg-zinc-950/40 hover:border-zinc-600"}`}
+                    >
+                      <img src={portraitStylePreviewSrc(style.id)} alt={`${style.label}画风预览`} loading="lazy" className="h-24 w-full rounded object-cover" />
+                      <span className={`text-[11px] leading-4 ${portraitStyleId === style.id ? "text-brass" : "text-zinc-400"}`}>{style.label}</span>
+                    </button>)}
+                  </div>}
+                  {portraitAuthorization && <div aria-label="画风概念集" className="flex flex-wrap gap-1">
+                    {resolvePortraitStyle(portraitStyleId).concepts.map((concept) => <span key={concept} className="rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] leading-4 text-zinc-500">{concept}</span>)}
+                  </div>}
                   {portraitAuthorization && <div className="flex flex-wrap gap-2">
                     <Button variant="secondary" disabled={portraitBusy || !isLocallyOwnedDraft} onClick={() => void generatePortrait()}>
                       {portraitBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}按人设与当前模组生成人设图
