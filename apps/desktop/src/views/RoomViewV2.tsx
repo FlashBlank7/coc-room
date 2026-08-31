@@ -73,7 +73,6 @@ import { useAppStore } from "../store/app-store";
 import {
   tauriNpcStatsDraftExecutor,
   type NpcStatsDraftV1,
-  type NpcStatsProvider,
 } from "../ai/tauri-npc-stats-draft-executor";
 
 export interface RoomViewV2Props {
@@ -103,6 +102,8 @@ type ExportState =
   | { readonly status: "error"; readonly format: "md" | "html"; readonly detail: string };
 
 type AudioOperation = "idle" | "selecting" | "waiting" | "starting" | "stopping";
+
+const AUDIO_FADE_MS = 1_000;
 
 type HumanRecordCategory = "all" | "dialogue" | "checks" | "discoveries" | "status";
 
@@ -222,9 +223,6 @@ export function RoomViewV2({
   const audioCueAttemptRef = useRef(0);
   const [audioLoop, setAudioLoop] = useState(true);
   const [audioVolume, setAudioVolume] = useState(0.7);
-  const [audioFadeInMs, setAudioFadeInMs] = useState(1_000);
-  const [audioFadeOutMs, setAudioFadeOutMs] = useState(1_000);
-  const [audioStartOffsetMs, setAudioStartOffsetMs] = useState(0);
 
   const [imageCapabilities, setImageCapabilities] = useState<CodexImageCapabilities>();
   const [imageKind, setImageKind] = useState<CodexImageJobKind>("location");
@@ -236,8 +234,6 @@ export function RoomViewV2({
   const [imageBusy, setImageBusy] = useState(false);
   const [imageCapabilityProbeTick, setImageCapabilityProbeTick] = useState(0);
   const [npcStatsTargetId, setNpcStatsTargetId] = useState("");
-  const [npcStatsProvider, setNpcStatsProvider] = useState<NpcStatsProvider>("codex");
-  const [npcStatsModel, setNpcStatsModel] = useState("");
   const [npcStatsGuidance, setNpcStatsGuidance] = useState("");
   const [npcStatsDraft, setNpcStatsDraft] = useState<{
     draft: NpcStatsDraftV1;
@@ -1081,8 +1077,8 @@ export function RoomViewV2({
           asset: selectedAudio,
           loop: audioLoop,
           volume: audioVolume,
-          fadeInMs: audioFadeInMs,
-          startOffsetMs: audioStartOffsetMs,
+          fadeInMs: AUDIO_FADE_MS,
+          startOffsetMs: 0,
         },
       });
     } finally {
@@ -1103,7 +1099,7 @@ export function RoomViewV2({
         await session.submit({
           type: "audio.stopped",
           audience: { kind: "room" },
-          payload: { cueId, fadeOutMs: audioFadeOutMs },
+          payload: { cueId, fadeOutMs: AUDIO_FADE_MS },
         });
       }
     } finally {
@@ -1275,8 +1271,8 @@ export function RoomViewV2({
         name: npc.name,
         description: npc.description,
         guidance: npcStatsGuidance.trim(),
-        provider: npcStatsProvider,
-        model: npcStatsModel.trim(),
+        provider: "codex",
+        model: "",
       }, abort.signal);
       // A late result must not attach to a different NPC selected meanwhile.
       if (!abort.signal.aborted && npcStatsTargetIdRef.current === npc.entityId) {
@@ -1884,8 +1880,6 @@ export function RoomViewV2({
           <details className="rounded border border-zinc-800 px-3 py-2 text-xs text-zinc-500">
             <summary className="cursor-pointer">更换 AI 服务（通常不用改）</summary>
             <div className="mt-3 grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3">
-              <Field label="AI 服务"><select aria-label="NPC 属性草稿提供者" className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={npcStatsProvider} onChange={(event) => { setNpcStatsProvider(event.target.value as NpcStatsProvider); setNpcStatsDraft(undefined); }}><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select></Field>
-              <Field label="指定模型（可留空）"><Input aria-label="NPC 属性草稿模型" value={npcStatsModel} maxLength={100} onChange={(event) => { setNpcStatsModel(event.target.value); setNpcStatsDraft(undefined); }} placeholder="使用默认选择" /></Field>
             </div>
           </details>
           {npcStatsDraft && <div className="grid gap-2 rounded-md border border-amber-800/60 bg-amber-950/20 p-3 text-xs">
@@ -1987,12 +1981,9 @@ export function RoomViewV2({
             <p className="text-[11px] leading-4 text-zinc-600">先让大家接收音频，准备好后再播放。网络较慢的玩家不会阻塞聊天和剧情推进。</p>
             {selectedAudio && <div role="status" className="rounded-lg border border-zinc-800 bg-zinc-950 p-3"><p className="text-xs font-medium text-zinc-200">已准备：{selectedAudioTitle}</p><p className="mt-1 text-[11px] text-zinc-600">{audioAssetSummary(selectedAudio)}</p></div>}
             {audioOperation === "waiting" && <div role="status" className="rounded-lg border border-amber-900/60 bg-amber-950/15 p-3"><p className="text-xs font-medium text-amber-100"><Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin" />正在等待在线玩家接收完成…</p><p className="mt-1 text-[11px] leading-5 text-zinc-500">最多等待 30 秒；聊天和剧情仍可继续。取消后不会开始这次播放。</p><Button className="mt-2 h-8 text-xs" variant="secondary" onClick={cancelAudioWait}>取消这次播放</Button></div>}
-            <label className="flex items-center gap-2 text-xs text-zinc-400"><input type="checkbox" disabled={audioOperation !== "idle"} checked={audioLoop} onChange={(event) => setAudioLoop(event.target.checked)} />循环播放</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex items-center gap-2 pb-2.5 text-xs text-zinc-400"><input type="checkbox" disabled={audioOperation !== "idle"} checked={audioLoop} onChange={(event) => setAudioLoop(event.target.checked)} />循环播放</label>
               <Field label="建议音量"><Input disabled={audioOperation !== "idle"} type="number" min={0} max={1} step={0.05} value={audioVolume} onChange={(event) => setAudioVolume(clampAudio(Number(event.target.value), 0, 1))} /></Field>
-              <Field label="从第几秒开始"><Input disabled={audioOperation !== "idle"} type="number" min={0} max={86_400} step={0.5} value={audioStartOffsetMs / 1_000} onChange={(event) => setAudioStartOffsetMs(Math.trunc(clampAudio(Number(event.target.value) * 1_000, 0, 86_400_000)))} /></Field>
-              <Field label="淡入秒数"><Input disabled={audioOperation !== "idle"} type="number" min={0} max={60} step={0.5} value={audioFadeInMs / 1_000} onChange={(event) => setAudioFadeInMs(Math.trunc(clampAudio(Number(event.target.value) * 1_000, 0, 60_000)))} /></Field>
-              <Field label="淡出秒数"><Input disabled={audioOperation !== "idle"} type="number" min={0} max={60} step={0.5} value={audioFadeOutMs / 1_000} onChange={(event) => setAudioFadeOutMs(Math.trunc(clampAudio(Number(event.target.value) * 1_000, 0, 60_000)))} /></Field>
             </div>
             <div className="flex gap-2">
               <Button disabled={!selectedAudio || audioOperation !== "idle"} onClick={() => void cueRoomAudio()}>{audioOperation === "starting" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Music className="mr-2 h-4 w-4" />}{audioOperation === "starting" ? "正在开始…" : "播放"}</Button>
