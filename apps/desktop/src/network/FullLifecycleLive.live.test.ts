@@ -350,57 +350,21 @@ liveDescribe("full table lifecycle over the live relay", () => {
         payload: { artifactId: clue.artifactId, characterId: aliceCharacter.id, characterName: aliceCharacter.name },
       });
 
-      // 9. NPC panel conversation: player speaks, keeper answers as the NPC.
-      const npcSession = {
-        schemaVersion: 1 as const,
-        sessionId: "npc-session-lifecycle",
-        revision: 1,
-        npcEntityId: npc.entityId,
-        title: `与${npc.name}交谈`,
-        description: "Lifecycle NPC conversation",
-        status: "active" as const,
-        audience: roomAudience,
-        provider: "codex" as const,
-        model: "",
-        autoReply: false,
-        mode: "shadow" as const,
-        pinnedContext: [],
-        startedAt: new Date().toISOString(),
-        extensions: {},
-      };
-      await host.submitConfirmed({ type: "npc.session.upserted", audience: roomAudience, payload: { session: npcSession } });
+      // 9. NPC dialogue in the shared story stream: the player asks in chat,
+      // and the keeper answers speaking as the NPC (chat.message persona).
       await alice.submitConfirmed({
-        type: "npc.session.message",
+        type: "chat.message",
         audience: roomAudience,
-        payload: {
-          sessionId: npcSession.sessionId,
-          messageId: "10000000-0000-4000-8000-000000000001",
-          role: "human",
-          speakerSeatId: aliceInvitation.seatId,
-          spokenText: "教堂晚上还有人来吗？",
-        },
+        payload: { message: "教堂晚上还有人来吗？", format: "plain" },
       });
       const npcReplyText = "老人摇头：“天黑之后，只有风琴自己在响。”";
       await host.submitConfirmed({
-        type: "npc.session.message",
+        type: "chat.message",
         audience: roomAudience,
         payload: {
-          sessionId: npcSession.sessionId,
-          messageId: "10000000-0000-4000-8000-000000000002",
-          role: "npc",
-          spokenText: npcReplyText,
-        },
-      });
-      await host.submitConfirmed({
-        type: "npc.session.upserted",
-        audience: roomAudience,
-        payload: {
-          session: {
-            ...npcSession,
-            revision: 2,
-            status: "closed" as const,
-            endedAt: new Date().toISOString(),
-          },
+          message: npcReplyText,
+          format: "plain",
+          persona: { name: npc.name, entityId: npc.entityId },
         },
       });
 

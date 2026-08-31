@@ -24,11 +24,6 @@ import { isRoomHostAvailable } from "./lib/room-availability";
 import { hasManagedAssetStore, managedAssetStoreKind, resolveManagedAssetUrl } from "./lib/asset-store";
 import { SynchronizedAudioRuntime, type AudioSyncStatus } from "./lib/audio-sync";
 import type { RoomAssetCoordinator } from "./network/RoomAssetCoordinator";
-import type {
-  NpcInteractionBroker,
-  NpcInteractionJobStatusV1,
-  NpcShadowReplyV1,
-} from "./ai/npc-interaction-broker";
 import type { RoomAiJobCoordinator } from "./ai/room-ai-job-coordinator";
 
 // The lobby is the only unconditional first screen. Preparation, character
@@ -59,7 +54,6 @@ interface PendingConnectionAttempt {
   disposed: boolean;
   session?: { stop(): void };
   assetCoordinator?: RoomAssetCoordinator;
-  npcBroker?: NpcInteractionBroker;
   aiCoordinator?: RoomAiJobCoordinator;
 }
 
@@ -73,7 +67,6 @@ class SupersededConnectionAttemptError extends Error {
 function disposePendingConnectionAttempt(attempt: PendingConnectionAttempt | undefined): void {
   if (!attempt || attempt.disposed) return;
   attempt.disposed = true;
-  attempt.npcBroker?.shutdown();
   attempt.aiCoordinator?.shutdown();
   attempt.assetCoordinator?.dispose();
   attempt.session?.stop();
@@ -117,12 +110,9 @@ export function App() {
   const sessionRef = useRef<RoomSession>();
   const sessionV2Ref = useRef<RoomSessionV2>();
   const assetCoordinatorRef = useRef<RoomAssetCoordinator>();
-  const npcBrokerRef = useRef<NpcInteractionBroker>();
   const aiCoordinatorRef = useRef<RoomAiJobCoordinator>();
   const connectionAttemptIdRef = useRef(0);
   const pendingConnectionAttemptRef = useRef<PendingConnectionAttempt>();
-  const [npcJobStatuses, setNpcJobStatuses] = useState<NpcInteractionJobStatusV1[]>([]);
-  const [npcShadowReplies, setNpcShadowReplies] = useState<NpcShadowReplyV1[]>([]);
   const [requestCharacterDraft, setRequestCharacterDraft] = useState<((prompt: string, playerName: string) => Promise<Coc7Character>)>();
   const [hostCharacterRequests, setHostCharacterRequests] = useState<HostCharacterDraftRequest[]>([]);
   const [aiDraftStage, setAiDraftStage] = useState<string>();
@@ -221,15 +211,12 @@ export function App() {
       pendingConnectionAttemptRef.current = undefined;
       const liveSession = sessionRef.current;
       const liveSessionV2 = sessionV2Ref.current;
-      const liveNpcBroker = npcBrokerRef.current;
       const liveAiCoordinator = aiCoordinatorRef.current;
       const liveAssetCoordinator = assetCoordinatorRef.current;
       sessionRef.current = undefined;
       sessionV2Ref.current = undefined;
-      npcBrokerRef.current = undefined;
       aiCoordinatorRef.current = undefined;
       assetCoordinatorRef.current = undefined;
-      liveNpcBroker?.shutdown();
       liveAiCoordinator?.shutdown();
       liveAssetCoordinator?.dispose();
       liveSession?.stop();
@@ -245,15 +232,12 @@ export function App() {
   const stopLiveRuntime = () => {
     const liveSession = sessionRef.current;
     const liveSessionV2 = sessionV2Ref.current;
-    const liveNpcBroker = npcBrokerRef.current;
     const liveAiCoordinator = aiCoordinatorRef.current;
     const liveAssetCoordinator = assetCoordinatorRef.current;
     sessionRef.current = undefined;
     sessionV2Ref.current = undefined;
-    npcBrokerRef.current = undefined;
     aiCoordinatorRef.current = undefined;
     assetCoordinatorRef.current = undefined;
-    liveNpcBroker?.shutdown();
     liveAiCoordinator?.shutdown();
     liveAssetCoordinator?.dispose();
     liveSession?.stop();
@@ -265,8 +249,6 @@ export function App() {
     setHostCharacterRequests([]);
     setAiDraftStage(undefined);
     setLateApprovedDraft(undefined);
-    setNpcJobStatuses([]);
-    setNpcShadowReplies([]);
     setResolveRoomAsset(undefined);
     setSession(undefined);
     setSessionV2(undefined);
@@ -370,8 +352,6 @@ export function App() {
         let latestSeats: SeatV2[] = [];
         let latestAuthentication: V2AuthenticationState = room.localRole === "host" ? "authenticated" : "waiting";
         let latestRelayConnected = false;
-        let npcBroker: NpcInteractionBroker | undefined;
-        let npcObservedThrough = 0;
         const latestPaths: Record<string, ConnectionPath> = {};
         next.onViews = (views) => {
           latestViews = views;
@@ -379,12 +359,6 @@ export function App() {
         };
         next.onWorld = (world) => {
           latestWorld = world;
-          if (npcBroker) {
-            for (const view of latestViews) {
-              if (view.view === "full" && view.event.sequence > npcObservedThrough) npcBroker.observeEvent(view.event);
-            }
-            npcObservedThrough = Math.max(npcObservedThrough, world.lastSequence);
-          }
           if (active && sessionV2Ref.current === next) {
             setWorldV2(world);
             const state = useAppStore.getState();
@@ -435,39 +409,6 @@ export function App() {
           });
           attempt.assetCoordinator = coordinator;
         }
-        if (next.isHost) {
-          const {
-            NpcInteractionBroker: NpcInteractionBrokerRuntime,
-            TauriNpcReplyProvider: TauriNpcReplyProviderRuntime,
-          } = await import("./ai/npc-interaction-broker");
-          assertAttemptOwner();
-          npcObservedThrough = latestWorld.lastSequence;
-          npcBroker = new NpcInteractionBrokerRuntime({
-            getWorld: () => latestWorld,
-            provider: new TauriNpcReplyProviderRuntime(),
-            publish: (proposal) => next.submit(proposal),
-            onStatus: (status) => {
-              if (!active || sessionV2Ref.current !== next) return;
-              setNpcJobStatuses((current) => [...current.filter(({ jobId }) => jobId !== status.jobId), status].slice(-200));
-              if (status.status === "failed") {
-                const npcSession = latestWorld.npcSessions.get(status.sessionId);
-                if (npcSession) {
-                  void next.submit({
-                    type: "system.notice",
-                    audience: npcSession.audience,
-                    payload: { message: status.message, level: "warning" },
-                  }).catch((error) => next.onError?.(error instanceof Error ? error.message : String(error)));
-                }
-              }
-            },
-            onShadowReply: (reply) => {
-              if (!active || sessionV2Ref.current !== next) return;
-              setNpcShadowReplies((current) => [...current.filter(({ jobId }) => jobId !== reply.jobId), reply].slice(-200));
-            },
-          });
-          attempt.npcBroker = npcBroker;
-          npcBroker.primeHistory(latestViews.flatMap((view) => view.view === "full" ? [view.event] : []));
-        }
         const refreshedRooms = await repository.listRooms();
         assertAttemptOwner();
 
@@ -476,11 +417,9 @@ export function App() {
         attempt.session = undefined;
         attempt.aiCoordinator = undefined;
         attempt.assetCoordinator = undefined;
-        attempt.npcBroker = undefined;
         sessionV2Ref.current = next;
         aiCoordinatorRef.current = aiCoordinator;
         assetCoordinatorRef.current = coordinator;
-        npcBrokerRef.current = npcBroker;
         active = true;
         setRequestCharacterDraft(() => (prompt: string, playerName: string) => {
           setAiDraftStage(undefined);
@@ -696,9 +635,6 @@ export function App() {
                 audioMuted={audioMuted}
                 onAudioVolumeChange={setAudioVolume}
                 onAudioMutedChange={setAudioMuted}
-                npcJobStatuses={npcJobStatuses}
-                npcShadowReplies={npcShadowReplies}
-                onDismissNpcShadow={(jobId) => setNpcShadowReplies((current) => current.filter((reply) => reply.jobId !== jobId))}
                 onLeave={leave}
               />
             : activeView === "room" && <RoomView session={session} readOnly={isViewingLocalRecord} onLeave={leave} />}

@@ -163,6 +163,10 @@ export function reduceRoomWorldStateV2(
 
   switch (event.type) {
     case "chat.message":
+      if (event.payload.persona !== undefined && event.sender.role !== "host") {
+        throw new Error("only the host may speak as an NPC");
+      }
+      break;
     case "system.notice":
       break;
     case "dice.result": {

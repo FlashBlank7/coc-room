@@ -437,6 +437,13 @@ export const chatMessageEventV2Schema = roomEventV2BaseSchema
     payload: z.object({
       message: z.string().min(1).max(20_000),
       format: z.enum(["plain", "markdown"]),
+      // "Speak as": the host voices an NPC directly in the shared story
+      // stream, the way a keeper does at a real table. Host-only (enforced by
+      // the reducer); entityId links the line to the NPC card when it exists.
+      persona: z.object({
+        name: z.string().min(1).max(160),
+        entityId: z.string().min(1).max(120).optional(),
+      }).strict().optional(),
     }).strict(),
   })
   .strict();

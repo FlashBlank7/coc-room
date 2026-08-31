@@ -1515,6 +1515,35 @@ describe("HostEventSequencerV2", () => {
   });
 });
 
+describe("chat.message persona (speak-as)", () => {
+  it("lets the host speak as an NPC but rejects impersonation by players", () => {
+    const sequencer = deterministicSequencer();
+    const spoken = sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
+      type: "chat.message",
+      audience: ROOM,
+      payload: {
+        message: "这么晚了，剧院不接待客人。",
+        format: "plain",
+        persona: { name: "守门人", entityId: "npc-doorkeeper" },
+      },
+    }, commandId(10)), HOST).event;
+    expect(spoken.type).toBe("chat.message");
+    if (spoken.type === "chat.message") {
+      expect(spoken.payload.persona).toEqual({ name: "守门人", entityId: "npc-doorkeeper" });
+    }
+
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+      type: "chat.message",
+      audience: ROOM,
+      payload: {
+        message: "（假装守门人）跟我来。",
+        format: "plain",
+        persona: { name: "守门人" },
+      },
+    }, commandId(11)), ALICE)).toThrow(/only the host may speak as an NPC/);
+  });
+});
+
 describe("EventViewReplicaV2", () => {
   it("keeps a contiguous projection and upgrades a redacted header in place", () => {
     const sequencer = deterministicSequencer();

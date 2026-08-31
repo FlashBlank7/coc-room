@@ -54,9 +54,6 @@ import {
   handleModuleSceneDropV2,
   KeeperModuleWorkbenchV2,
   ManualScenePresenterV2,
-  NpcSessionStartDialogV2,
-  npcPanelSpeakerLabelV2,
-  npcSessionAudienceLabelV2,
   pendingModuleSceneEntriesV2,
   PublicClueBoardV2,
   VisibleEntityArtifactMediaV2,
@@ -71,7 +68,7 @@ import {
   type CodexImageDraft,
   type CodexImageJobKind,
 } from "../lib/codex-image-executor";
-import type { NpcInteractionJobStatusV1, NpcShadowReplyV1 } from "../ai/npc-interaction-broker";
+import { draftSceneNpcReply, type NpcReplyOutputV1 } from "../ai/npc-scene-reply";
 import { useAppStore } from "../store/app-store";
 import {
   tauriNpcStatsDraftExecutor,
@@ -96,9 +93,6 @@ export interface RoomViewV2Props {
   audioMuted?: boolean;
   onAudioVolumeChange?(volume: number): void;
   onAudioMutedChange?(muted: boolean): void;
-  npcJobStatuses?: NpcInteractionJobStatusV1[];
-  npcShadowReplies?: NpcShadowReplyV1[];
-  onDismissNpcShadow?(jobId: string): void;
   onLeave(): void;
 }
 
@@ -137,9 +131,6 @@ export function RoomViewV2({
   audioMuted = false,
   onAudioVolumeChange,
   onAudioMutedChange,
-  npcJobStatuses = [],
-  npcShadowReplies = [],
-  onDismissNpcShadow,
   onLeave,
 }: RoomViewV2Props) {
   const setActiveView = useAppStore((state) => state.setActiveView);
@@ -196,7 +187,6 @@ export function RoomViewV2({
   const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
   const mobileToolsPanelRef = useRef<HTMLElement>(null);
   const mobileToolsCloseRef = useRef<HTMLButtonElement>(null);
-  const npcConversationDetailsRef = useRef<HTMLDetailsElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const currentActionSectionRef = useRef<HTMLElement>(null);
   const activeBoardSectionRef = useRef<HTMLElement>(null);
@@ -220,13 +210,12 @@ export function RoomViewV2({
   const [newBoardKind, setNewBoardKind] = useState<"scene" | "map">("scene");
   const [newBoardName, setNewBoardName] = useState("");
   const [secretDraft, setSecretDraft] = useState(false);
-  const [npcMessage, setNpcMessage] = useState("");
-  const [npcMessageSending, setNpcMessageSending] = useState(false);
-  const [activeNpcSessionId, setActiveNpcSessionId] = useState<string>();
-  const [pendingNpcSessionEntityId, setPendingNpcSessionEntityId] = useState<string>();
-  const [npcSessionCreating, setNpcSessionCreating] = useState(false);
-  const [npcPinTitle, setNpcPinTitle] = useState("");
-  const [npcPinBody, setNpcPinBody] = useState("");
+  // "Speak as" replaces the old per-NPC conversation sessions: the keeper
+  // voices NPCs directly in the shared story stream, like at a real table.
+  const [speakAsEntityId, setSpeakAsEntityId] = useState<string>();
+  const [npcDraft, setNpcDraft] = useState<{ entityId: string; name: string; reply: NpcReplyOutputV1 }>();
+  const [npcDraftBusyEntityId, setNpcDraftBusyEntityId] = useState<string>();
+  const npcDraftAbortRef = useRef<AbortController>();
   const [preparedAudio, setPreparedAudio] = useState<AssetDescriptorV1>();
   const [audioTitle, setAudioTitle] = useState("氛围音乐");
   const [audioOperation, setAudioOperation] = useState<AudioOperation>("idle");
@@ -465,19 +454,8 @@ export function RoomViewV2({
       && !invitationCopied
       && (playerSeats.length === 0 || (latestInvitation && playerSeats.length === 1)),
   );
-  const npcSessionsNewestFirst = [...world.npcSessions.values()].reverse();
-  const activeNpcSession = (activeNpcSessionId ? world.npcSessions.get(activeNpcSessionId) : undefined)
-    ?? npcSessionsNewestFirst.find(({ status }) => status === "active")
-    ?? npcSessionsNewestFirst[0];
-  const activeNpcEntity = activeNpcSession
-    ? world.entities.get(activeNpcSession.npcEntityId)
-    : undefined;
-  const pendingNpcSessionEntity = pendingNpcSessionEntityId
-    ? world.entities.get(pendingNpcSessionEntityId)
-    : undefined;
-  const activeNpcStatuses = activeNpcSession
-    ? npcJobStatuses.filter(({ sessionId }) => sessionId === activeNpcSession.sessionId)
-    : [];
+  const speakAsEntity = speakAsEntityId ? world.entities.get(speakAsEntityId) : undefined;
+  const speakAsNpc = speakAsEntity?.kind === "npc" ? speakAsEntity : undefined;
 
   useEffect(() => {
     setSeenPublicMaterialSequence(readSeenPublicMaterialSequence(caseFileSeenStorageKey));
@@ -531,20 +509,6 @@ export function RoomViewV2({
       previouslyFocused?.focus();
     };
   }, [mobileToolsOpen]);
-  const activeNpcShadowReplies = activeNpcSession
-    ? npcShadowReplies.filter(({ sessionId }) => sessionId === activeNpcSession.sessionId)
-    : [];
-  const npcAutomationNotices = [...world.npcSessions.values()].flatMap((npcSession) => {
-    const latestStatus = npcJobStatuses.filter(({ sessionId }) => sessionId === npcSession.sessionId).at(-1);
-    const pendingShadows = npcShadowReplies.filter(({ sessionId }) => sessionId === npcSession.sessionId);
-    const assistantActive = npcSession.status === "active" && npcSession.autoReply;
-    const needsAttention = latestStatus?.status === "queued"
-      || latestStatus?.status === "running"
-      || latestStatus?.status === "failed";
-    return assistantActive || pendingShadows.length > 0 || needsAttention
-      ? [{ npcSession, latestStatus, pendingShadows }]
-      : [];
-  });
   const availableAudioAssets = [...world.artifacts.values()]
     .filter((artifact) => artifact.kind === "ambience-audio")
     .flatMap((artifact) => [...artifact.attachments, ...(artifact.asset ? [artifact.asset] : [])])
@@ -620,20 +584,51 @@ export function RoomViewV2({
     }
   };
 
-  const revealNpcConversation = (sessionId: string) => {
-    setActiveNpcSessionId(sessionId);
-    const isMobile = typeof window.matchMedia === "function"
-      ? window.matchMedia("(max-width: 1023px)").matches
-      : window.innerWidth < 1024;
-    if (isMobile) setMobileToolsOpen(true);
-    globalThis.setTimeout(() => {
-      const details = npcConversationDetailsRef.current;
-      if (!details) return;
-      details.open = true;
-      details.scrollIntoView?.({ block: "start" });
-      details.querySelector<HTMLElement>("summary")?.focus();
-    }, 0);
+  const beginSpeakAsNpc = (entity: RoomEntityV2) => {
+    setSpeakAsEntityId(entity.entityId);
+    messageInputRef.current?.focus();
   };
+
+  const cancelNpcDraft = () => {
+    npcDraftAbortRef.current?.abort(new Error("KP 停止了这次代答"));
+    npcDraftAbortRef.current = undefined;
+    setNpcDraftBusyEntityId(undefined);
+  };
+
+  const requestNpcDraft = (entity: RoomEntityV2) => run(async () => {
+    if (!session?.isHost || npcDraftBusyEntityId) return;
+    const abort = new AbortController();
+    npcDraftAbortRef.current = abort;
+    setNpcDraftBusyEntityId(entity.entityId);
+    setNpcDraft(undefined);
+    try {
+      const reply = await draftSceneNpcReply({
+        npc: entity,
+        events: humanRecordEvents,
+        provider: "codex",
+        model: "",
+        signal: abort.signal,
+      });
+      if (!abort.signal.aborted) setNpcDraft({ entityId: entity.entityId, name: entity.name, reply });
+    } finally {
+      if (npcDraftAbortRef.current === abort) npcDraftAbortRef.current = undefined;
+      setNpcDraftBusyEntityId((current) => (current === entity.entityId ? undefined : current));
+    }
+  });
+
+  const publishNpcDraft = (draft: { entityId: string; name: string; reply: NpcReplyOutputV1 }) => run(async () => {
+    if (!session?.isHost) return;
+    await session.submit({
+      type: "chat.message",
+      audience: { kind: "room" },
+      payload: {
+        message: draft.reply.spokenText,
+        format: "plain",
+        persona: { name: draft.name, entityId: draft.entityId },
+      },
+    });
+    setNpcDraft(undefined);
+  });
 
   const sendChat = () => run(async () => {
     const value = message.trim();
@@ -641,7 +636,13 @@ export function RoomViewV2({
     await session.submit({
       type: "chat.message",
       audience: { kind: "room" },
-      payload: { message: value, format: "plain" },
+      payload: {
+        message: value,
+        format: "plain",
+        ...(session.isHost && speakAsNpc
+          ? { persona: { name: speakAsNpc.name, entityId: speakAsNpc.entityId } }
+          : {}),
+      },
     });
     setMessage("");
   });
@@ -1138,49 +1139,6 @@ export function RoomViewV2({
     }
   };
 
-  const startNpcSession = (audience: AudienceV2) => {
-    if (!session?.isHost || !pendingNpcSessionEntityId || npcSessionCreating) return;
-    const npc = world.entities.get(pendingNpcSessionEntityId);
-    if (!npc || npc.kind !== "npc") {
-      setPendingNpcSessionEntityId(undefined);
-      setConnectionError("这位 NPC 已不在当前房间资料中，请重新选择。");
-      return;
-    }
-    if (!isAudienceSubsetV2(audience, npc.audience)) {
-      setConnectionError("交谈的可见范围不能超过这位 NPC 本身的可见范围。");
-      return;
-    }
-    setNpcSessionCreating(true);
-    void run(async () => {
-      const sessionId = globalThis.crypto.randomUUID();
-      await session.submit({
-        type: "npc.session.upserted",
-        audience,
-        payload: {
-          session: {
-            schemaVersion: 1,
-            sessionId,
-            revision: 1,
-            npcEntityId: npc.entityId,
-            title: `与 ${npc.name} 交谈`,
-            description: "NPC 只能读取本面板的有限上下文",
-            status: "active",
-            audience,
-            provider: "codex",
-            model: "",
-            autoReply: false,
-            mode: "shadow",
-            pinnedContext: [],
-            startedAt: new Date().toISOString(),
-            extensions: {},
-          },
-        },
-      });
-      setPendingNpcSessionEntityId(undefined);
-      revealNpcConversation(sessionId);
-    }).finally(() => setNpcSessionCreating(false));
-  };
-
   const generateImageDraft = () => run(async () => {
     if (!session?.isHost || !imageKeeperAuthorization) return;
     setImageBusy(true);
@@ -1303,123 +1261,6 @@ export function RoomViewV2({
       submit: (proposal) => session.submit(proposal),
     });
   };
-
-  const sendNpcPanelMessage = (role: "human" | "npc") => run(async () => {
-    if (!session || !activeNpcSession || !npcMessage.trim() || npcMessageSending) return;
-    if (activeNpcSession.status !== "active") {
-      throw new Error(activeNpcSession.status === "closed"
-        ? "这段 NPC 交谈已经结束，不能再发送消息。"
-        : "这段 NPC 交谈已暂停，请等待 KP 恢复后再发送消息。");
-    }
-    const sentText = npcMessage.trim();
-    setNpcMessageSending(true);
-    try {
-      await session.submitConfirmed({
-        type: "npc.session.message",
-        audience: activeNpcSession.audience,
-        payload: {
-          sessionId: activeNpcSession.sessionId,
-          messageId: globalThis.crypto.randomUUID(),
-          role,
-          ...(role === "human" ? { speakerSeatId: session.localSeat.seatId } : {}),
-          spokenText: sentText,
-        },
-      });
-      // Keep anything the player typed or corrected during the round-trip.
-      setNpcMessage((current) => (current.trim() === sentText ? "" : current));
-    } finally {
-      setNpcMessageSending(false);
-    }
-  });
-
-  const updateNpcSession = (
-    update: (current: NpcInteractionSessionV1) => NpcInteractionSessionV1,
-  ) => run(async () => {
-    if (!session?.isHost || !activeNpcSession) return;
-    const next = update(activeNpcSession);
-    await session.submit({
-      type: "npc.session.upserted",
-      audience: next.audience,
-      payload: { session: next },
-    });
-  });
-
-  const stopNpcAutomation = (npcSession: NpcInteractionSessionV1) => run(async () => {
-    if (!session?.isHost) return;
-    await session.submit({
-      type: "npc.session.upserted",
-      audience: npcSession.audience,
-      payload: {
-        session: {
-          ...npcSession,
-          revision: npcSession.revision + 1,
-          autoReply: false,
-        },
-      },
-    });
-  });
-
-  const pauseNpcSession = () => updateNpcSession((current) => {
-    if (current.status !== "active") throw new Error("只有正在进行的交谈可以暂停。");
-    return {
-      ...current,
-      revision: current.revision + 1,
-      status: "paused",
-    };
-  });
-
-  const resumeNpcSession = () => updateNpcSession((current) => {
-    if (current.status !== "paused") throw new Error("只有已暂停的交谈可以恢复。");
-    const { endedAt: _endedAt, ...withoutEnd } = current;
-    return {
-      ...withoutEnd,
-      revision: current.revision + 1,
-      status: "active",
-    };
-  });
-
-  const endNpcSession = () => updateNpcSession((current) => {
-    if (current.status === "closed") throw new Error("这段交谈已经结束。");
-    return {
-      ...current,
-      revision: current.revision + 1,
-      status: "closed",
-      autoReply: false,
-      endedAt: new Date().toISOString(),
-    };
-  });
-
-  const addNpcPin = () => updateNpcSession((current) => {
-    const title = npcPinTitle.trim();
-    const body = npcPinBody.trim();
-    if (!title || !body) throw new Error("挂载资料需要标题和正文");
-    if (current.pinnedContext.length >= 64) throw new Error("每个互动面板最多挂载 64 条资料");
-    setNpcPinTitle("");
-    setNpcPinBody("");
-    return {
-      ...current,
-      revision: current.revision + 1,
-      pinnedContext: [...current.pinnedContext, { pinId: globalThis.crypto.randomUUID(), title, body }],
-    };
-  });
-
-  const publishNpcShadow = (shadow: NpcShadowReplyV1) => run(async () => {
-    if (!session?.isHost || !activeNpcSession || shadow.sessionId !== activeNpcSession.sessionId) return;
-    if (activeNpcSession.status !== "active") throw new Error("这段 NPC 交谈当前不能发布回应。");
-    await session.submit({
-      type: "npc.session.message",
-      audience: activeNpcSession.audience,
-      payload: {
-        sessionId: activeNpcSession.sessionId,
-        messageId: globalThis.crypto.randomUUID(),
-        role: "npc",
-        spokenText: shadow.reply.spokenText,
-        ...(shadow.reply.stageDirection ? { stageDirection: shadow.reply.stageDirection } : {}),
-        ...(shadow.reply.emotion ? { emotion: shadow.reply.emotion } : {}),
-      },
-    });
-    onDismissNpcShadow?.(shadow.jobId);
-  });
 
   const generateNpcStatsDraft = () => run(async () => {
     if (!session?.isHost) return;
@@ -1614,23 +1455,6 @@ export function RoomViewV2({
         {connectionError && <RoomErrorNoticeV2 error={connectionError} onDismiss={() => setConnectionError(undefined)} />}
         {exportState.status === "success" && <div role="status" className="flex items-center justify-between gap-3 border-b border-emerald-900 bg-emerald-950/25 px-5 py-2 text-xs text-emerald-200"><span>{exportState.message}</span><button type="button" className="rounded p-1 hover:bg-emerald-900/40" aria-label="关闭导出提示" onClick={() => setExportState({ status: "idle" })}><X className="h-3.5 w-3.5" /></button></div>}
         {exportState.status === "error" && <div role="alert" className="border-b border-red-900 bg-red-950/25 px-5 py-3 text-xs text-red-200"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>导出没有完成，记录仍安全保存在本机。</b><p className="mt-1 text-red-200/80">请重试，或改用另一种格式。</p></div><Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => void exportTranscript(exportState.format)}>重试导出</Button></div><details className="mt-2 text-red-200/70"><summary className="cursor-pointer">查看失败原因</summary><p className="mt-1 break-words">{exportState.detail}</p></details></div>}
-        {!readOnly && session?.isHost && npcAutomationNotices.length > 0 && <div className="grid gap-2 border-b border-amber-900/50 bg-zinc-950 px-4 py-3 sm:px-5">
-          {npcAutomationNotices.map(({ npcSession, latestStatus, pendingShadows }) => <section
-            key={npcSession.sessionId}
-            role={latestStatus?.status === "failed" ? "alert" : "status"}
-            aria-label="NPC 自动回应状态"
-            className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 ${latestStatus?.status === "failed" ? "border-red-900/70 bg-red-950/20" : "border-amber-900/60 bg-amber-950/15"}`}
-          >
-            <div className="min-w-0">
-              <p className="text-xs font-semibold text-zinc-200">{npcSession.title} · {pendingShadows.length > 0 ? `${pendingShadows.length} 条回应待审核` : latestStatus?.status === "failed" ? "扮演助手需要处理" : latestStatus?.status === "queued" || latestStatus?.status === "running" ? "扮演助手正在生成" : "扮演助手正在运行"}</p>
-              <p className="mt-1 text-[11px] leading-5 text-zinc-500">{pendingShadows.length > 0 ? "草稿仍只在你的本机，确认后 NPC 才会说出。" : latestStatus?.message ?? "等待这段交谈中的下一条调查员发言。"}</p>
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <Button variant="secondary" className="h-8 text-xs" onClick={() => revealNpcConversation(npcSession.sessionId)}>{pendingShadows.length > 0 ? "审核回应" : "打开交谈"}</Button>
-              {npcSession.autoReply && npcSession.status === "active" && <Button variant="secondary" className="h-8 text-xs" onClick={() => void stopNpcAutomation(npcSession)}><Square className="mr-2 h-3.5 w-3.5" />立即停止</Button>}
-            </div>
-          </section>)}
-        </div>}
 
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {session?.isHost && activeRoomTab !== "scene" && unresolvedCheckRolls.length > 0 && <section aria-label="待叙述检定提醒" className="mx-auto mb-4 max-w-4xl rounded-xl border border-amber-800/60 bg-amber-950/20 p-3">
@@ -1641,7 +1465,7 @@ export function RoomViewV2({
           </section>}
           {activeRoomTab === "scene" && <>
           <section aria-label="当前情境" className={`mx-auto mb-5 max-w-6xl overflow-hidden rounded-2xl border ${activeScene ? "border-brass/30 bg-gradient-to-br from-brass/10 via-zinc-950 to-zinc-950" : "border-zinc-800 bg-zinc-950/50"}`}>
-            {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} conversation={findNpcConversation(world, entity.entityId)} isHost={session?.isHost === true} readOnly={readOnly} onStart={() => setPendingNpcSessionEntityId(entity.entityId)} onOpen={revealNpcConversation} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
+            {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} isHost={session?.isHost === true} readOnly={readOnly} speaking={speakAsEntityId === entity.entityId} drafting={npcDraftBusyEntityId === entity.entityId} onSpeakAs={() => beginSpeakAsNpc(entity)} onDraftReply={() => void requestNpcDraft(entity)} onStopDraft={cancelNpcDraft} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
               <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-zinc-600">当前情境</p>
               {readOnly ? <>
                 <h2 className="mt-2 font-serif text-2xl text-zinc-300">记录中没有公开开场</h2>
@@ -1916,6 +1740,29 @@ export function RoomViewV2({
         </div>
 
         {!readOnly && <div className="border-t border-zinc-800 bg-zinc-950/80 p-4">
+          {session?.isHost && npcDraftBusyEntityId && <div role="status" className="mx-auto mb-2 flex max-w-4xl items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-400">
+            <span className="flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在为「{world.entities.get(npcDraftBusyEntityId)?.name ?? "这位人物"}」起草回应…</span>
+            <Button variant="ghost" className="h-7 px-2 text-xs" onClick={cancelNpcDraft}><Square className="mr-1 h-3 w-3" />停止</Button>
+          </div>}
+          {session?.isHost && npcDraft && <div className="mx-auto mb-2 grid max-w-4xl gap-2 rounded-lg border border-amber-800/60 bg-amber-950/15 px-3 py-2 text-xs">
+            <p className="font-semibold text-amber-200">「{npcDraft.name}」的代答草稿 · 只有你能看到</p>
+            <p className="whitespace-pre-wrap leading-5 text-zinc-200">{npcDraft.reply.spokenText}</p>
+            {npcDraft.reply.stageDirection && <p className="text-zinc-500">动作：{npcDraft.reply.stageDirection}</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button className="h-8 text-xs" disabled={commandsDisabled} onClick={() => void publishNpcDraft(npcDraft)}>让 TA 说出</Button>
+              <Button variant="secondary" className="h-8 text-xs" onClick={() => {
+                setMessage(npcDraft.reply.spokenText);
+                setSpeakAsEntityId(npcDraft.entityId);
+                setNpcDraft(undefined);
+                messageInputRef.current?.focus();
+              }}>改一改再说</Button>
+              <Button variant="ghost" className="h-8 text-xs" onClick={() => setNpcDraft(undefined)}>丢弃</Button>
+            </div>
+          </div>}
+          {session?.isHost && speakAsNpc && <div className="mx-auto mb-2 flex max-w-4xl items-center gap-2 text-xs">
+            <span className="flex items-center gap-1.5 rounded-full border border-brass/40 bg-brass/10 px-2.5 py-1 text-brass"><UserRound className="h-3.5 w-3.5" />正在以「{speakAsNpc.name}」的身份发言</span>
+            <button type="button" aria-label="回到自己的身份" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => setSpeakAsEntityId(undefined)}><X className="h-3.5 w-3.5" /></button>
+          </div>}
           <div className="mx-auto flex max-w-4xl items-end gap-2">
             <div className="min-w-0 flex-1">
             <Textarea
@@ -1925,7 +1772,7 @@ export function RoomViewV2({
               disabled={commandsDisabled}
               aria-label="现场发言"
               className="max-h-40 min-h-[3.25rem] resize-y py-2.5"
-              placeholder={authenticationState === "authenticated" || session?.isHost ? session?.isHost ? "描述行动造成的结果，或继续讲述现场…" : "与人交谈、追问细节，或做无需检定的简单行动…" : "正在确认你的邀请…"}
+              placeholder={authenticationState === "authenticated" || session?.isHost ? session?.isHost ? speakAsNpc ? `以「${speakAsNpc.name}」的口吻说话…` : "描述行动造成的结果，或继续讲述现场…" : "与人交谈、和 NPC 说话、追问细节，或做无需检定的简单行动…" : "正在确认你的邀请…"}
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -2167,128 +2014,8 @@ export function RoomViewV2({
           <div className="grid gap-2">{[...world.entities.values()].map((entity) => {
             const canPresentHere = Boolean(session?.isHost && activeScene && (entity.kind === "location" || entity.kind === "npc"));
             const presentedHere = Boolean(activeScene && entityPresentedInScene(entity, activeScene.entityId));
-            return <div key={entity.entityId} className="rounded-md bg-zinc-950 p-3"><div className="flex items-center justify-between"><div><b className="text-sm">{entity.name}</b><span className="ml-2 text-[10px] text-zinc-600">{roomEntityKindLabel(entity.kind)}</span></div><div className="flex flex-wrap justify-end gap-2">{canPresentHere && (presentedHere ? <span className="text-[10px] text-emerald-400">已在当前情境</span> : <button className="text-xs text-brass hover:underline" onClick={() => void presentEntityInActiveScene(entity)}>让它在当前情境登场</button>)}{board && (session?.isHost || (board.kind === "evidence" && entity.kind === "clue")) && isAudienceSubsetV2(board.audience, entity.audience) && <button className="text-xs text-brass hover:underline" onClick={() => void placeEntity(entity)}>放到当前画面</button>}{entity.kind === "npc" && session?.isHost && <button className="text-xs text-brass hover:underline" onClick={() => setPendingNpcSessionEntityId(entity.entityId)}>开始交谈</button>}</div></div><p className="mt-1 line-clamp-3 text-xs leading-5 text-zinc-500">{entity.description}</p></div>;
+            return <div key={entity.entityId} className="rounded-md bg-zinc-950 p-3"><div className="flex items-center justify-between"><div><b className="text-sm">{entity.name}</b><span className="ml-2 text-[10px] text-zinc-600">{roomEntityKindLabel(entity.kind)}</span></div><div className="flex flex-wrap justify-end gap-2">{canPresentHere && (presentedHere ? <span className="text-[10px] text-emerald-400">已在当前情境</span> : <button className="text-xs text-brass hover:underline" onClick={() => void presentEntityInActiveScene(entity)}>让它在当前情境登场</button>)}{board && (session?.isHost || (board.kind === "evidence" && entity.kind === "clue")) && isAudienceSubsetV2(board.audience, entity.audience) && <button className="text-xs text-brass hover:underline" onClick={() => void placeEntity(entity)}>放到当前画面</button>}{entity.kind === "npc" && session?.isHost && !readOnly && <button className="text-xs text-brass hover:underline" onClick={() => beginSpeakAsNpc(entity)}>以TA的身份发言</button>}</div></div><p className="mt-1 line-clamp-3 text-xs leading-5 text-zinc-500">{entity.description}</p></div>;
           })}</div>
-        </Panel></ToolDisclosure>}
-
-        {world.npcSessions.size > 0 && <ToolDisclosure
-          title={session?.isHost ? "NPC 扮演助手" : "与 NPC 交谈"}
-          icon={UserRound}
-          hint={activeNpcSession?.title ?? `${world.npcSessions.size} 段交谈`}
-          detailsRef={npcConversationDetailsRef}
-        >
-        <Panel className="grid gap-3 p-4">
-          <div className="flex items-start gap-2">
-            <UserRound className="mt-0.5 h-4 w-4 shrink-0 text-brass" />
-            <div>
-              <h2 className="text-sm font-semibold">{session?.isHost ? "NPC 扮演助手" : "与 NPC 交谈"}</h2>
-              <p className="mt-1 text-xs leading-5 text-zinc-500">
-                {session?.isHost ? "在独立对话里扮演 NPC，或让助手先起草回应。" : "这里的交谈与大厅聊天分开记录。"}
-              </p>
-            </div>
-          </div>
-          <label className="grid gap-1.5 text-xs text-zinc-400">
-            <span>选择对话</span>
-            <select
-              aria-label="选择 NPC 对话"
-              className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-200"
-              value={activeNpcSession?.sessionId ?? ""}
-              onChange={(event) => setActiveNpcSessionId(event.target.value)}
-            >
-              <option value="" disabled>选择一段交谈</option>
-              {npcSessionsNewestFirst.map((npcSession) => <option key={npcSession.sessionId} value={npcSession.sessionId}>{npcSession.title}{npcSession.status === "paused" ? "（已暂停）" : npcSession.status === "closed" ? "（已结束）" : ""}</option>)}
-            </select>
-          </label>
-          {activeNpcSession && <>
-            <section aria-label="当前 NPC 对话" className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold text-zinc-100">{activeNpcSession.title}</h3>
-                {activeNpcSession.status !== "active" && <span className="rounded-full bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400">
-                  {activeNpcSession.status === "paused" ? "交谈已暂停" : "交谈已结束"}
-                </span>}
-              </div>
-              <p className="mt-1 text-[11px] text-zinc-500">{npcSessionAudienceLabelV2(activeNpcSession.audience, seats)}</p>
-              {session?.isHost && activeNpcSession.description && <p className="mt-1 text-xs leading-5 text-zinc-500">{activeNpcSession.description}</p>}
-              {activeNpcSession.endedAt && <p className="mt-1 text-[11px] text-zinc-600">结束于 {new Date(activeNpcSession.endedAt).toLocaleString()}</p>}
-            </section>
-
-            {session?.isHost && !readOnly && <section aria-label="NPC 交谈管理" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
-              <div>
-                <p className="text-xs font-medium text-zinc-300">交谈状态</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-600">暂停后可以恢复；结束后这段记录只读，需要为新的参与者另开一段交谈。</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {activeNpcSession.status === "active" && <Button variant="secondary" onClick={() => void pauseNpcSession()}>暂停交谈</Button>}
-                {activeNpcSession.status === "paused" && <Button onClick={() => void resumeNpcSession()}>恢复交谈</Button>}
-                {activeNpcSession.status !== "closed" && <Button variant="secondary" onClick={() => void endNpcSession()}>结束交谈</Button>}
-                {activeNpcEntity?.kind === "npc" && <Button variant={activeNpcSession.status === "closed" ? "primary" : "ghost"} onClick={() => setPendingNpcSessionEntityId(activeNpcEntity.entityId)}>另开新交谈</Button>}
-              </div>
-            </section>}
-
-            {session?.isHost && !readOnly && activeNpcSession.status === "active" && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
-              <div>
-                <p className="text-xs font-medium text-zinc-300">{activeNpcSession.autoReply && activeNpcSession.status === "active" ? "助手正在等待调查员发言" : "当前由 KP 手动回应"}</p>
-                <p className="mt-1 text-[11px] text-zinc-600">所有自动回应都可以立即停止。</p>
-              </div>
-              <div className="flex gap-2">
-                <Button disabled={activeNpcSession.autoReply && activeNpcSession.status === "active"} onClick={() => void updateNpcSession((current) => {
-                  const { endedAt: _endedAt, ...withoutEnd } = current;
-                  return { ...withoutEnd, revision: current.revision + 1, status: "active", autoReply: true };
-                })}>开启扮演助手</Button>
-                <Button variant="secondary" disabled={!activeNpcSession.autoReply || activeNpcSession.status !== "active"} onClick={() => void stopNpcAutomation(activeNpcSession)}>立即停止</Button>
-              </div>
-            </div>}
-
-            {session?.isHost && activeNpcShadowReplies.map((shadow) => <div key={shadow.jobId} className="grid gap-2 rounded-md border border-amber-800/60 bg-amber-950/20 p-3 text-xs">
-              <p className="font-semibold text-amber-200">待 KP 审核的 NPC 回应</p>
-              <p className="whitespace-pre-wrap text-zinc-300">{shadow.reply.spokenText}</p>
-              {shadow.reply.stageDirection && <p className="text-zinc-500">动作：{shadow.reply.stageDirection}</p>}
-              <div className="flex gap-2"><Button disabled={activeNpcSession.status !== "active"} onClick={() => void publishNpcShadow(shadow)}>确认并说出</Button><Button variant="secondary" onClick={() => onDismissNpcShadow?.(shadow.jobId)}>丢弃</Button></div>
-            </div>)}
-
-            <div aria-label="NPC 对话记录" className="max-h-72 space-y-2 overflow-y-auto rounded-lg bg-zinc-950/50 p-2">
-              {(world.npcMessages.get(activeNpcSession.sessionId) ?? []).length === 0 && <p className="px-2 py-6 text-center text-xs leading-5 text-zinc-600">还没有人开口。你可以从一句问候或一个问题开始。</p>}
-              {(world.npcMessages.get(activeNpcSession.sessionId) ?? []).map((item) => <div key={item.messageId} className="rounded bg-zinc-900/70 p-2 text-xs"><b>{npcPanelSpeakerLabelV2(item, activeNpcEntity?.name, seats, world.latestCharacters)}</b><p className="mt-1 whitespace-pre-wrap leading-5 text-zinc-400">{item.spokenText}</p></div>)}
-            </div>
-            {!readOnly && activeNpcSession.status === "active" && <label className="grid gap-1.5 text-xs text-zinc-400">
-              <span>{session?.isHost ? "输入调查员发言或 NPC 回应" : `你想对${activeNpcEntity ? ` ${activeNpcEntity.name}` : " NPC"}说什么？`}</span>
-              <Textarea aria-label="NPC 对话输入" value={npcMessage} onChange={(event) => setNpcMessage(event.target.value)} placeholder="只会发送到这段交谈" />
-            </label>}
-            {!readOnly && activeNpcSession.status !== "active" && <p role="status" className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-xs leading-5 text-zinc-500">{activeNpcSession.status === "paused" ? "KP 已暂停这段交谈。恢复后才能继续发言。" : "这段交谈已经结束，只能回看记录；需要继续时请另开一段交谈。"}</p>}
-            {!readOnly && activeNpcSession.status === "active" && <div className="flex gap-2">
-              <Button disabled={commandsDisabled || npcMessageSending || !npcMessage.trim()} onClick={() => void sendNpcPanelMessage("human")}>{npcMessageSending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}{session?.isHost ? `以 ${session.localSeat.displayName} 身份发言` : "发送"}</Button>
-              {session?.isHost && <Button variant="secondary" disabled={npcMessageSending || !npcMessage.trim()} onClick={() => void sendNpcPanelMessage("npc")}>以 NPC 身份回应</Button>}
-            </div>}
-
-            {session?.isHost && <details className="rounded-lg border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs">
-              <summary className="cursor-pointer font-medium text-zinc-400 hover:text-zinc-200">上下文与安全边界</summary>
-              <div className="mt-3 grid gap-3 border-t border-zinc-800 pt-3">
-                <p className="leading-5 text-zinc-500">每次回应会读取当前 NPC 卡、KP 挂载的资料（最多 64 条）和本对话最近的消息。不会读取大厅聊天、其他对话、完整模组、主持人笔记或本机文件。</p>
-                <div>
-                  <p className="mb-2 text-xs text-zinc-400">已挂载资料 · {activeNpcSession.pinnedContext.length}/64</p>
-                  {activeNpcSession.pinnedContext.length === 0 && <p className="rounded bg-zinc-950 p-2 text-zinc-600">尚未挂载额外资料；助手只会参考 NPC 卡和本对话。</p>}
-                  <div className="grid gap-1">{activeNpcSession.pinnedContext.map((pin) => <div key={pin.pinId} className="flex items-start justify-between gap-2 rounded bg-zinc-950 p-2 text-xs"><div><b>{pin.title}</b><p className="mt-1 line-clamp-2 text-zinc-500">{pin.body}</p></div>{!readOnly && activeNpcSession.status !== "closed" && <button className="shrink-0 text-red-300 hover:underline" onClick={() => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, pinnedContext: current.pinnedContext.filter((item) => item.pinId !== pin.pinId) }))}>移除</button>}</div>)}</div>
-                  {!readOnly && activeNpcSession.status !== "closed" && <>
-                    <Input className="mt-2" value={npcPinTitle} maxLength={240} onChange={(event) => setNpcPinTitle(event.target.value)} placeholder="资料标题" />
-                    <Textarea className="mt-2" value={npcPinBody} maxLength={100_000} onChange={(event) => setNpcPinBody(event.target.value)} placeholder="只有这里的正文会进入 NPC 上下文" />
-                    <Button className="mt-2" variant="secondary" disabled={!npcPinTitle.trim() || !npcPinBody.trim() || activeNpcSession.pinnedContext.length >= 64} onClick={() => void addNpcPin()}>挂载到这段交谈</Button>
-                  </>}
-                </div>
-              </div>
-            </details>}
-
-            {session?.isHost && <details className="rounded-lg border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs">
-              <summary className="cursor-pointer font-medium text-zinc-400 hover:text-zinc-200">高级设置</summary>
-              <div className="mt-3 grid gap-3 border-t border-zinc-800 pt-3">
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <Field label="AI 提供者"><select disabled={readOnly || activeNpcSession.status === "closed"} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={activeNpcSession.provider} onChange={(event) => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, provider: event.target.value as "codex" | "deepseek" }))}><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select></Field>
-                  <Field label="发布方式"><select disabled={readOnly || activeNpcSession.status === "closed"} className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={activeNpcSession.mode} onChange={(event) => void updateNpcSession((current) => ({ ...current, revision: current.revision + 1, mode: event.target.value as "shadow" | "autonomous" }))}><option value="shadow">先由 KP 审核</option><option value="autonomous">自动发布</option></select></Field>
-                </div>
-                <p className="leading-5 text-zinc-600">“先由 KP 审核”会把草稿留在 KP 本机，确认后才让 NPC 说出；自动发布让 NPC 直接开口，仍可随时停止。</p>
-                {activeNpcStatuses.length > 0 && <div className="grid gap-1">{activeNpcStatuses.slice(-3).map((status) => <p key={status.jobId} className={`rounded px-2 py-1 text-[11px] ${status.status === "failed" ? "bg-red-950/30 text-red-300" : status.status === "running" || status.status === "queued" ? "bg-amber-950/30 text-amber-200" : "bg-zinc-950 text-zinc-500"}`}>{status.message}</p>)}</div>}
-              </div>
-            </details>}
-          </>}
         </Panel></ToolDisclosure>}
 
         <details className="mt-2 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-600">
@@ -2296,13 +2023,6 @@ export function RoomViewV2({
           <p className="mt-2 leading-5">本机已保存 {visibleEvents.length} 条你有权查看的记录。另有 {views.length - visibleEvents.length} 个不可见的顺序标记，用来在重连后继续补齐；其中没有正文、内容类别或附件信息。</p>
         </details>
       </aside>
-      {session?.isHost && !readOnly && pendingNpcSessionEntity?.kind === "npc" && <NpcSessionStartDialogV2
-        npc={pendingNpcSessionEntity}
-        seats={seats}
-        busy={npcSessionCreating}
-        onCancel={() => setPendingNpcSessionEntityId(undefined)}
-        onConfirm={startNpcSession}
-      />}
     </div>
   );
 }
@@ -2421,42 +2141,38 @@ function SceneNpcCard({
   entity,
   artifacts,
   resolveAsset,
-  conversation,
   isHost,
   readOnly,
-  onStart,
-  onOpen,
+  speaking,
+  drafting,
+  onSpeakAs,
+  onDraftReply,
+  onStopDraft,
 }: {
   entity: RoomEntityV2;
   artifacts: ReadonlyMap<string, RoomArtifactV2>;
   resolveAsset?: (asset: AssetDescriptorV1) => Promise<string>;
-  conversation?: NpcInteractionSessionV1;
   isHost: boolean;
   readOnly: boolean;
-  onStart(): void;
-  onOpen(sessionId: string): void;
+  speaking: boolean;
+  drafting: boolean;
+  onSpeakAs(): void;
+  onDraftReply(): void;
+  onStopDraft(): void;
 }) {
-  const actionLabel = conversation?.status === "active"
-    ? isHost ? "打开交谈" : "进入交谈"
-    : "查看交谈";
   return <article className="rounded-lg bg-black/20 p-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <b className="text-sm text-zinc-100">{entity.name}</b>
-      {!readOnly && <div className="flex flex-wrap justify-end gap-2">
-        {conversation && <button type="button" className="text-xs font-medium text-brass hover:underline" aria-label={`${actionLabel}：${entity.name}`} onClick={() => onOpen(conversation.sessionId)}>{actionLabel}</button>}
-        {isHost && <button type="button" className="text-xs font-medium text-brass hover:underline" aria-label={`${conversation ? "另开交谈" : "开启交谈"}：${entity.name}`} onClick={onStart}>{conversation ? "另开交谈" : "开启交谈"}</button>}
+      {!readOnly && isHost && <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" className={`text-xs font-medium hover:underline ${speaking ? "text-emerald-300" : "text-brass"}`} aria-label={`以${entity.name}的身份发言`} aria-pressed={speaking} onClick={onSpeakAs}>{speaking ? "正在以 TA 的身份发言" : "以 TA 的身份发言"}</button>
+        {drafting
+          ? <button type="button" className="text-xs font-medium text-zinc-400 hover:underline" onClick={onStopDraft}>停止代答</button>
+          : <button type="button" className="text-xs font-medium text-brass hover:underline" aria-label={`让助手代答：${entity.name}`} onClick={onDraftReply}>让助手代答</button>}
       </div>}
     </div>
     {entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}
     <VisibleEntityArtifactMediaV2 entity={entity} artifacts={artifacts} resolveAsset={resolveAsset} />
-    {conversation?.status === "paused" && <p className="mt-2 text-[10px] text-zinc-600">这段交谈已暂停，仍可打开查看。</p>}
-    {conversation?.status === "closed" && <p className="mt-2 text-[10px] text-zinc-600">这段交谈已经结束，仍可回看记录。</p>}
   </article>;
-}
-
-function findNpcConversation(world: RoomWorldStateV2, npcEntityId: string): NpcInteractionSessionV1 | undefined {
-  const conversations = [...world.npcSessions.values()].filter((conversation) => conversation.npcEntityId === npcEntityId).reverse();
-  return conversations.find(({ status }) => status === "active") ?? conversations[0];
 }
 
 function isHumanRecordEvent(event: RoomEventV2): boolean {
@@ -2516,6 +2232,9 @@ function humanRecordSearchText(event: RoomEventV2, world: RoomWorldStateV2): str
   };
   switch (event.type) {
     case "chat.message":
+      parts.push(event.payload.message);
+      if (event.payload.persona) parts.push(event.payload.persona.name, "NPC");
+      break;
     case "system.notice":
       parts.push(event.payload.message);
       break;
@@ -2642,7 +2361,8 @@ function V2EventCard({
   event: RoomEventV2;
   resolveAsset?: (asset: AssetDescriptorV1) => Promise<string>;
 }) {
-  return <article className="rounded-xl border border-zinc-800/80 bg-zinc-900/55 px-4 py-3"><header className="mb-1.5 flex items-center gap-2 text-xs text-zinc-500"><span className="font-medium text-zinc-300">{event.sender.displayName}</span><time>{new Date(event.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><div className="text-sm leading-6 text-ink">{eventBody(event, resolveAsset)}</div></article>;
+  const persona = event.type === "chat.message" ? event.payload.persona : undefined;
+  return <article className="rounded-xl border border-zinc-800/80 bg-zinc-900/55 px-4 py-3"><header className="mb-1.5 flex items-center gap-2 text-xs text-zinc-500"><span className={`font-medium ${persona ? "text-brass" : "text-zinc-300"}`}>{persona ? persona.name : event.sender.displayName}</span>{persona && <span className="rounded bg-brass/15 px-1.5 py-0.5 text-[9px] font-semibold text-brass">NPC</span>}<time>{new Date(event.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><div className="text-sm leading-6 text-ink">{eventBody(event, resolveAsset)}</div></article>;
 }
 
 function RoomErrorNoticeV2({ error, onDismiss }: { error: string; onDismiss(): void }) {
@@ -2675,7 +2395,7 @@ function eventBody(
     case "character.updated": return <p>更新角色卡：<b>{event.payload.character.name}</b></p>;
     case "check.requested": return <div><p><b>{event.payload.characterName}</b> 提交行动：{event.payload.goal ?? event.payload.reason}</p><p className="mt-1 text-zinc-400">做法：{event.payload.approach ?? event.payload.reason}{event.payload.suggestedSkillName ? ` · 建议 ${event.payload.suggestedSkillName}${event.payload.proposedTarget ? ` ${event.payload.proposedTarget}` : ""}` : ""}</p></div>;
     case "check.authorized": return <p>KP 允许检定：{event.payload.skillName ? <><b>{event.payload.skillName}</b> · </> : null}目标 <b>{event.payload.target}</b> · {difficultyLabel(event.payload.requiredDifficulty)}</p>;
-    case "check.closed": return <p>{event.payload.outcome === "no-roll" ? "KP 判断无需掷骰，直接推进" : event.payload.outcome === "declined" ? "KP 判断这项行动当前不可行" : "调查员撤回了行动申请"}{event.payload.note ? `：${event.payload.note}` : ""}</p>;
+    case "check.closed": return <p>{event.payload.outcome === "no-roll" ? "KP 判断无需掷骰，直接推进" : event.payload.outcome === "declined" ? "KP 判断这项行动当前不可行" : event.sender.role === "host" ? "KP 撤回了这次裁定" : "调查员撤回了行动申请"}{event.payload.note ? `：${event.payload.note}` : ""}</p>;
     case "check.outcome.described": return <div><p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-400">本次行动的叙述结果</p><p className="mt-1 whitespace-pre-wrap">{event.payload.text}</p></div>;
     case "clue.claimed": return <p><b>{event.payload.characterName}</b> 将一条公开线索加入了自己的线索栏</p>;
     case "clue.unclaimed": return <p><b>{event.payload.characterName}</b> 将一条公开线索移出了自己的重点</p>;

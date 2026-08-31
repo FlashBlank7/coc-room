@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createRoomWorldStateV2, type BoardV1, type CheckAuthorizationV2, type CheckOutcomeV2, type CheckRequestV2, type Coc7Character, type ModulePackageV1, type NpcInteractionSessionV1, type RoomArtifactV2, type RoomEntityV2, type RoomEventViewV2, type SeatV2 } from "@coc-room/protocol";
+import { createRoomWorldStateV2, type BoardV1, type CheckAuthorizationV2, type CheckOutcomeV2, type CheckRequestV2, type Coc7Character, type ModulePackageV1, type RoomArtifactV2, type RoomEntityV2, type RoomEventViewV2, type SeatV2 } from "@coc-room/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getRepository, type RoomRecord } from "../data/repository";
@@ -10,9 +10,15 @@ import type { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
 import { RoomViewV2 } from "./RoomViewV2";
 
-const { generateNpcStatsDraft } = vi.hoisted(() => ({
+const { generateNpcStatsDraft, draftSceneNpcReply } = vi.hoisted(() => ({
   generateNpcStatsDraft: vi.fn(),
+  draftSceneNpcReply: vi.fn(),
 }));
+
+vi.mock("../ai/npc-scene-reply", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../ai/npc-scene-reply")>();
+  return { ...actual, draftSceneNpcReply };
+});
 
 vi.mock("../ai/tauri-npc-stats-draft-executor", () => ({
   tauriNpcStatsDraftExecutor: { generateDraft: generateNpcStatsDraft },
@@ -23,6 +29,7 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   generateNpcStatsDraft.mockReset();
+  draftSceneNpcReply.mockReset();
   vi.mocked(downloadTextInBrowser).mockReset();
   Reflect.deleteProperty(navigator, "clipboard");
   Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
@@ -1720,31 +1727,6 @@ describe("RoomViewV2 board creation", () => {
     expect(submit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "board.activated" }));
   });
 
-  it("opens an NPC conversation from the person who is present in the current scene", async () => {
-    const session = {
-      isHost: false,
-      submit: vi.fn(),
-      localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-scene-entry", "player");
-    const baseWorld = npcConversationWorld(room.id);
-    const scene = roomEntity("scene-theatre-door", "scene", "剧院后门", "雨水顺着铁皮棚落下。", {});
-    const npc = baseWorld.entities.get("npc-doorkeeper")!;
-    const presentedNpc = { ...npc, data: { ...npc.data, presentedInSceneEntityIds: [scene.entityId] } };
-    const world = {
-      ...baseWorld,
-      activeSceneEntityId: scene.entityId,
-      entities: new Map([[scene.entityId, scene], [presentedNpc.entityId, presentedNpc]]),
-    };
-
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-
-    fireEvent.click(screen.getByRole("button", { name: "进入交谈：守门人" }));
-    const conversationPanel = screen.getByText("与 NPC 交谈", { selector: "span" }).closest("details") as HTMLDetailsElement;
-    await waitFor(() => expect(conversationPanel.open).toBe(true));
-    expect((screen.getByLabelText("选择 NPC 对话") as HTMLSelectElement).value).toBe("npc-session-1");
-  });
-
   it("shows which sound is ready and lets the keeper cancel a pending synchronized play", async () => {
     let releasePlayers!: () => void;
     const waitForAssetReady = vi.fn(() => new Promise<void>((resolve) => { releasePlayers = resolve; }));
@@ -1855,51 +1837,14 @@ describe("RoomViewV2 board creation", () => {
     expect(screen.queryByText("地点与人物图片", { selector: "span" })).toBeNull();
   });
 
-  it("keeps the player NPC panel focused on the conversation only", async () => {
-    const submitConfirmed = vi.fn().mockResolvedValue(undefined);
-    const session = {
-      isHost: false,
-      submitConfirmed,
-      localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-player", "player");
-    const world = npcConversationWorld(room.id);
-
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByText("与 NPC 交谈", { selector: "span" }));
-
-    expect(screen.getByRole("heading", { name: "与 NPC 交谈" })).toBeTruthy();
-    expect((screen.getByLabelText("选择 NPC 对话") as HTMLSelectElement).value).toBe("npc-session-1");
-    expect(screen.getByText("你看起来在找什么东西。")).toBeTruthy();
-    expect(screen.queryByText("上下文与安全边界")).toBeNull();
-    expect(screen.queryByText("高级设置")).toBeNull();
-    expect(screen.queryByText(/24,000 个字符/)).toBeNull();
-    expect(screen.queryByText("NPC 只能读取本面板的有限上下文")).toBeNull();
-
-    fireEvent.change(screen.getByLabelText("NPC 对话输入"), { target: { value: "昨晚是谁关的后门？" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
-    expect(submitConfirmed.mock.calls[0]![0]).toMatchObject({
-      type: "npc.session.message",
-      audience: { kind: "room" },
-      payload: {
-        sessionId: "npc-session-1",
-        role: "human",
-        speakerSeatId: "seat-player",
-        spokenText: "昨晚是谁关的后门？",
-      },
-    });
-  });
-
-  it("asks the keeper who may enter before publishing a new NPC panel", async () => {
+  it("lets the keeper speak as a scene NPC in the shared story stream", async () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const session = {
       isHost: true,
       submit,
       localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
     } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-audience", "host");
+    const room = roomRecord("room-v2-speak-as", "host");
     const scene = roomEntity("scene-foyer", "scene", "剧院门厅", "雨水淌过磨石地面。", {});
     const npc = roomEntity("npc-doorkeeper", "npc", "守门人", "脸色苍白的剧院守门人。", {
       presentedInSceneEntityIds: [scene.entityId],
@@ -1909,348 +1854,108 @@ describe("RoomViewV2 board creation", () => {
       activeSceneEntityId: scene.entityId,
       entities: new Map([[scene.entityId, scene], [npc.entityId, npc]]),
     };
-    const seats: SeatV2[] = [
-      { seatId: "seat-host", role: "host", displayName: "KP", extensions: {} },
-      { seatId: "seat-player", role: "player", displayName: "小林", peerId: "peer-player", extensions: {} },
-      { seatId: "seat-bob", role: "player", displayName: "阿岚", extensions: {} },
-    ];
-
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={seats} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "开启交谈：守门人" }));
-
-    expect(screen.getByRole("dialog", { name: "开始与 守门人 交谈" })).toBeTruthy();
-    expect(submit).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("radio", { name: /定向交谈/ }));
-    fireEvent.click(screen.getByLabelText("邀请 小林 加入交谈"));
-    fireEvent.click(screen.getByRole("button", { name: "创建定向交谈" }));
-
-    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      type: "npc.session.upserted",
-      audience: { kind: "seats", seatIds: ["seat-player"] },
-      payload: {
-        session: expect.objectContaining({
-          npcEntityId: npc.entityId,
-          audience: { kind: "seats", seatIds: ["seat-player"] },
-        }),
-      },
-    })));
-  });
-
-  it("lets the keeper pause, resume, and irreversibly end an NPC conversation", async () => {
-    const submit = vi.fn().mockResolvedValue(undefined);
-    const session = {
-      isHost: true,
-      submit,
-      localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-lifecycle", "host");
-    const activeWorld = npcConversationWorld(room.id);
-    const active = activeWorld.npcSessions.get("npc-session-1")!;
-    const props = { room, session, views: [] as RoomEventViewV2[], seats: [] as SeatV2[], paths: {}, authenticationState: "authenticated" as const, setConnectionError: vi.fn(), onLeave: vi.fn() };
-    const view = render(<RoomViewV2 {...props} world={activeWorld} />);
-    fireEvent.click(screen.getByText("NPC 扮演助手", { selector: "span" }));
-
-    fireEvent.click(screen.getByRole("button", { name: "暂停交谈" }));
-    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
-    expect(submit.mock.calls[0]![0]).toMatchObject({
-      type: "npc.session.upserted",
-      audience: active.audience,
-      payload: { session: { sessionId: active.sessionId, revision: 2, status: "paused", autoReply: false } },
-    });
-
-    const paused: NpcInteractionSessionV1 = { ...active, revision: 2, status: "paused", autoReply: false };
-    view.rerender(<RoomViewV2 {...props} world={{ ...activeWorld, npcSessions: new Map([[paused.sessionId, paused]]) }} />);
-    expect(screen.queryByLabelText("NPC 对话输入")).toBeNull();
-    expect(screen.getByText("KP 已暂停这段交谈。恢复后才能继续发言。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "恢复交谈" }));
-
-    await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
-    expect(submit.mock.calls[1]![0]).toMatchObject({
-      type: "npc.session.upserted",
-      payload: { session: { sessionId: active.sessionId, revision: 3, status: "active", autoReply: false } },
-    });
-    expect(submit.mock.calls[1]![0].payload.session).not.toHaveProperty("endedAt");
-
-    const resumed: NpcInteractionSessionV1 = { ...paused, revision: 3, status: "active" };
-    view.rerender(<RoomViewV2 {...props} world={{ ...activeWorld, npcSessions: new Map([[resumed.sessionId, resumed]]) }} />);
-    fireEvent.click(screen.getByRole("button", { name: "结束交谈" }));
-
-    await waitFor(() => expect(submit).toHaveBeenCalledTimes(3));
-    const closeProposal = submit.mock.calls[2]![0];
-    expect(closeProposal).toMatchObject({
-      type: "npc.session.upserted",
-      audience: active.audience,
-      payload: { session: { sessionId: active.sessionId, revision: 4, status: "closed", autoReply: false, endedAt: expect.any(String) } },
-    });
-    expect(Number.isNaN(Date.parse(closeProposal.payload.session.endedAt))).toBe(false);
-
-    const closed = closeProposal.payload.session as NpcInteractionSessionV1;
-    view.rerender(<RoomViewV2 {...props} world={{ ...activeWorld, npcSessions: new Map([[closed.sessionId, closed]]) }} />);
-    expect(screen.queryByLabelText("NPC 对话输入")).toBeNull();
-    expect(screen.getByText(/这段交谈已经结束，只能回看记录/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "恢复交谈" })).toBeNull();
-    expect(screen.getByRole("button", { name: "另开新交谈" })).toBeTruthy();
-  });
-
-  it("keeps a closed NPC panel read-only for players", () => {
-    const submitConfirmed = vi.fn();
-    const session = {
-      isHost: false,
-      submitConfirmed,
-      localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-closed-player", "player");
-    const baseWorld = npcConversationWorld(room.id);
-    const active = baseWorld.npcSessions.get("npc-session-1")!;
-    const closed: NpcInteractionSessionV1 = {
-      ...active,
-      revision: 2,
-      status: "closed",
-      autoReply: false,
-      endedAt: "2026-01-01T00:05:00.000Z",
-    };
-    const world = { ...baseWorld, npcSessions: new Map([[closed.sessionId, closed]]) };
 
     render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByText("与 NPC 交谈", { selector: "span" }));
 
-    expect(screen.getByText("交谈已结束")).toBeTruthy();
-    expect(screen.getByText(/这段交谈已经结束，只能回看记录/)).toBeTruthy();
-    expect(screen.queryByLabelText("NPC 对话输入")).toBeNull();
-    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
-    expect(submitConfirmed).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "以守门人的身份发言" }));
+    expect(screen.getByText(/正在以「守门人」的身份发言/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("现场发言"), { target: { value: "这么晚了，剧院不接待客人。" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "chat.message",
+      payload: expect.objectContaining({
+        message: "这么晚了，剧院不接待客人。",
+        persona: { name: "守门人", entityId: "npc-doorkeeper" },
+      }),
+    })));
+
+    // Dropping the mask sends the next line as the keeper again.
+    fireEvent.click(screen.getByRole("button", { name: "回到自己的身份" }));
+    fireEvent.change(screen.getByLabelText("现场发言"), { target: { value: "雨声盖过了你们的脚步。" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+    const second = submit.mock.calls[1]![0] as { payload: { persona?: unknown } };
+    expect(second.payload.persona).toBeUndefined();
   });
 
-  it("lets the keeper open a new targeted panel for an NPC with an old closed conversation", async () => {
+  it("drafts an assistant reply the keeper can publish in the NPC's voice", async () => {
+    draftSceneNpcReply.mockResolvedValue({ spokenText: "昨夜我一直守在温室。", stageDirection: "低头擦拭钥匙" });
     const submit = vi.fn().mockResolvedValue(undefined);
     const session = {
       isHost: true,
       submit,
       localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
     } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-new-audience", "host");
-    const baseWorld = npcConversationWorld(room.id);
+    const room = roomRecord("room-v2-npc-draft", "host");
     const scene = roomEntity("scene-foyer", "scene", "剧院门厅", "雨水淌过磨石地面。", {});
-    const npc = baseWorld.entities.get("npc-doorkeeper")!;
-    const presentedNpc = { ...npc, data: { ...npc.data, presentedInSceneEntityIds: [scene.entityId] } };
-    const old = baseWorld.npcSessions.get("npc-session-1")!;
-    const closed: NpcInteractionSessionV1 = { ...old, revision: 2, status: "closed", autoReply: false, endedAt: "2026-01-01T00:05:00.000Z" };
-    const world = {
-      ...baseWorld,
-      activeSceneEntityId: scene.entityId,
-      entities: new Map([[scene.entityId, scene], [presentedNpc.entityId, presentedNpc]]),
-      npcSessions: new Map([[closed.sessionId, closed]]),
-    };
-    const seats: SeatV2[] = [
-      { seatId: "seat-host", role: "host", displayName: "KP", extensions: {} },
-      { seatId: "seat-player", role: "player", displayName: "小林", extensions: {} },
-    ];
-
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={seats} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "查看交谈：守门人" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "另开交谈：守门人" }));
-    fireEvent.click(screen.getByRole("radio", { name: /定向交谈/ }));
-    fireEvent.click(screen.getByLabelText("邀请 小林 加入交谈"));
-    fireEvent.click(screen.getByRole("button", { name: "创建定向交谈" }));
-
-    await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-    const proposal = submit.mock.calls[0]![0];
-    expect(proposal).toMatchObject({
-      type: "npc.session.upserted",
-      audience: { kind: "seats", seatIds: ["seat-player"] },
-      payload: { session: { revision: 1, npcEntityId: npc.entityId, status: "active", audience: { kind: "seats", seatIds: ["seat-player"] } } },
+    const npc = roomEntity("npc-doorkeeper", "npc", "守门人", "脸色苍白的剧院守门人。", {
+      presentedInSceneEntityIds: [scene.entityId],
     });
-    expect(proposal.payload.session.sessionId).not.toBe(closed.sessionId);
+    const world = {
+      ...createRoomWorldStateV2(room.id),
+      activeSceneEntityId: scene.entityId,
+      entities: new Map([[scene.entityId, scene], [npc.entityId, npc]]),
+    };
+
+    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "让助手代答：守门人" }));
+    expect(await screen.findByText(/「守门人」的代答草稿 · 只有你能看到/)).toBeTruthy();
+    expect(screen.getByText("昨夜我一直守在温室。")).toBeTruthy();
+    expect(screen.getByText(/低头擦拭钥匙/)).toBeTruthy();
+    expect(draftSceneNpcReply).toHaveBeenCalledWith(expect.objectContaining({
+      npc: expect.objectContaining({ entityId: "npc-doorkeeper" }),
+      provider: "codex",
+    }));
+    // Nothing reaches the table until the keeper says so.
+    expect(submit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "让 TA 说出" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "chat.message",
+      payload: expect.objectContaining({
+        message: "昨夜我一直守在温室。",
+        persona: { name: "守门人", entityId: "npc-doorkeeper" },
+      }),
+    })));
+    expect(screen.queryByText(/「守门人」的代答草稿/)).toBeNull();
   });
 
-  it("labels a human NPC-panel message with its character and captured seat name", () => {
+  it("shows an NPC-voiced line under the NPC's name and hides speak-as from players", () => {
     const session = {
       isHost: false,
       submit: vi.fn(),
-      localSeat: { seatId: "seat-player", role: "player", displayName: "小林" },
+      localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" },
     } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-speaker", "player");
-    const baseWorld = npcConversationWorld(room.id);
-    const conversation = baseWorld.npcSessions.get("npc-session-1")!;
-    const character = roomInvestigator();
+    const room = roomRecord("room-v2-npc-line", "player");
+    const scene = roomEntity("scene-foyer", "scene", "剧院门厅", "雨水淌过磨石地面。", {});
+    const npc = roomEntity("npc-doorkeeper", "npc", "守门人", "脸色苍白的剧院守门人。", {
+      presentedInSceneEntityIds: [scene.entityId],
+    });
     const world = {
-      ...baseWorld,
-      latestCharacters: new Map([[character.id, character]]),
-      npcMessages: new Map([[conversation.sessionId, [{
-        sessionId: conversation.sessionId,
-        messageId: "npc-message-human",
-        role: "human" as const,
-        speakerSeatId: "seat-player",
-        speakerDisplayName: "小林",
-        spokenText: "昨晚是谁关的后门？",
-        occurredAt: "2026-01-01T00:01:00.000Z",
-      }]]]),
+      ...createRoomWorldStateV2(room.id),
+      activeSceneEntityId: scene.entityId,
+      entities: new Map([[scene.entityId, scene], [npc.entityId, npc]]),
     };
+    const views = [fullView({
+      roomId: room.id,
+      eventId: "00000000-0000-4000-8000-000000000201",
+      sequence: 1,
+      sender: { seatId: "seat-host", role: "host", displayName: "KP 本名" },
+      type: "chat.message",
+      payload: { message: "这么晚了，剧院不接待客人。", format: "plain", persona: { name: "守门人", entityId: "npc-doorkeeper" } },
+    })];
 
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByText("与 NPC 交谈", { selector: "span" }));
+    render(<RoomViewV2 room={room} session={session} views={views} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
 
-    const record = screen.getByLabelText("NPC 对话记录");
-    expect(within(record).getByText("林默（小林）")).toBeTruthy();
-    expect(within(record).queryByText("调查员")).toBeNull();
-    expect(screen.getByText("房间所有人可见")).toBeTruthy();
-  });
+    const line = screen.getByText("这么晚了，剧院不接待客人。").closest("article") as HTMLElement;
+    expect(within(line).getByText("守门人")).toBeTruthy();
+    expect(within(line).getByText("NPC")).toBeTruthy();
+    expect(within(line).queryByText("KP 本名")).toBeNull();
 
-  it("keeps NPC context limits and provider controls in keeper-only collapsed sections", () => {
-    const session = {
-      isHost: true,
-      submit: vi.fn().mockResolvedValue(undefined),
-      localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-host", "host");
-    const world = npcConversationWorld(room.id);
-
-    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByText("NPC 扮演助手", { selector: "span" }));
-
-    expect(screen.getByRole("heading", { name: "NPC 扮演助手" })).toBeTruthy();
-    const contextDetails = screen.getByText("上下文与安全边界").closest("details") as HTMLDetailsElement;
-    const advancedDetails = screen.getByText("高级设置").closest("details") as HTMLDetailsElement;
-    expect(contextDetails.open).toBe(false);
-    expect(advancedDetails.open).toBe(false);
-    expect(screen.getByText(/每次回应会读取当前 NPC 卡、KP 挂载的资料（最多 64 条）和本对话最近的消息/).closest("details")).toBe(contextDetails);
-    expect(screen.getByText(/已挂载资料 · \d+\/64/).closest("details")).toBe(contextDetails);
-    expect(screen.getByLabelText("AI 提供者").closest("details")).toBe(advancedDetails);
-    expect(screen.getByLabelText("发布方式").closest("details")).toBe(advancedDetails);
-  });
-
-  it("keeps the emergency stop visible while the NPC assistant is active", async () => {
-    const submit = vi.fn().mockResolvedValue(undefined);
-    const submitConfirmed = vi.fn().mockResolvedValue(undefined);
-    const session = {
-      isHost: true,
-      submit,
-      submitConfirmed,
-      localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-stop", "host");
-    const baseWorld = npcConversationWorld(room.id);
-    const conversation = baseWorld.npcSessions.get("npc-session-1")!;
-    const world = {
-      ...baseWorld,
-      npcSessions: new Map([[conversation.sessionId, { ...conversation, autoReply: true }]]),
-    };
-
-    const { rerender } = render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-
-    const status = screen.getByRole("status", { name: "NPC 自动回应状态" });
-    expect(status.textContent).toContain("与守门人交谈 · 扮演助手正在运行");
-    expect(status.closest("aside")).toBeNull();
-    expect(status.closest("details")).toBeNull();
-    expect((screen.getByText("NPC 扮演助手", { selector: "span" }).closest("details") as HTMLDetailsElement).open).toBe(false);
-    fireEvent.click(within(status).getByRole("button", { name: "立即停止" }));
-
-    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      type: "npc.session.upserted",
-      payload: { session: expect.objectContaining({ status: "active", autoReply: false }) },
-    })));
-
-    const stoppedConversation = {
-      ...conversation,
-      revision: conversation.revision + 1,
-      status: "active" as const,
-      autoReply: false,
-    };
-    rerender(<RoomViewV2 room={room} session={session} views={[]} world={{
-      ...baseWorld,
-      npcSessions: new Map([[stoppedConversation.sessionId, stoppedConversation]]),
-    }} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
-    fireEvent.click(screen.getByText("NPC 扮演助手", { selector: "span" }));
-    expect((screen.getByRole("button", { name: "立即停止" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText("NPC 对话输入"), { target: { value: "我来亲自回答。" } });
-    fireEvent.click(screen.getByRole("button", { name: "以 NPC 身份回应" }));
-    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledWith(expect.objectContaining({
-      type: "npc.session.message",
-      payload: expect.objectContaining({
-        sessionId: stoppedConversation.sessionId,
-        role: "npc",
-        spokenText: "我来亲自回答。",
-      }),
-    })));
-  });
-
-  it("surfaces another NPC panel's shadow review and targeted stop outside room tools", async () => {
-    const submit = vi.fn().mockResolvedValue(undefined);
-    const session = {
-      isHost: true,
-      submit,
-      localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
-    } as unknown as RoomSessionV2;
-    const room = roomRecord("room-v2-npc-background-review", "host");
-    const baseWorld = npcConversationWorld(room.id);
-    const firstConversation = baseWorld.npcSessions.get("npc-session-1")!;
-    const secondNpc = roomEntity("npc-gardener", "npc", "园丁", "他不停擦拭沾泥的双手。", {});
-    const secondConversation: NpcInteractionSessionV1 = {
-      ...firstConversation,
-      sessionId: "npc-session-2",
-      npcEntityId: secondNpc.entityId,
-      title: "与园丁交谈",
-      autoReply: true,
-    };
-    const world = {
-      ...baseWorld,
-      entities: new Map([...baseWorld.entities, [secondNpc.entityId, secondNpc]]),
-      npcSessions: new Map([
-        [firstConversation.sessionId, firstConversation],
-        [secondConversation.sessionId, secondConversation],
-      ]),
-    };
-
-    render(<RoomViewV2
-      room={room}
-      session={session}
-      views={[]}
-      world={world}
-      seats={[]}
-      paths={{}}
-      authenticationState="authenticated"
-      setConnectionError={vi.fn()}
-      npcJobStatuses={[{
-        kind: "ai.job.status",
-        jobId: "job-gardener",
-        task: "npc-dialogue",
-        sessionId: secondConversation.sessionId,
-        triggerMessageId: "message-question",
-        status: "completed",
-        message: "影子回复已完成，仅 KP 本机可见",
-      }]}
-      npcShadowReplies={[{
-        jobId: "job-gardener",
-        sessionId: secondConversation.sessionId,
-        triggerMessageId: "message-question",
-        reply: { spokenText: "昨夜我一直守在温室。" },
-      }]}
-      onLeave={vi.fn()}
-    />);
-
-    const status = screen.getByRole("status", { name: "NPC 自动回应状态" });
-    expect(status.textContent).toContain("与园丁交谈 · 1 条回应待审核");
-    expect(status.closest("aside")).toBeNull();
-    expect(status.closest("details")).toBeNull();
-
-    fireEvent.click(within(status).getByRole("button", { name: "审核回应" }));
-    await waitFor(() => expect((screen.getByLabelText("选择 NPC 对话") as HTMLSelectElement).value).toBe(secondConversation.sessionId));
-    expect(screen.getByText("昨夜我一直守在温室。")).toBeTruthy();
-
-    fireEvent.click(within(status).getByRole("button", { name: "立即停止" }));
-    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      type: "npc.session.upserted",
-      payload: {
-        session: expect.objectContaining({
-          sessionId: secondConversation.sessionId,
-          status: "active",
-          autoReply: false,
-        }),
-      },
-    })));
-    expect(submit).not.toHaveBeenCalledWith(expect.objectContaining({
-      payload: { session: expect.objectContaining({ sessionId: firstConversation.sessionId }) },
-    }));
+    // Players talk to NPCs in the same stream; they get no impersonation tools.
+    expect(screen.queryByRole("button", { name: "以守门人的身份发言" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "让助手代答：守门人" })).toBeNull();
   });
 });
 
@@ -2416,40 +2121,6 @@ function zeroSceneModuleFixture(): ModulePackageV1 {
       relatedEntityIds: [],
       sourceRefs: [],
     }],
-  };
-}
-
-function npcConversationWorld(roomId: string) {
-  const base = createRoomWorldStateV2(roomId);
-  const npc = roomEntity("npc-doorkeeper", "npc", "守门人", "脸色苍白的剧院守门人。", {});
-  const npcSession: NpcInteractionSessionV1 = {
-    schemaVersion: 1,
-    sessionId: "npc-session-1",
-    revision: 1,
-    npcEntityId: npc.entityId,
-    title: "与守门人交谈",
-    description: "NPC 只能读取本面板的有限上下文",
-    status: "active",
-    audience: { kind: "room" },
-    provider: "codex",
-    model: "",
-    autoReply: false,
-    mode: "shadow",
-    pinnedContext: [{ pinId: "pin-ticket", title: "撕破的票根", body: "票根上印着昨夜十一点。" }],
-    startedAt: "2026-01-01T00:00:00.000Z",
-    extensions: {},
-  };
-  return {
-    ...base,
-    entities: new Map([[npc.entityId, npc]]),
-    npcSessions: new Map([[npcSession.sessionId, npcSession]]),
-    npcMessages: new Map([[npcSession.sessionId, [{
-      sessionId: npcSession.sessionId,
-      messageId: "npc-message-1",
-      role: "npc" as const,
-      spokenText: "你看起来在找什么东西。",
-      occurredAt: "2026-01-01T00:01:00.000Z",
-    }]]]),
   };
 }
 
