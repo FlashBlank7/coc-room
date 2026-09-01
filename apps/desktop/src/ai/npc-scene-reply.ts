@@ -366,3 +366,103 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Draft runs are owned here, not by the room view: the keeper who asks for a
+ * reply and then checks another tab must find the finished draft waiting, not
+ * silently discarded with the unmounted component.
+ */
+export interface SceneNpcDraft {
+  readonly roomId: string;
+  readonly entityId: string;
+  readonly name: string;
+  readonly reply: NpcReplyOutputV1;
+}
+
+interface SceneNpcDraftRun {
+  readonly abort: AbortController;
+}
+
+const npcDraftRuns = new Map<string, SceneNpcDraftRun>();
+const npcDraftResults = new Map<string, SceneNpcDraft>();
+const npcDraftErrors = new Map<string, string>();
+const npcDraftListeners = new Set<() => void>();
+
+const npcDraftKey = (roomId: string) => roomId;
+
+function notifyNpcDraftListeners(): void {
+  for (const listener of [...npcDraftListeners]) listener();
+}
+
+export function subscribeSceneNpcDrafts(listener: () => void): () => void {
+  npcDraftListeners.add(listener);
+  return () => npcDraftListeners.delete(listener);
+}
+
+export function sceneNpcDraftRunningEntityId(roomId: string): string | undefined {
+  return npcDraftRuns.has(npcDraftKey(roomId)) ? runningEntityByRoom.get(roomId) : undefined;
+}
+
+const runningEntityByRoom = new Map<string, string>();
+
+export function sceneNpcDraftFor(roomId: string): SceneNpcDraft | undefined {
+  return npcDraftResults.get(npcDraftKey(roomId));
+}
+
+export function sceneNpcDraftError(roomId: string): string | undefined {
+  return npcDraftErrors.get(npcDraftKey(roomId));
+}
+
+export function dismissSceneNpcDraft(roomId: string): void {
+  npcDraftResults.delete(npcDraftKey(roomId));
+  npcDraftErrors.delete(npcDraftKey(roomId));
+  notifyNpcDraftListeners();
+}
+
+export function stopSceneNpcDraftRun(roomId: string): void {
+  npcDraftRuns.get(npcDraftKey(roomId))?.abort.abort(new Error("KP 停止了这次代答"));
+  npcDraftRuns.delete(npcDraftKey(roomId));
+  runningEntityByRoom.delete(roomId);
+  notifyNpcDraftListeners();
+}
+
+export async function startSceneNpcDraftRun(options: {
+  roomId: string;
+  npc: RoomEntityV2;
+  events: readonly RoomEventV2[];
+  provider: "deepseek" | "codex";
+  model: string;
+}): Promise<void> {
+  const key = npcDraftKey(options.roomId);
+  if (npcDraftRuns.has(key)) return;
+  const abort = new AbortController();
+  npcDraftRuns.set(key, { abort });
+  runningEntityByRoom.set(options.roomId, options.npc.entityId);
+  npcDraftResults.delete(key);
+  npcDraftErrors.delete(key);
+  notifyNpcDraftListeners();
+  try {
+    const reply = await draftSceneNpcReply({
+      npc: options.npc,
+      events: options.events,
+      provider: options.provider,
+      model: options.model,
+      signal: abort.signal,
+    });
+    if (abort.signal.aborted) return;
+    npcDraftResults.set(key, {
+      roomId: options.roomId,
+      entityId: options.npc.entityId,
+      name: options.npc.name,
+      reply,
+    });
+  } catch (cause) {
+    if (!abort.signal.aborted) {
+      npcDraftErrors.set(key, cause instanceof Error ? cause.message : String(cause));
+    }
+  } finally {
+    npcDraftRuns.delete(key);
+    runningEntityByRoom.delete(options.roomId);
+    notifyNpcDraftListeners();
+  }
+}

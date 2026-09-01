@@ -15,9 +15,9 @@ const { generateNpcStatsDraft, draftSceneNpcReply } = vi.hoisted(() => ({
   draftSceneNpcReply: vi.fn(),
 }));
 
-vi.mock("../ai/npc-scene-reply", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../ai/npc-scene-reply")>();
-  return { ...actual, draftSceneNpcReply };
+vi.mock("../ai/web-development-ai-bridge", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../ai/web-development-ai-bridge")>();
+  return { ...actual, runWebDevelopmentAiTask: draftSceneNpcReply };
 });
 
 vi.mock("../ai/tauri-npc-stats-draft-executor", () => ({
@@ -287,6 +287,34 @@ describe("RoomViewV2 board creation", () => {
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" }));
     expect(screen.getByRole("dialog", { name: "导演台" })).toBeTruthy();
     expect(within(workbench).getByText("这是 KP 才能看的场景摘要")).toBeTruthy();
+  });
+
+  it("publishes the module's first scene as the opening with one click", async () => {
+    const modulePackage = { ...openingModuleFixture(), moduleId: "module-quick-opening" };
+    await (await getRepository()).saveModule({ package: modulePackage, sourceText: "本地 KP 原文" });
+    const room = roomRecord("room-v2-quick-opening", "host");
+    const submitConfirmed = vi.fn().mockResolvedValue(undefined);
+    const session = {
+      isHost: true,
+      submit: vi.fn(),
+      submitConfirmed,
+      world: { entities: new Map() },
+      localSeat: { seatId: "seat-host", role: "host", displayName: "KP" },
+    } as unknown as RoomSessionV2;
+    const world = {
+      ...createRoomWorldStateV2(room.id),
+      activeModule: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, title: modulePackage.metadata.title },
+    };
+
+    render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "一键开场：剧院后门" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledTimes(2));
+    expect(submitConfirmed.mock.calls[0]![0]).toMatchObject({
+      type: "entity.upserted",
+      payload: { entity: expect.objectContaining({ kind: "scene", name: "剧院后门", description: "这是 KP 才能看的场景摘要" }) },
+    });
+    expect(submitConfirmed.mock.calls[1]![0]).toMatchObject({ type: "scene.focused" });
   });
 
   it("lets a keeper recover a loaded zero-scene module with a private manual opening", async () => {
@@ -1880,7 +1908,10 @@ describe("RoomViewV2 board creation", () => {
   });
 
   it("drafts an assistant reply the keeper can publish in the NPC's voice", async () => {
-    draftSceneNpcReply.mockResolvedValue({ spokenText: "昨夜我一直守在温室。", stageDirection: "低头擦拭钥匙" });
+    draftSceneNpcReply.mockResolvedValue([{
+      type: "result",
+      result: { reply: { spokenText: "昨夜我一直守在温室。", stageDirection: "低头擦拭钥匙" } },
+    }]);
     const submit = vi.fn().mockResolvedValue(undefined);
     const session = {
       isHost: true,
@@ -1904,10 +1935,10 @@ describe("RoomViewV2 board creation", () => {
     expect(await screen.findByText(/「守门人」的代答草稿 · 只有你能看到/)).toBeTruthy();
     expect(screen.getByText("昨夜我一直守在温室。")).toBeTruthy();
     expect(screen.getByText(/低头擦拭钥匙/)).toBeTruthy();
-    expect(draftSceneNpcReply).toHaveBeenCalledWith(expect.objectContaining({
-      npc: expect.objectContaining({ entityId: "npc-doorkeeper" }),
+    expect(draftSceneNpcReply).toHaveBeenCalledWith("npc-reply", expect.objectContaining({
       provider: "codex",
-    }));
+      npcCard: expect.objectContaining({ id: "npc-doorkeeper" }),
+    }), expect.anything());
     // Nothing reaches the table until the keeper says so.
     expect(submit).not.toHaveBeenCalled();
 

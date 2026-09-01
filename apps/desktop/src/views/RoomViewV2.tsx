@@ -1,6 +1,6 @@
 import { characteristicBandSuffix } from "../lib/characteristic-bands";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
-import { Check, Clapperboard, Copy, Dices, Download, FileText, FolderKanban, ImagePlus, Loader2, LogOut, Map, MoreHorizontal, Music, Plus, RefreshCw, Send, Sparkles, Square, UserRound, UsersRound, Volume2, VolumeX, Wrench, X } from "lucide-react";
+import { Check, Clapperboard, Copy, Dices, Download, FileText, FolderKanban, ImagePlus, Loader2, LogOut, Map, MoreHorizontal, Music, Play, Plus, RefreshCw, Send, Sparkles, Square, UserRound, UsersRound, Volume2, VolumeX, Wrench, X } from "lucide-react";
 import {
   exportEventsV2ToHtml,
   exportEventsV2ToMarkdown,
@@ -69,8 +69,18 @@ import {
   type CodexImageDraft,
   type CodexImageJobKind,
 } from "../lib/codex-image-executor";
-import { draftSceneNpcReply, type NpcReplyOutputV1 } from "../ai/npc-scene-reply";
+import {
+  dismissSceneNpcDraft,
+  sceneNpcDraftError,
+  sceneNpcDraftFor,
+  sceneNpcDraftRunningEntityId,
+  startSceneNpcDraftRun,
+  stopSceneNpcDraftRun,
+  subscribeSceneNpcDrafts,
+  type SceneNpcDraft,
+} from "../ai/npc-scene-reply";
 import { KeeperGuideContentV2 } from "../components/modules/KeeperGuidePanelV2";
+import { presentModuleSceneV2 } from "../components/room/v2/investigation-workspace-helpers";
 import { useAppStore } from "../store/app-store";
 import {
   tauriNpcStatsDraftExecutor,
@@ -217,10 +227,20 @@ export function RoomViewV2({
   const [secretDraft, setSecretDraft] = useState(false);
   // "Speak as" replaces the old per-NPC conversation sessions: the keeper
   // voices NPCs directly in the shared story stream, like at a real table.
+  // Draft runs live in a module-level manager so leaving the room view never
+  // loses a reply the assistant already decided on.
   const [speakAsEntityId, setSpeakAsEntityId] = useState<string>();
-  const [npcDraft, setNpcDraft] = useState<{ entityId: string; name: string; reply: NpcReplyOutputV1 }>();
-  const [npcDraftBusyEntityId, setNpcDraftBusyEntityId] = useState<string>();
-  const npcDraftAbortRef = useRef<AbortController>();
+  const [npcDraftTick, setNpcDraftTick] = useState(0);
+  useEffect(() => subscribeSceneNpcDrafts(() => setNpcDraftTick((tick) => tick + 1)), []);
+  void npcDraftTick;
+  const npcDraft = sceneNpcDraftFor(room.id);
+  const npcDraftBusyEntityId = sceneNpcDraftRunningEntityId(room.id);
+  const npcDraftError = sceneNpcDraftError(room.id);
+  const liveStorySectionRef = useRef<HTMLElement>(null);
+  const revealLiveStory = () => {
+    setActiveRoomTab("scene");
+    globalThis.setTimeout(() => liveStorySectionRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" }), 0);
+  };
   const [preparedAudio, setPreparedAudio] = useState<AssetDescriptorV1>();
   const [audioTitle, setAudioTitle] = useState("氛围音乐");
   const [audioOperation, setAudioOperation] = useState<AudioOperation>("idle");
@@ -621,33 +641,19 @@ export function RoomViewV2({
     messageInputRef.current?.focus();
   };
 
-  const cancelNpcDraft = () => {
-    npcDraftAbortRef.current?.abort(new Error("KP 停止了这次代答"));
-    npcDraftAbortRef.current = undefined;
-    setNpcDraftBusyEntityId(undefined);
+  const cancelNpcDraft = () => stopSceneNpcDraftRun(room.id);
+
+  const requestNpcDraft = (entity: RoomEntityV2) => {
+    if (!session?.isHost || npcDraftBusyEntityId) return;
+    void startSceneNpcDraftRun({
+      roomId: room.id,
+      npc: entity,
+      events: humanRecordEvents,
+      ...liveAiTextSettings(),
+    });
   };
 
-  const requestNpcDraft = (entity: RoomEntityV2) => run(async () => {
-    if (!session?.isHost || npcDraftBusyEntityId) return;
-    const abort = new AbortController();
-    npcDraftAbortRef.current = abort;
-    setNpcDraftBusyEntityId(entity.entityId);
-    setNpcDraft(undefined);
-    try {
-      const reply = await draftSceneNpcReply({
-        npc: entity,
-        events: humanRecordEvents,
-        ...liveAiTextSettings(),
-        signal: abort.signal,
-      });
-      if (!abort.signal.aborted) setNpcDraft({ entityId: entity.entityId, name: entity.name, reply });
-    } finally {
-      if (npcDraftAbortRef.current === abort) npcDraftAbortRef.current = undefined;
-      setNpcDraftBusyEntityId((current) => (current === entity.entityId ? undefined : current));
-    }
-  });
-
-  const publishNpcDraft = (draft: { entityId: string; name: string; reply: NpcReplyOutputV1 }) => run(async () => {
+  const publishNpcDraft = (draft: SceneNpcDraft) => run(async () => {
     if (!session?.isHost) return;
     await session.submit({
       type: "chat.message",
@@ -658,7 +664,10 @@ export function RoomViewV2({
         persona: { name: draft.name, entityId: draft.entityId },
       },
     });
-    setNpcDraft(undefined);
+    dismissSceneNpcDraft(room.id);
+    // The newest line renders at the top of the stream; bring it into view so
+    // the keeper sees the NPC actually speak.
+    revealLiveStory();
   });
 
   const sendChat = () => run(async () => {
@@ -676,6 +685,7 @@ export function RoomViewV2({
       },
     });
     setMessage("");
+    revealLiveStory();
   });
 
   const roll = () => run(async () => {
@@ -1398,6 +1408,30 @@ export function RoomViewV2({
     }
   };
 
+  // 一键开场: the module's own first scene (keeper-guide first step wins, then
+  // chapter order) published as the opening without a detour through forms.
+  const quickOpeningScene = (() => {
+    if (!activeModulePackage || activeModulePackage.scenes.length === 0) return undefined;
+    const guideSceneId = activeModulePackage.keeperGuide?.clueTrail.find((step) => step.sceneId)?.sceneId;
+    const byGuide = guideSceneId
+      ? activeModulePackage.scenes.find((scene) => scene.id === guideSceneId)
+      : undefined;
+    const chapterSceneId = activeModulePackage.chapters
+      .flatMap((chapter) => chapter.sceneIds)
+      .find((sceneId) => activeModulePackage.scenes.some((scene) => scene.id === sceneId));
+    const byChapter = chapterSceneId
+      ? activeModulePackage.scenes.find((scene) => scene.id === chapterSceneId)
+      : undefined;
+    return byGuide ?? byChapter ?? activeModulePackage.scenes[0];
+  })();
+
+  const presentQuickOpening = () => run(async () => {
+    if (!session?.isHost || !activeModulePackage || !quickOpeningScene) return;
+    const opening = (quickOpeningScene.description || quickOpeningScene.synopsis).trim()
+      || `${quickOpeningScene.name}。`;
+    await presentModuleSceneV2(session, activeModulePackage, quickOpeningScene, opening);
+  });
+
   const openKeeperSceneWorkbench = () => {
     setMobileToolsOpen(true);
     globalThis.setTimeout(() => {
@@ -1495,7 +1529,7 @@ export function RoomViewV2({
           </section>}
           {activeRoomTab === "scene" && <>
           <section ref={sceneHeroRef} aria-label="当前情境" className={`mx-auto mb-5 max-w-6xl overflow-hidden rounded-2xl border ${activeScene ? "border-brass/30 bg-gradient-to-br from-brass/10 via-zinc-950 to-zinc-950" : "border-zinc-800 bg-zinc-950/50"}`}>
-            {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} isHost={session?.isHost === true} readOnly={readOnly} speaking={speakAsEntityId === entity.entityId} drafting={npcDraftBusyEntityId === entity.entityId} onSpeakAs={() => beginSpeakAsNpc(entity)} onDraftReply={() => void requestNpcDraft(entity)} onStopDraft={cancelNpcDraft} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
+            {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} isHost={session?.isHost === true} readOnly={readOnly} speaking={speakAsEntityId === entity.entityId} drafting={npcDraftBusyEntityId === entity.entityId} onSpeakAs={() => beginSpeakAsNpc(entity)} onDraftReply={() => requestNpcDraft(entity)} onStopDraft={cancelNpcDraft} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
               <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-zinc-600">当前情境</p>
               {readOnly ? <>
                 <h2 className="mt-2 font-serif text-2xl text-zinc-300">记录中没有公开开场</h2>
@@ -1510,7 +1544,8 @@ export function RoomViewV2({
                     ? "本机模组资料暂时不可用。你可以先用不引用模组私密内容的临时开场继续跑团，之后再恢复备团资料。"
                     : `正在读取《${world.activeModule.title}》的本地备团资料。`}</p>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {activeModuleHasScenes && <Button onClick={openKeeperSceneWorkbench}><Clapperboard className="mr-2 h-4 w-4" />选择并呈现开场</Button>}
+                  {activeModuleHasScenes && quickOpeningScene && <Button onClick={() => void presentQuickOpening()}><Play className="mr-2 h-4 w-4" />一键开场：{quickOpeningScene.name}</Button>}
+                  {activeModuleHasScenes && <Button variant="secondary" onClick={openKeeperSceneWorkbench}><Clapperboard className="mr-2 h-4 w-4" />选择并呈现开场</Button>}
                   {activeModuleLoadError && <Button onClick={openManualScenePresenter}><Clapperboard className="mr-2 h-4 w-4" />先用临时开场继续</Button>}
                   {activeModuleLoadError && <Button variant="secondary" onClick={() => setActiveView("modules")}><FolderKanban className="mr-2 h-4 w-4" />去 KP 备团</Button>}
                 </div>
@@ -1702,7 +1737,7 @@ export function RoomViewV2({
               <Button variant="secondary" onClick={() => setDismissedCluePromptForEventId(latestCheckOutcomeEvent.eventId)}>这次没有线索，继续</Button>
             </div>
           </section>}
-          <section aria-labelledby="live-story" className="mx-auto max-w-4xl">
+          <section ref={liveStorySectionRef} aria-labelledby="live-story" className="mx-auto max-w-4xl scroll-mt-12">
             <div className="mb-3 flex items-center justify-between"><h2 id="live-story" className="text-sm font-semibold text-zinc-300">正在发生</h2><span className="text-[10px] text-zinc-600">最新在最上 · 对话、检定与公开信息</span></div>
             <div className="grid gap-2">{liveStoryEvents.length === 0 ? <div className="rounded-xl border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">还没有现场记录。说出第一句开场，调查就开始了。</div> : liveStoryEvents.map((event) => <V2EventCard key={event.eventId} event={event} resolveAsset={resolveAsset} />)}</div>
             {unseenPublicMaterialCount > 0 && <button
@@ -1792,6 +1827,10 @@ export function RoomViewV2({
         </div>
 
         {!readOnly && <div className="border-t border-zinc-800 bg-zinc-950/80 p-4">
+          {session?.isHost && npcDraftError && <div role="alert" className="mx-auto mb-2 flex max-w-4xl items-start justify-between gap-3 rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs text-red-300">
+            <span className="leading-5">代答没有完成：{npcDraftError}</span>
+            <button type="button" aria-label="关闭代答错误" className="rounded p-1 hover:bg-red-900/40" onClick={() => dismissSceneNpcDraft(room.id)}><X className="h-3.5 w-3.5" /></button>
+          </div>}
           {session?.isHost && npcDraftBusyEntityId && <div role="status" className="mx-auto mb-2 flex max-w-4xl items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-400">
             <span className="flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在为「{world.entities.get(npcDraftBusyEntityId)?.name ?? "这位人物"}」起草回应…</span>
             <Button variant="ghost" className="h-7 px-2 text-xs" onClick={cancelNpcDraft}><Square className="mr-1 h-3 w-3" />停止</Button>
@@ -1805,10 +1844,10 @@ export function RoomViewV2({
               <Button variant="secondary" className="h-8 text-xs" onClick={() => {
                 setMessage(npcDraft.reply.spokenText);
                 setSpeakAsEntityId(npcDraft.entityId);
-                setNpcDraft(undefined);
+                dismissSceneNpcDraft(room.id);
                 messageInputRef.current?.focus();
               }}>改一改再说</Button>
-              <Button variant="ghost" className="h-8 text-xs" onClick={() => setNpcDraft(undefined)}>丢弃</Button>
+              <Button variant="ghost" className="h-8 text-xs" onClick={() => dismissSceneNpcDraft(room.id)}>丢弃</Button>
             </div>
           </div>}
           {session?.isHost && speakAsNpc && <div className="mx-auto mb-2 flex max-w-4xl items-center gap-2 text-xs">
