@@ -33,6 +33,7 @@ import {
   hasPublishedEntityImageV2,
   isImageBearingEntityV2,
   publishEntityImageV2,
+  toWireAssetDescriptorV1,
 } from "../lib/entity-image-publication-v2";
 import { prepareTranscriptAssetsV2 } from "../lib/transcript-assets-v2";
 import {
@@ -760,7 +761,7 @@ export function RoomViewV2({
           description: "由房主确认公开的场景背景",
           body: "",
           attachments: [],
-          asset,
+          asset: toWireAssetDescriptorV1(asset),
           audience: board.audience,
           locked: true,
           archived: false,
@@ -1051,7 +1052,7 @@ export function RoomViewV2({
             title: audioTitle.trim() || "氛围音乐",
             description: "由 KP 提供给房间成员的氛围音频",
             body: "",
-            attachments: [imported.asset],
+            attachments: [toWireAssetDescriptorV1(imported.asset)],
             audience: { kind: "room" },
             locked: true,
             archived: false,

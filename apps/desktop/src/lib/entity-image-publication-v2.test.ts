@@ -42,6 +42,15 @@ describe("buildEntityImagePublicationV2", () => {
     expect(entity.artifactIds).toEqual(["artifact-existing"]);
   });
 
+  it("strips local bookkeeping fields (e.g. cocmod extension) before the wire", () => {
+    // .cocmod stores assets as AssetDescriptorV1 + extension; embedding that
+    // record verbatim used to fail the strict schema on every module image.
+    const stored = { ...asset, extension: "webp" } as AssetDescriptorV1;
+    const publication = buildEntityImagePublicationV2(roomEntity("location"), stored, "artifact-clean");
+    expect(publication.artifact.asset).not.toHaveProperty("extension");
+    expect(publication.artifact.asset).toMatchObject({ assetId: asset.assetId, mediaType: asset.mediaType });
+  });
+
   it("rejects non-image resources before a room proposal can be made", () => {
     expect(() => buildEntityImagePublicationV2(
       roomEntity("npc"),

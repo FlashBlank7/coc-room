@@ -26,6 +26,23 @@ export interface PublishEntityImageV2Input {
   readonly submit: (proposal: RoomEventProposalV2) => Promise<unknown>;
 }
 
+/**
+ * Local asset records may carry bookkeeping fields beyond the wire schema
+ * (e.g. the .cocmod store keeps an `extension`); events must embed exactly
+ * the strict AssetDescriptorV1 shape or the reducer rejects the whole submit.
+ */
+export function toWireAssetDescriptorV1(asset: AssetDescriptorV1): AssetDescriptorV1 {
+  return {
+    schemaVersion: asset.schemaVersion,
+    assetId: asset.assetId,
+    mediaType: asset.mediaType,
+    byteLength: asset.byteLength,
+    ...(asset.width === undefined ? {} : { width: asset.width }),
+    ...(asset.height === undefined ? {} : { height: asset.height }),
+    ...(asset.durationMs === undefined ? {} : { durationMs: asset.durationMs }),
+  };
+}
+
 /** Builds both confirmed room snapshots without mutating the current entity. */
 export function buildEntityImagePublicationV2(
   current: RoomEntityV2,
@@ -39,6 +56,7 @@ export function buildEntityImagePublicationV2(
     throw new Error("实体图片必须是已经规范化的静态图片资源");
   }
   const kind = entityImageArtifactKindV2(current.kind);
+  const wireAsset = toWireAssetDescriptorV1(asset);
   const artifact: RoomArtifactV2 = {
     schemaVersion: 2,
     artifactId,
@@ -48,7 +66,7 @@ export function buildEntityImagePublicationV2(
     description: "由 KP 从本地资源库确认发布的图片",
     body: "",
     attachments: [],
-    asset,
+    asset: wireAsset,
     sourceEntityId: current.entityId,
     // The artifact is never broader than its owning entity. Using the exact
     // audience also lets the entity safely reference it in the V2 reducer.
