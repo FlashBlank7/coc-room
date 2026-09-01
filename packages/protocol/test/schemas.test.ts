@@ -55,6 +55,14 @@ function moduleFixture(): ModulePackageV1 {
 }
 
 describe("shared schemas", () => {
+  it("accepts relay-derived room ids that start with base64url - or _", () => {
+    // Relay room ids are base64url hashes; roughly one room in sixteen starts
+    // with '-' or '_'. Rejecting those made every such room unusable.
+    for (const roomId of ["-abcDEF123_456", "_9zYxWvU-t"]) {
+      expect(roomEventSchema.safeParse({ ...chatEvent(1), roomId }).success).toBe(true);
+    }
+  });
+
   it("validates versioned room events", () => {
     expect(roomEventSchema.parse(chatEvent(1)).protocolVersion).toBe(1);
     expect(roomEventSchema.safeParse({ ...chatEvent(1), protocolVersion: 2 }).success).toBe(false);

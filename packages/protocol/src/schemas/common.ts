@@ -1,11 +1,15 @@
 import { z } from "zod";
 
-/** Protocol identifiers are deliberately URL-safe so they may be used in invite links. */
+/**
+ * Protocol identifiers are deliberately URL-safe so they may be used in invite
+ * links. Leading `-`/`_` must stay legal: relay room ids are base64url hashes,
+ * so about one room in sixteen starts with one of them.
+ */
 export const protocolIdSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "must be a URL-safe identifier");
+  .regex(/^[A-Za-z0-9_-][A-Za-z0-9._:-]*$/, "must be a URL-safe identifier");
 
 export const roomIdSchema = protocolIdSchema;
 export const peerIdSchema = protocolIdSchema;

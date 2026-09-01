@@ -16,7 +16,7 @@ from pydantic import (
 )
 
 
-ENTITY_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+ENTITY_ID_PATTERN = r"^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,127}$"
 EXTENSION_NAMESPACE_PATTERN = r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$"
 
 
