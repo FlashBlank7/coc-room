@@ -476,7 +476,7 @@ export class RoomTransport {
       }, { once: true });
       socket.addEventListener("error", () => {
         if (!authenticated) {
-          finish(new Error("无法连接中继节点"));
+          finish(new Error(describeRelayConnectFailure(this.options.relayUrl)));
           socket.close();
         }
       });
@@ -553,4 +553,22 @@ function frameByteLength(value: string): number {
 function isAssetMessage(message: RoomWireMessage): boolean {
   return message.kind === "asset.request" || message.kind === "asset.chunk" ||
     message.kind === "asset.ack" || message.kind === "asset.cancel" || message.kind === "asset.error";
+}
+
+/**
+ * A player staring at "cannot connect" needs to know WHICH relay failed and
+ * whether the invite could ever have worked from their machine at all.
+ */
+function describeRelayConnectFailure(relayUrl: string): string {
+  try {
+    const url = new URL(relayUrl);
+    const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost"
+      || url.hostname === "[::1]" || url.hostname === "::1";
+    if (loopback) {
+      return `无法连接中继节点（${url.host}）。这份邀请指向房主本机的中继，其他电脑连不上：请 KP 在设置里改用公网中继后重新建房并重新发邀请。`;
+    }
+    return `无法连接中继节点（${url.host}）。请检查网络；如果这个地址在你的网络环境里无法访问，请向 KP 索取可直连的入口地址。`;
+  } catch {
+    return "无法连接中继节点";
+  }
 }

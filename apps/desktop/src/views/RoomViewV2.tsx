@@ -450,6 +450,15 @@ export function RoomViewV2({
       && !invitationCopied
       && (playerSeats.length === 0 || (latestInvitation && playerSeats.length === 1)),
   );
+  const roomRelayHost = (() => {
+    try {
+      return new URL(room.relayUrl).host;
+    } catch {
+      return undefined;
+    }
+  })();
+  const roomRelayIsLoopback = roomRelayHost !== undefined
+    && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(roomRelayHost.replace(/:d+$/u, ""));
   const speakAsEntity = speakAsEntityId ? world.entities.get(speakAsEntityId) : undefined;
   const speakAsNpc = speakAsEntity?.kind === "npc" ? speakAsEntity : undefined;
 
@@ -1504,6 +1513,7 @@ export function RoomViewV2({
             <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">{latestInvitation
               ? "邀请已经生成。复制前它会一直留在这里；把完整内容发给刚才填写的玩家，对方粘贴后即可加入。"
               : "先输入这位玩家的称呼。每个人会得到一份只属于自己的邀请，对方只需完整粘贴，不必理解其中的连接信息。"}</p>
+            {roomRelayIsLoopback && <p role="alert" className="mt-3 max-w-2xl rounded-lg border border-amber-800/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-200">这个房间建在你本机的中继（{roomRelayHost}）上，只有同一台电脑能加入。要邀请别的设备或朋友，请先到 设置 把中继地址换成公网地址，再新建一个房间。</p>}
             {!latestInvitation ? <div className="mt-4 flex flex-col gap-2 sm:flex-row">
               <Input aria-label="第一位玩家称呼" maxLength={80} value={newSeatName} onChange={(event) => setNewSeatName(event.target.value)} placeholder="例如：小林" />
               <Button className="sm:shrink-0" disabled={commandsDisabled || !newSeatName.trim()} onClick={() => void issueInvitation()}><UsersRound className="mr-2 h-4 w-4" />生成专属邀请</Button>
@@ -1839,6 +1849,7 @@ export function RoomViewV2({
         <Panel className="grid gap-3 p-4">
           <h2 className="text-sm font-semibold">邀请一位玩家</h2>
           <div className="flex gap-2"><Input aria-label="玩家称呼" maxLength={80} value={newSeatName} onChange={(event) => setNewSeatName(event.target.value)} placeholder="例如：小林" /><Button disabled={commandsDisabled || !newSeatName.trim()} onClick={() => void issueInvitation()}>生成邀请</Button></div>
+          {roomRelayIsLoopback && <p className="text-[11px] leading-4 text-amber-300">本机中继（{roomRelayHost}）：邀请只在这台电脑上有效，跨设备请换公网中继后重新建房。</p>}
           {latestInvitation && <><p className="select-all break-all rounded bg-zinc-950 p-2 font-mono text-[10px] leading-4 text-zinc-500">{latestInvitation}</p><Button variant="secondary" onClick={() => void copyLatestInvitation()}>{invitationCopied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}{invitationCopied ? "已复制，可以发给这位玩家" : "复制并发给这位玩家"}</Button></>}
           <p className="text-[11px] leading-4 text-zinc-600">每位玩家都要使用自己的邀请。对方只需完整粘贴，不必理解其中的连接信息。</p>
           <div className="border-t border-zinc-800 pt-3"><h3 className="mb-2 text-xs font-semibold text-zinc-400">玩家状态</h3><div className="grid gap-2 text-sm">{seats.map((seat) => <div key={seat.seatId} className="flex items-center justify-between gap-2"><span className="truncate">{seat.displayName}{seat.role === "host" ? "（KP）" : ""}</span><div className="flex items-center gap-2"><span className="text-xs text-zinc-500">{seat.peerId ? pathLabel(paths[seat.peerId]) : "离线"}</span>{session?.isHost && seat.role === "player" && <button type="button" aria-label={`为 ${seat.displayName} 换新邀请`} className="text-[11px] text-brass hover:underline" onClick={() => void rotateInvitation(seat.seatId)}>换新邀请</button>}</div></div>)}</div></div>
