@@ -696,7 +696,7 @@ describe("RoomViewV2 board creation", () => {
     expect(screen.getByLabelText("协作画面：案件关系板")).toBeTruthy();
   });
 
-  it("keeps the optional board collapsed after the current situation and live record", () => {
+  it("keeps the collapsed board with the current situation, above the live record", () => {
     const session = { isHost: false, submit: vi.fn(), localSeat: { seatId: "seat-player", role: "player", displayName: "调查员" } } as unknown as RoomSessionV2;
     const room = roomRecord("room-v2-optional-board", "player");
     const base = createRoomWorldStateV2(room.id);
@@ -712,8 +712,9 @@ describe("RoomViewV2 board creation", () => {
     const toggle = screen.getByRole("button", { name: "展开画面：旧宅地图" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("group", { name: "旧宅地图 画面内容" })).toBeNull();
-    expect(Boolean(situation.compareDocumentPosition(liveRecord) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
-    expect(Boolean(liveRecord.compareDocumentPosition(optionalVisual) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    // 情境 → 画面 → 故事流：地图跟着当前情境走，最新对话不再被顶到屏幕外。
+    expect(Boolean(situation.compareDocumentPosition(optionalVisual) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(Boolean(optionalVisual.compareDocumentPosition(liveRecord) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
 
     fireEvent.click(toggle);
     expect(screen.getByRole("group", { name: "旧宅地图 画面内容" })).toBeTruthy();

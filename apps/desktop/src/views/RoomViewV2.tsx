@@ -327,8 +327,10 @@ export function RoomViewV2({
     && matchesHumanRecordQuery(event, recordQuery, world),
   ), [humanRecordEvents, recordCategory, recordQuery, world]);
   const recordFiltersActive = recordCategory !== "all" || recordQuery.trim().length > 0;
+  // Newest first: the table reads the latest line right below the scene and
+  // map instead of chasing the bottom of a growing list.
   const liveStoryEvents = useMemo(
-    () => humanRecordEvents.filter(isLiveStoryEvent).slice(-12),
+    () => humanRecordEvents.filter(isLiveStoryEvent).slice(-12).reverse(),
     [humanRecordEvents],
   );
   const pendingCheckRequests = [...world.checkRequests.values()].filter(({ requestId }) =>
@@ -1541,6 +1543,84 @@ export function RoomViewV2({
             <span className="truncate text-sm text-ink">{activeScene.name}</span>
             {activeScene.description && <span className="hidden min-w-0 truncate text-xs text-zinc-500 sm:inline">{activeScene.description}</span>}
           </button>}
+          <section ref={activeBoardSectionRef} aria-label="可选现场画面" className="mx-auto mt-6 max-w-6xl scroll-mt-4 rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-zinc-600"><Map className="h-3.5 w-3.5" />可选视觉辅助</p>
+                <h2 className="mt-1 truncate font-serif text-lg text-zinc-200">{board?.name ?? "本场暂不使用画面"}</h2>
+                <p className="mt-1 text-xs leading-5 text-zinc-500">{board ? `${board.items.length} 个项目 · 需要辨认方位或移动棋子时再展开` : "当前情境与行动不依赖地图；需要方位、氛围图或关系板时再创建。"}</p>
+              </div>
+              {board ? <Button
+                type="button"
+                variant="secondary"
+                aria-expanded={boardExpanded}
+                aria-controls="active-board-view"
+                onClick={() => setBoardExpanded((expanded) => !expanded)}
+              >{boardExpanded ? `收起画面：${board.name}` : `展开画面：${board.name}`}</Button> : session?.isHost && !readOnly && <form className="grid shrink-0 gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto_auto]" onSubmit={(event) => { event.preventDefault(); void createBoard(); }}>
+                <Input aria-label="新画面名称" value={newBoardName} maxLength={120} onChange={(event) => setNewBoardName(event.target.value)} placeholder={`名称（留空为“${defaultBoardName(newBoardKind)}”）`} />
+                <select aria-label="画面类型" className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={newBoardKind} onChange={(event) => setNewBoardKind(event.target.value as "scene" | "map")}><option value="scene">氛围场景</option><option value="map">方位地图</option></select>
+                <Button type="submit" variant="secondary"><Plus className="mr-2 h-4 w-4" />创建可选画面</Button>
+              </form>}
+            </div>
+            {!board && session?.isHost && !readOnly && liveBoards.length > 0 && <nav aria-label="可切换的现场画面" className="mt-3 flex flex-wrap gap-2">
+              {liveBoards.map((candidate) => <Button key={candidate.boardId} variant="secondary" onClick={() => void activateBoard(candidate.boardId)}>启用画面：{candidate.name}</Button>)}
+            </nav>}
+            {board && boardExpanded && <div id="active-board-view" className="mt-4 border-t border-zinc-800 pt-4">
+              <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <nav aria-label="现场画面" className="flex flex-wrap gap-2">{liveBoards.map((candidate) => <div key={candidate.boardId} className="flex rounded-lg border border-zinc-800 bg-zinc-950"><button type="button" disabled={!session?.isHost || readOnly || candidate.boardId === board.boardId} onClick={() => void activateBoard(candidate.boardId)} className="px-3 py-2 text-xs disabled:opacity-50">{candidate.name}</button>{session?.isHost && !readOnly && <button type="button" aria-label={`归档画面 ${candidate.name}`} title="归档后不再作为现场画面显示" onClick={() => void archiveBoard(candidate)} className="border-l border-zinc-800 px-2 text-xs text-red-300">归档</button>}</div>)}</nav>
+                {session?.isHost && !readOnly && <details aria-label="新建现场画面" className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2 open:w-full open:lg:w-auto">
+                  <summary className="flex cursor-pointer list-none items-center gap-2 px-1 text-xs font-medium text-zinc-300"><Plus className="h-3.5 w-3.5" />新建另一张画面</summary>
+                  <form className="mt-3 grid gap-2 border-t border-zinc-800 pt-3 sm:grid-cols-[minmax(11rem,1fr)_auto_auto]" onSubmit={(event) => { event.preventDefault(); void createBoard(); }}>
+                    <Input aria-label="新画面名称" value={newBoardName} maxLength={120} onChange={(event) => setNewBoardName(event.target.value)} placeholder={`名称（留空为“${defaultBoardName(newBoardKind)}”）`} />
+                    <select aria-label="画面类型" className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={newBoardKind} onChange={(event) => setNewBoardKind(event.target.value as "scene" | "map")}><option value="scene">氛围场景</option><option value="map">方位地图</option></select>
+                    <Button type="submit" variant="secondary">创建并切换</Button>
+                    <p className="text-[10px] leading-4 text-zinc-600 sm:col-span-3">当前画面会保留在列表中，不会被归档。</p>
+                  </form>
+                </details>}
+              </div>
+              <div className="mb-3 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                <p className="text-xs text-zinc-500">画面是现场的辅助，不会替代上方的情境与行动记录。</p>
+                {session?.isHost && !readOnly && <div className="flex flex-wrap items-start justify-end gap-2">
+                  {hasManagedAssetStore() && <BoardBackgroundPublisherV2
+                    key={board.boardId}
+                    boardName={board.name}
+                    hasPublishedBackground={Boolean(backgroundAsset)}
+                    availableAssets={activeModuleImageAssets}
+                    onPublish={publishBoardBackground}
+                    onError={setConnectionError}
+                  />}
+                  {!board.fogMask && <Button variant="ghost" onClick={() => void enableFog()}>添加迷雾</Button>}
+                </div>}
+              </div>
+              <CollaborativeBoardCanvas
+                board={board}
+                artifacts={world.artifacts}
+                backgroundUrl={backgroundResolution.url}
+                backgroundState={backgroundResolution.state === "loading" || backgroundResolution.state === "error" ? backgroundResolution.state : undefined}
+                readOnly={commandsDisabled}
+                isKeeper={session?.isHost}
+                canMoveItem={(item) => canSeatMoveBoardItem(world, board, item, session)}
+                onSelectItem={(item) => setSelectedBoardItemId(item.itemId)}
+                onPreview={(item) => session?.sendPreview({ boardId: board.boardId, itemId: item.itemId, x: item.position.x, y: item.position.y, action: "drag" })}
+                onCommitItem={commitItem}
+                onCompleteEdge={session?.isHost || board.kind === "evidence" ? (from, to) => void completeEdge(from, to) : undefined}
+                onCompleteFogRegion={(points) => void completeFog(points)}
+                onExternalDrop={session?.isHost && activeModulePackage && !readOnly
+                  ? (payload, point) => void run(() => handleModuleSceneDropV2(session, activeModulePackage, board.boardId, payload, point))
+                  : undefined}
+              />
+              {session?.isHost && !readOnly && selectedBoardItem && <div role="toolbar" aria-label={`画面项目操作：${selectedBoardItem.label || "未命名项目"}`} className="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/90 px-2 py-1.5 text-xs">
+                <b className="max-w-40 truncate text-zinc-200">{selectedBoardItem.label || "未命名项目"}</b>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale - 0.1) })}>缩小</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale + 0.1) })}>放大</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, rotationDegrees: normalizeRotation(selectedBoardItem.rotationDegrees + 15) })}>旋转</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, locked: !selectedBoardItem.locked })}>{selectedBoardItem.locked ? "解锁" : "锁定"}</Button>
+                <Button className="h-7 px-2 text-xs text-red-300" variant="ghost" onClick={() => void removeBoardItem(selectedBoardItem)}>移除</Button>
+                <button type="button" aria-label="取消选择画面项目" className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800" onClick={() => setSelectedBoardItemId(undefined)}><X className="h-3.5 w-3.5" /></button>
+              </div>}
+            </div>}
+          </section>
+
           {showFirstInvitationCard && <section aria-label="发送第一份玩家邀请" className="mx-auto mb-5 max-w-4xl rounded-2xl border border-brass/40 bg-gradient-to-br from-brass/15 via-amber-950/10 to-zinc-950 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-brass">开团第 1 步</p>
             <h2 className="mt-2 font-serif text-2xl text-ink">{latestInvitation ? "把这份专属邀请发给玩家" : "邀请第一位调查员"}</h2>
@@ -1623,7 +1703,7 @@ export function RoomViewV2({
             </div>
           </section>}
           <section aria-labelledby="live-story" className="mx-auto max-w-4xl">
-            <div className="mb-3 flex items-center justify-between"><h2 id="live-story" className="text-sm font-semibold text-zinc-300">正在发生</h2><span className="text-[10px] text-zinc-600">对话、检定与公开信息</span></div>
+            <div className="mb-3 flex items-center justify-between"><h2 id="live-story" className="text-sm font-semibold text-zinc-300">正在发生</h2><span className="text-[10px] text-zinc-600">最新在最上 · 对话、检定与公开信息</span></div>
             <div className="grid gap-2">{liveStoryEvents.length === 0 ? <div className="rounded-xl border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">还没有现场记录。说出第一句开场，调查就开始了。</div> : liveStoryEvents.map((event) => <V2EventCard key={event.eventId} event={event} resolveAsset={resolveAsset} />)}</div>
             {unseenPublicMaterialCount > 0 && <button
               type="button"
@@ -1631,83 +1711,6 @@ export function RoomViewV2({
               onClick={() => setActiveRoomTab("clues")}
               className="mt-3 flex w-full flex-col justify-between gap-1 rounded-xl border border-emerald-800/50 bg-emerald-950/15 px-4 py-3 text-left text-sm text-emerald-100 hover:bg-emerald-950/30 sm:flex-row sm:items-center"
             ><span>{unseenPublicMaterialCount} {unseenPublicMaterialIncludesSupportingMaterial ? "项新资料" : "条新线索"}已进入共同案卷</span><span className="text-xs text-emerald-300">{session?.isHost ? "打开案卷确认公开结果 →" : unseenPublicMaterialIncludesSupportingMaterial ? "打开案卷查看正文与附件 →" : "查看后决定是否加入我的线索栏 →"}</span></button>}
-          </section>
-          <section ref={activeBoardSectionRef} aria-label="可选现场画面" className="mx-auto mt-6 max-w-6xl scroll-mt-4 rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-              <div className="min-w-0">
-                <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-zinc-600"><Map className="h-3.5 w-3.5" />可选视觉辅助</p>
-                <h2 className="mt-1 truncate font-serif text-lg text-zinc-200">{board?.name ?? "本场暂不使用画面"}</h2>
-                <p className="mt-1 text-xs leading-5 text-zinc-500">{board ? `${board.items.length} 个项目 · 需要辨认方位或移动棋子时再展开` : "当前情境与行动不依赖地图；需要方位、氛围图或关系板时再创建。"}</p>
-              </div>
-              {board ? <Button
-                type="button"
-                variant="secondary"
-                aria-expanded={boardExpanded}
-                aria-controls="active-board-view"
-                onClick={() => setBoardExpanded((expanded) => !expanded)}
-              >{boardExpanded ? `收起画面：${board.name}` : `展开画面：${board.name}`}</Button> : session?.isHost && !readOnly && <form className="grid shrink-0 gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto_auto]" onSubmit={(event) => { event.preventDefault(); void createBoard(); }}>
-                <Input aria-label="新画面名称" value={newBoardName} maxLength={120} onChange={(event) => setNewBoardName(event.target.value)} placeholder={`名称（留空为“${defaultBoardName(newBoardKind)}”）`} />
-                <select aria-label="画面类型" className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={newBoardKind} onChange={(event) => setNewBoardKind(event.target.value as "scene" | "map")}><option value="scene">氛围场景</option><option value="map">方位地图</option></select>
-                <Button type="submit" variant="secondary"><Plus className="mr-2 h-4 w-4" />创建可选画面</Button>
-              </form>}
-            </div>
-            {!board && session?.isHost && !readOnly && liveBoards.length > 0 && <nav aria-label="可切换的现场画面" className="mt-3 flex flex-wrap gap-2">
-              {liveBoards.map((candidate) => <Button key={candidate.boardId} variant="secondary" onClick={() => void activateBoard(candidate.boardId)}>启用画面：{candidate.name}</Button>)}
-            </nav>}
-            {board && boardExpanded && <div id="active-board-view" className="mt-4 border-t border-zinc-800 pt-4">
-              <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <nav aria-label="现场画面" className="flex flex-wrap gap-2">{liveBoards.map((candidate) => <div key={candidate.boardId} className="flex rounded-lg border border-zinc-800 bg-zinc-950"><button type="button" disabled={!session?.isHost || readOnly || candidate.boardId === board.boardId} onClick={() => void activateBoard(candidate.boardId)} className="px-3 py-2 text-xs disabled:opacity-50">{candidate.name}</button>{session?.isHost && !readOnly && <button type="button" aria-label={`归档画面 ${candidate.name}`} title="归档后不再作为现场画面显示" onClick={() => void archiveBoard(candidate)} className="border-l border-zinc-800 px-2 text-xs text-red-300">归档</button>}</div>)}</nav>
-                {session?.isHost && !readOnly && <details aria-label="新建现场画面" className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2 open:w-full open:lg:w-auto">
-                  <summary className="flex cursor-pointer list-none items-center gap-2 px-1 text-xs font-medium text-zinc-300"><Plus className="h-3.5 w-3.5" />新建另一张画面</summary>
-                  <form className="mt-3 grid gap-2 border-t border-zinc-800 pt-3 sm:grid-cols-[minmax(11rem,1fr)_auto_auto]" onSubmit={(event) => { event.preventDefault(); void createBoard(); }}>
-                    <Input aria-label="新画面名称" value={newBoardName} maxLength={120} onChange={(event) => setNewBoardName(event.target.value)} placeholder={`名称（留空为“${defaultBoardName(newBoardKind)}”）`} />
-                    <select aria-label="画面类型" className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm" value={newBoardKind} onChange={(event) => setNewBoardKind(event.target.value as "scene" | "map")}><option value="scene">氛围场景</option><option value="map">方位地图</option></select>
-                    <Button type="submit" variant="secondary">创建并切换</Button>
-                    <p className="text-[10px] leading-4 text-zinc-600 sm:col-span-3">当前画面会保留在列表中，不会被归档。</p>
-                  </form>
-                </details>}
-              </div>
-              <div className="mb-3 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
-                <p className="text-xs text-zinc-500">画面是现场的辅助，不会替代上方的情境与行动记录。</p>
-                {session?.isHost && !readOnly && <div className="flex flex-wrap items-start justify-end gap-2">
-                  {hasManagedAssetStore() && <BoardBackgroundPublisherV2
-                    key={board.boardId}
-                    boardName={board.name}
-                    hasPublishedBackground={Boolean(backgroundAsset)}
-                    availableAssets={activeModuleImageAssets}
-                    onPublish={publishBoardBackground}
-                    onError={setConnectionError}
-                  />}
-                  {!board.fogMask && <Button variant="ghost" onClick={() => void enableFog()}>添加迷雾</Button>}
-                </div>}
-              </div>
-              <CollaborativeBoardCanvas
-                board={board}
-                artifacts={world.artifacts}
-                backgroundUrl={backgroundResolution.url}
-                backgroundState={backgroundResolution.state === "loading" || backgroundResolution.state === "error" ? backgroundResolution.state : undefined}
-                readOnly={commandsDisabled}
-                isKeeper={session?.isHost}
-                canMoveItem={(item) => canSeatMoveBoardItem(world, board, item, session)}
-                onSelectItem={(item) => setSelectedBoardItemId(item.itemId)}
-                onPreview={(item) => session?.sendPreview({ boardId: board.boardId, itemId: item.itemId, x: item.position.x, y: item.position.y, action: "drag" })}
-                onCommitItem={commitItem}
-                onCompleteEdge={session?.isHost || board.kind === "evidence" ? (from, to) => void completeEdge(from, to) : undefined}
-                onCompleteFogRegion={(points) => void completeFog(points)}
-                onExternalDrop={session?.isHost && activeModulePackage && !readOnly
-                  ? (payload, point) => void run(() => handleModuleSceneDropV2(session, activeModulePackage, board.boardId, payload, point))
-                  : undefined}
-              />
-              {session?.isHost && !readOnly && selectedBoardItem && <div role="toolbar" aria-label={`画面项目操作：${selectedBoardItem.label || "未命名项目"}`} className="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/90 px-2 py-1.5 text-xs">
-                <b className="max-w-40 truncate text-zinc-200">{selectedBoardItem.label || "未命名项目"}</b>
-                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale - 0.1) })}>缩小</Button>
-                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale + 0.1) })}>放大</Button>
-                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, rotationDegrees: normalizeRotation(selectedBoardItem.rotationDegrees + 15) })}>旋转</Button>
-                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, locked: !selectedBoardItem.locked })}>{selectedBoardItem.locked ? "解锁" : "锁定"}</Button>
-                <Button className="h-7 px-2 text-xs text-red-300" variant="ghost" onClick={() => void removeBoardItem(selectedBoardItem)}>移除</Button>
-                <button type="button" aria-label="取消选择画面项目" className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800" onClick={() => setSelectedBoardItemId(undefined)}><X className="h-3.5 w-3.5" /></button>
-              </div>}
-            </div>}
           </section>
           </>}
 
