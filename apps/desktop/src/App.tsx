@@ -23,6 +23,7 @@ import { cn } from "./lib/cn";
 import { isRoomHostAvailable } from "./lib/room-availability";
 import { hasManagedAssetStore, managedAssetStoreKind, resolveManagedAssetUrl } from "./lib/asset-store";
 import { SynchronizedAudioRuntime, type AudioSyncStatus } from "./lib/audio-sync";
+import { ViewErrorBoundary } from "./components/ViewErrorBoundary";
 import type { RoomAssetCoordinator } from "./network/RoomAssetCoordinator";
 import type { CharacterDraftExecutionRequest, RoomAiJobCoordinator } from "./ai/room-ai-job-coordinator";
 
@@ -631,6 +632,7 @@ export function App() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 pb-16 md:pb-0">
+        <ViewErrorBoundary resetKey={activeView}>
         <Suspense fallback={<AppViewLoading />}>
           {activeView === "lobby" && <LobbyView onConnect={connect} onOpenLocalRecord={openLocalRecord} />}
           {activeView === "room" && currentRoom && (currentRoom.protocolVersion ?? 1) === 2
@@ -674,6 +676,7 @@ export function App() {
           {activeView === "modules" && <ModulesView session={sessionV2 ?? session} />}
           {activeView === "settings" && <SettingsView />}
         </Suspense>
+        </ViewErrorBoundary>
       </main>
       <nav aria-label="主导航" className={cn("fixed inset-x-0 bottom-0 z-50 grid h-16 border-t border-zinc-800 bg-zinc-950/95 px-1 backdrop-blur md:hidden", visibleNavigation.length === 4 ? "grid-cols-4" : "grid-cols-5")}>
         {visibleNavigation.map(({ id, label, icon: Icon }) => {

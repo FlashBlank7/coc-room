@@ -6,6 +6,20 @@ import {
   type NpcStatsDraftRequestV1,
 } from "./tauri-npc-stats-draft-executor";
 
+const statsMocks = vi.hoisted(() => ({
+  getSetting: vi.fn(async () => undefined as string | undefined),
+  browserStats: vi.fn(),
+}));
+
+vi.mock("../data/repository", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../data/repository")>();
+  return { ...actual, getRepository: async () => ({ getSetting: statsMocks.getSetting }) };
+});
+
+vi.mock("./browser-deepseek-npc-stats", () => ({
+  generateBrowserDeepSeekNpcStats: statsMocks.browserStats,
+}));
+
 describe("TauriNpcStatsDraftExecutor", () => {
   afterEach(() => {
     Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
@@ -146,3 +160,31 @@ function result() {
     },
   };
 }
+
+
+describe("TauriNpcStatsDraftExecutor browser DeepSeek routing", () => {
+  it("drafts through the browser key when DeepSeek is selected without a bridge", async () => {
+    Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
+    statsMocks.getSetting.mockResolvedValue("sk-browser");
+    statsMocks.browserStats.mockResolvedValue({ characteristics: { str: 60 }, skills: {}, hitPoints: 12 });
+    const runWeb = vi.fn();
+    const executor = new TauriNpcStatsDraftExecutor(vi.fn(), runWeb);
+
+    await expect(executor.generateDraft({
+      npcId: "npc-hound",
+      name: "地窖中的猎犬",
+      description: "皮革般湿滑的巨兽。",
+      guidance: "",
+      provider: "deepseek",
+      model: "",
+    }, new AbortController().signal)).resolves.toEqual({
+      npcId: "npc-hound",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      character: { characteristics: { str: 60 }, skills: {}, hitPoints: 12 },
+    });
+    expect(runWeb).not.toHaveBeenCalled();
+    statsMocks.getSetting.mockResolvedValue(undefined);
+    statsMocks.browserStats.mockReset();
+  });
+});

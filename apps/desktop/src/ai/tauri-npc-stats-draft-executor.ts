@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getRepository } from "../data/repository";
+import { DEEPSEEK_KEY_MISSING_MESSAGE, DEFAULT_DEEPSEEK_MODEL } from "./browser-deepseek";
+import { generateBrowserDeepSeekNpcStats } from "./browser-deepseek-npc-stats";
 import {
   runWebDevelopmentAiTask,
   type WebDevelopmentAiBridgeRunner,
@@ -61,6 +64,33 @@ export class TauriNpcStatsDraftExecutor {
       guidance: safe.guidance,
     };
     if (!("__TAURI_INTERNALS__" in globalThis)) {
+      if (safe.provider === "deepseek") {
+        const apiKey = (await (await getRepository()).getSetting("deepseekApiKey"))?.trim();
+        if (apiKey) {
+          const character = await generateBrowserDeepSeekNpcStats({
+            name: safe.name,
+            description: safe.description,
+            guidance: safe.guidance,
+            apiKey,
+            model: safe.model,
+            signal,
+          });
+          return {
+            npcId: safe.npcId,
+            provider: "deepseek",
+            model: safe.model.trim() || DEFAULT_DEEPSEEK_MODEL,
+            character,
+          };
+        }
+        try {
+          return extractNpcStatsDraft(await this.runWeb("npc-stats-draft", request, signal), safe);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("本地 AI 开发会话")) {
+            throw new Error(DEEPSEEK_KEY_MISSING_MESSAGE);
+          }
+          throw error;
+        }
+      }
       return extractNpcStatsDraft(await this.runWeb("npc-stats-draft", request, signal), safe);
     }
 

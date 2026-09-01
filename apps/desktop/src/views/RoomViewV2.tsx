@@ -590,6 +590,15 @@ export function RoomViewV2({
     }
   };
 
+  // AI text tasks follow the CURRENT settings, not a value frozen earlier.
+  const liveAiTextSettings = () => {
+    const state = useAppStore.getState();
+    return {
+      provider: state.parserProvider,
+      model: state.parserProvider === "codex" ? state.codexModel : state.deepseekModel,
+    } as const;
+  };
+
   const beginSpeakAsNpc = (entity: RoomEntityV2) => {
     setSpeakAsEntityId(entity.entityId);
     messageInputRef.current?.focus();
@@ -611,8 +620,7 @@ export function RoomViewV2({
       const reply = await draftSceneNpcReply({
         npc: entity,
         events: humanRecordEvents,
-        provider: "codex",
-        model: "",
+        ...liveAiTextSettings(),
         signal: abort.signal,
       });
       if (!abort.signal.aborted) setNpcDraft({ entityId: entity.entityId, name: entity.name, reply });
@@ -1281,8 +1289,7 @@ export function RoomViewV2({
         name: npc.name,
         description: npc.description,
         guidance: npcStatsGuidance.trim(),
-        provider: "codex",
-        model: "",
+        ...liveAiTextSettings(),
       }, abort.signal);
       // A late result must not attach to a different NPC selected meanwhile.
       if (!abort.signal.aborted && npcStatsTargetIdRef.current === npc.entityId) {
