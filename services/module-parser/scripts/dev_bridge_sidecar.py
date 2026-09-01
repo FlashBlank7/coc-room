@@ -31,6 +31,7 @@ ALLOWED_ACTIONS = {
     "generate_character_draft",
     "generate_npc_stats_draft",
     "generate_npc_reply",
+    "generate_keeper_guide",
 }
 ALLOWED_REQUEST_FIELDS_BY_ACTION = {
     "bridge_status": {"id", "action"},
@@ -80,6 +81,13 @@ ALLOWED_REQUEST_FIELDS_BY_ACTION = {
         "npc_card",
         "pins",
         "messages",
+    },
+    "generate_keeper_guide": {
+        "id",
+        "action",
+        "provider",
+        "model",
+        "digest",
     },
 }
 CREATE_NO_WINDOW = 0x08000000

@@ -259,3 +259,80 @@ function normalizeGuide(payload: unknown): KeeperGuideV1 {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Guide runs are owned here, not by any view: navigating away must neither
+ * cancel a run nor hide that it is still going. Finished runs save the module
+ * as a NEW revision (the repository rightly refuses in-place rewrites).
+ */
+interface KeeperGuideRun {
+  readonly abort: AbortController;
+  readonly startedAt: number;
+}
+
+const keeperGuideRuns = new Map<string, KeeperGuideRun>();
+const keeperGuideErrors = new Map<string, string>();
+const keeperGuideListeners = new Set<() => void>();
+
+function notifyKeeperGuideListeners(): void {
+  for (const listener of [...keeperGuideListeners]) listener();
+}
+
+export function subscribeKeeperGuideRuns(listener: () => void): () => void {
+  keeperGuideListeners.add(listener);
+  return () => keeperGuideListeners.delete(listener);
+}
+
+export function isKeeperGuideRunning(moduleId: string): boolean {
+  return keeperGuideRuns.has(moduleId);
+}
+
+export function keeperGuideRunError(moduleId: string): string | undefined {
+  return keeperGuideErrors.get(moduleId);
+}
+
+export function stopKeeperGuideRun(moduleId: string): void {
+  keeperGuideRuns.get(moduleId)?.abort.abort(new Error("已停止生成运行指引"));
+  keeperGuideRuns.delete(moduleId);
+  notifyKeeperGuideListeners();
+}
+
+export async function startKeeperGuideRun(options: {
+  modulePackage: ModulePackageV1;
+  provider: "deepseek" | "codex";
+  model: string;
+}): Promise<void> {
+  const moduleId = options.modulePackage.moduleId;
+  if (keeperGuideRuns.has(moduleId)) return;
+  const abort = new AbortController();
+  keeperGuideRuns.set(moduleId, { abort, startedAt: Date.now() });
+  keeperGuideErrors.delete(moduleId);
+  notifyKeeperGuideListeners();
+  try {
+    const guide = await generateKeeperGuide({
+      modulePackage: options.modulePackage,
+      provider: options.provider,
+      model: options.model,
+      signal: abort.signal,
+    });
+    if (abort.signal.aborted) return;
+    const repository = await getRepository();
+    const stored = await repository.getModule(options.modulePackage.moduleId, options.modulePackage.revision);
+    await repository.saveModule({
+      package: {
+        ...options.modulePackage,
+        revision: options.modulePackage.revision + 1,
+        metadata: { ...options.modulePackage.metadata, updatedAt: new Date().toISOString() },
+        keeperGuide: guide,
+      },
+      sourceText: stored?.sourceText ?? "",
+    });
+  } catch (cause) {
+    if (!abort.signal.aborted) {
+      keeperGuideErrors.set(moduleId, cause instanceof Error ? cause.message : String(cause));
+    }
+  } finally {
+    keeperGuideRuns.delete(moduleId);
+    notifyKeeperGuideListeners();
+  }
+}

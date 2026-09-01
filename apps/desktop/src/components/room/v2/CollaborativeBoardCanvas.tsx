@@ -91,6 +91,19 @@ export function CollaborativeBoardCanvas({
   const [fogPreview, setFogPreview] = useState<readonly BoardPointV1[]>([]);
   const [mode, setMode] = useState<BoardInteractionMode>(initialMode);
   const [viewportScale, setViewportScale] = useState(1);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setFullscreen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [fullscreen]);
   const [edgeStartItemId, setEdgeStartItemId] = useState<string>();
   const [selectedItemId, setSelectedItemId] = useState<string>();
   const maskId = `board-fog-${useId().replace(/:/g, "")}`;
@@ -364,7 +377,11 @@ export function CollaborativeBoardCanvas({
   return (
     <section
       aria-label={`协作画面：${board.name}`}
-      className={cn("grid gap-2", className)}
+      className={cn(
+        "grid gap-2",
+        fullscreen && "fixed inset-0 z-50 content-start overflow-auto bg-zinc-950/95 p-4 backdrop-blur",
+        className,
+      )}
     >
       <header className="flex flex-col justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/65 px-3 py-2.5 sm:flex-row sm:items-start">
         <div className="min-w-0">
@@ -378,6 +395,7 @@ export function CollaborativeBoardCanvas({
           <button type="button" aria-label="缩小画面" disabled={viewportScale <= 1} onClick={() => setViewportScale((value) => Math.max(1, value - 0.25))} className="grid h-9 w-9 place-items-center rounded text-base text-zinc-400 hover:bg-zinc-800 disabled:text-zinc-700">−</button>
           <button type="button" aria-label="让画面适合窗口" onClick={() => setViewportScale(1)} className="min-w-14 rounded px-2 py-2 text-xs text-zinc-400 hover:bg-zinc-800">{Math.round(viewportScale * 100)}%</button>
           <button type="button" aria-label="放大画面" disabled={viewportScale >= 3} onClick={() => setViewportScale((value) => Math.min(3, value + 0.25))} className="grid h-9 w-9 place-items-center rounded text-base text-zinc-400 hover:bg-zinc-800 disabled:text-zinc-700">＋</button>
+          <button type="button" aria-label={fullscreen ? "退出全屏画面" : "全屏画面"} aria-pressed={fullscreen} onClick={() => setFullscreen((value) => !value)} className="rounded px-2.5 py-2 text-xs text-zinc-400 hover:bg-zinc-800">{fullscreen ? "退出全屏" : "全屏"}</button>
         </div>
       </header>
 
@@ -402,12 +420,15 @@ export function CollaborativeBoardCanvas({
           : interactionHelp(mode, readOnly, board.fogMask !== undefined, edgeStartItemId ? itemById.get(edgeStartItemId) : undefined))}
       </p>
 
-      <div className="overflow-auto rounded-xl border border-white/10 bg-zinc-950 shadow-2xl shadow-black/30">
+      <div className={cn(
+        "overflow-auto rounded-xl border border-white/10 bg-zinc-950 shadow-2xl shadow-black/30",
+        fullscreen ? "h-[calc(100vh-15rem)]" : "h-[clamp(16rem,46vh,38rem)]",
+      )}>
         <div
-          className="relative isolate min-h-52 overflow-hidden"
+          className="relative isolate mx-auto min-h-52 overflow-hidden"
           style={{
             aspectRatio: `${board.logicalSize.width} / ${board.logicalSize.height}`,
-            width: `${viewportScale * 100}%`,
+            height: `${viewportScale * 100}%`,
           }}
           onDragOver={acceptExternalDrag}
           onDrop={dropExternalItem}
