@@ -16,6 +16,7 @@ import { describeParserFailure, describeParserProgress, getModuleParserProvenanc
 import type { RoomSession } from "../network/RoomSession";
 import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
+import { KeeperGuidePanelV2 } from "../components/modules/KeeperGuidePanelV2";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
@@ -1164,6 +1165,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
                     <ModuleLibraryEntityDirectory modulePackage={modulePackage} />
+                    <KeeperGuidePanelV2 modulePackage={modulePackage} onSaved={refreshLibrary} />
                     <div className="mt-3 flex flex-wrap gap-1">
                       <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
                         <BookOpen className="mr-1.5 h-3.5 w-3.5" />查看资料

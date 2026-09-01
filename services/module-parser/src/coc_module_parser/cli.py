@@ -34,6 +34,7 @@ from .npc_context import (
     npc_reply_output_schema,
 )
 from .npc_provider import GenerateNpcReplyTaskV1, generate_npc_reply
+from .keeper_guide_provider import GenerateKeeperGuideTaskV1, generate_keeper_guide
 from .npc_stats_provider import GenerateNpcStatsDraftTaskV1, generate_npc_stats_draft
 from .text import normalize_text
 from .workflow import ModuleParser
@@ -526,6 +527,61 @@ def process_request(raw: Any, emit: Emit) -> None:
                 f"module-parser character draft internal error: {type(exc).__name__}\n"
             )
             emit(_error(request_id, "INTERNAL_ERROR", "character draft generation failed"))
+        return
+
+    if operation in {"generate_keeper_guide", "keeper_guide"}:
+        try:
+            transport_fields = {
+                "id",
+                "request_id",
+                "type",
+                "action",
+                "operation",
+                "payload",
+            }
+            task_payload = {
+                key: value for key, value in payload.items() if key not in transport_fields
+            }
+            task = GenerateKeeperGuideTaskV1.model_validate(task_payload)
+            generated = generate_keeper_guide(task)
+            emit(
+                {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "request_id": request_id,
+                    "type": "result",
+                    "result": {
+                        "status": "draft",
+                        "provider": generated.provider,
+                        "model": generated.model,
+                        "guide": generated.guide.model_dump(
+                            mode="json", by_alias=True, exclude_none=True
+                        ),
+                    },
+                }
+            )
+        except ValidationError as exc:
+            emit(
+                _error(
+                    request_id,
+                    "INVALID_KEEPER_GUIDE_TASK",
+                    "keeper guide task validation failed",
+                    details=_validation_details(exc),
+                )
+            )
+        except ExtractionError as exc:
+            emit(
+                _error(
+                    request_id,
+                    exc.code,
+                    str(exc),
+                    retryable=exc.retryable,
+                )
+            )
+        except Exception as exc:  # Never expose prompts, drafts, or credentials.
+            sys.stderr.write(
+                f"module-parser keeper guide internal error: {type(exc).__name__}\n"
+            )
+            emit(_error(request_id, "INTERNAL_ERROR", "keeper guide generation failed"))
         return
 
     if operation in {"generate_npc_stats_draft", "npc_stats_draft"}:

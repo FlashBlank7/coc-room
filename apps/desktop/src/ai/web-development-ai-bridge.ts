@@ -9,6 +9,7 @@ export type WebDevelopmentAiRoute =
   | "character-draft"
   | "npc-stats-draft"
   | "npc-reply"
+  | "keeper-guide"
   | "image-generation"
   | "image-capabilities";
 

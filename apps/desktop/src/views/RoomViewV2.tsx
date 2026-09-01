@@ -70,6 +70,7 @@ import {
   type CodexImageJobKind,
 } from "../lib/codex-image-executor";
 import { draftSceneNpcReply, type NpcReplyOutputV1 } from "../ai/npc-scene-reply";
+import { KeeperGuideContentV2 } from "../components/modules/KeeperGuidePanelV2";
 import { useAppStore } from "../store/app-store";
 import {
   tauriNpcStatsDraftExecutor,
@@ -1672,6 +1673,15 @@ export function RoomViewV2({
                   ? (payload, point) => void run(() => handleModuleSceneDropV2(session, activeModulePackage, board.boardId, payload, point))
                   : undefined}
               />
+              {session?.isHost && !readOnly && selectedBoardItem && <div role="toolbar" aria-label={`画面项目操作：${selectedBoardItem.label || "未命名项目"}`} className="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/90 px-2 py-1.5 text-xs">
+                <b className="max-w-40 truncate text-zinc-200">{selectedBoardItem.label || "未命名项目"}</b>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale - 0.1) })}>缩小</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, scale: clampBoardScale(selectedBoardItem.scale + 0.1) })}>放大</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, rotationDegrees: normalizeRotation(selectedBoardItem.rotationDegrees + 15) })}>旋转</Button>
+                <Button className="h-7 px-2 text-xs" variant="secondary" onClick={() => commitSelectedBoardItem({ ...selectedBoardItem, locked: !selectedBoardItem.locked })}>{selectedBoardItem.locked ? "解锁" : "锁定"}</Button>
+                <Button className="h-7 px-2 text-xs text-red-300" variant="ghost" onClick={() => void removeBoardItem(selectedBoardItem)}>移除</Button>
+                <button type="button" aria-label="取消选择画面项目" className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800" onClick={() => setSelectedBoardItemId(undefined)}><X className="h-3.5 w-3.5" /></button>
+              </div>}
             </div>}
           </section>
           </>}
@@ -1885,6 +1895,12 @@ export function RoomViewV2({
           </Panel>
         </ToolDisclosure>}
 
+        {!readOnly && session?.isHost && activeModulePackage?.keeperGuide && <ToolDisclosure title="运行指引" icon={FileText} hint="背景真相 · 线索链 · 结局">
+          <Panel className="max-h-[70vh] overflow-y-auto p-4">
+            <KeeperGuideContentV2 guide={activeModulePackage.keeperGuide} modulePackage={activeModulePackage} />
+          </Panel>
+        </ToolDisclosure>}
+
         {!readOnly && session?.isHost && <ToolDisclosure title="帮人物补全属性" icon={UserRound} hint="需要检定数据时再使用">
         <Panel className="grid gap-3 p-4">
           <div className="flex items-center gap-2"><UserRound className="h-4 w-4 text-brass" /><h2 className="text-sm font-semibold">生成 NPC 属性草稿</h2></div>
@@ -1896,11 +1912,6 @@ export function RoomViewV2({
             <Button disabled={!npcStatsTargetId || npcStatsBusy} onClick={() => void generateNpcStatsDraft()}>{npcStatsBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}生成属性草稿</Button>
             {npcStatsBusy && <Button variant="secondary" onClick={cancelNpcStatsDraftGeneration}><Square className="mr-2 h-4 w-4" />立即停止</Button>}
           </div>
-          <details className="rounded border border-zinc-800 px-3 py-2 text-xs text-zinc-500">
-            <summary className="cursor-pointer">更换 AI 服务（通常不用改）</summary>
-            <div className="mt-3 grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3">
-            </div>
-          </details>
           {npcStatsDraft && <div className="grid gap-2 rounded-md border border-amber-800/60 bg-amber-950/20 p-3 text-xs">
             <p className="font-semibold text-amber-200">只有你能看到 · 确认后才会更新「{world.entities.get(npcStatsDraft.draft.npcId)?.name ?? "已不存在的人物"}」</p>
             <p className="text-zinc-400">属性：{formatNpcStats(npcStatsDraft.draft.character.characteristics)}</p>

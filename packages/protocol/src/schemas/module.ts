@@ -148,6 +148,50 @@ function uniqueEntityIds(
   return ids;
 }
 
+/**
+ * The keeper's runbook: how to actually RUN the parsed module at a table.
+ * Mirrors how published scenarios are organized — hidden truth, hook, a clue
+ * trail with backup paths, a timeline of what happens if investigators stall,
+ * ending conditions, and pacing advice. Generated after parsing (增量, no
+ * re-parse) and keeper-only.
+ */
+export const keeperGuideStepSchema = z
+  .object({
+    sceneId: entityIdSchema.optional(),
+    title: z.string().min(1).max(240),
+    goal: z.string().max(4_000),
+    leadIn: z.string().max(4_000),
+    keyClues: z.array(z.object({
+      clueId: entityIdSchema.optional(),
+      summary: z.string().min(1).max(2_000),
+      pointsTo: z.string().max(2_000),
+    }).strict()).max(20),
+    ifStuck: z.string().max(4_000),
+  })
+  .strict();
+
+export const keeperGuideSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    truth: z.string().max(20_000),
+    hook: z.string().max(10_000),
+    clueTrail: z.array(keeperGuideStepSchema).max(100),
+    timeline: z.array(z.object({
+      when: z.string().min(1).max(240),
+      event: z.string().min(1).max(4_000),
+    }).strict()).max(50),
+    endings: z.array(z.object({
+      title: z.string().min(1).max(240),
+      condition: z.string().max(4_000),
+      outcome: z.string().max(4_000),
+    }).strict()).max(20),
+    pacing: z.string().max(10_000),
+  })
+  .strict();
+
+export type KeeperGuideV1 = z.infer<typeof keeperGuideSchema>;
+export type KeeperGuideStepV1 = z.infer<typeof keeperGuideStepSchema>;
+
 export const modulePackageSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -165,6 +209,7 @@ export const modulePackageSchema = z
     suggestedChecks: z.array(moduleSuggestedCheckSchema).max(5_000),
     keeperNotes: z.array(moduleKeeperNoteSchema).max(5_000),
     relations: z.array(moduleEntityRelationSchema).max(20_000),
+    keeperGuide: keeperGuideSchema.optional(),
     extensions: extensionsSchema,
   })
   .strict()

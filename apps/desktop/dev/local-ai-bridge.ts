@@ -22,6 +22,7 @@ const RENDER_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/render-pdf-pages`;
 const CHARACTER_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/character-draft`;
 const NPC_STATS_DRAFT_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-stats-draft`;
 const NPC_REPLY_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/npc-reply`;
+const KEEPER_GUIDE_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/keeper-guide`;
 const IMAGE_GENERATION_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/image-generation`;
 const IMAGE_CAPABILITIES_ROUTE = `${LOCAL_AI_BRIDGE_PREFIX}/image-capabilities`;
 const MAX_IMAGE_REQUEST_BYTES = 1024 * 1024;
@@ -31,6 +32,7 @@ const MAX_PDF_SOURCE_BYTES = 200 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 300 * 1024 * 1024;
 const MAX_CHARACTER_DRAFT_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_NPC_STATS_DRAFT_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_KEEPER_GUIDE_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_NPC_REPLY_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_PARSE_STDOUT_BYTES = 256 * 1024 * 1024;
 const MAX_FIXED_AI_STDOUT_BYTES = 64 * 1024 * 1024;
@@ -388,13 +390,16 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
             pathname === CHARACTER_DRAFT_ROUTE
             || pathname === NPC_STATS_DRAFT_ROUTE
             || pathname === NPC_REPLY_ROUTE
+            || pathname === KEEPER_GUIDE_ROUTE
           )) {
             if (runningTasks >= MAX_CONCURRENT_TASKS) throw new BridgeHttpError(409, "LOCAL_AI_BUSY", "本地 AI 并发任务已满，请稍候");
             const requestLimit = pathname === CHARACTER_DRAFT_ROUTE
               ? MAX_CHARACTER_DRAFT_REQUEST_BYTES
               : pathname === NPC_STATS_DRAFT_ROUTE
                 ? MAX_NPC_STATS_DRAFT_REQUEST_BYTES
-                : MAX_NPC_REPLY_REQUEST_BYTES;
+                : pathname === KEEPER_GUIDE_ROUTE
+                  ? MAX_KEEPER_GUIDE_REQUEST_BYTES
+                  : MAX_NPC_REPLY_REQUEST_BYTES;
             const raw = await readJsonBody(request, requestLimit);
             let payload: Record<string, unknown>;
             if (pathname === CHARACTER_DRAFT_ROUTE) {
@@ -407,6 +412,15 @@ export function localAiBridgePlugin(options: BridgePluginOptions): Plugin {
                 prompt: parsed.prompt,
                 playerName: parsed.playerName,
                 ownerSeatId: parsed.ownerSeatId,
+              };
+            } else if (pathname === KEEPER_GUIDE_ROUTE) {
+              const parsed = validateKeeperGuideRequest(raw);
+              payload = {
+                id: parsed.id,
+                action: "generate_keeper_guide",
+                provider: parsed.provider,
+                model: parsed.model,
+                digest: parsed.digest,
               };
             } else if (pathname === NPC_STATS_DRAFT_ROUTE) {
               const parsed = validateNpcStatsDraftRequest(raw);
@@ -648,6 +662,22 @@ export function validateNpcStatsDraftRequest(raw: unknown): {
     name: requireBoundedText(value.name, 1, 300, "NPC 名称"),
     description: requireBoundedText(value.description, 0, 100_000, "NPC 描述"),
     guidance: requireBoundedText(value.guidance, 0, 50_000, "NPC 补充要求"),
+  };
+}
+
+export function validateKeeperGuideRequest(raw: unknown): {
+  id: string;
+  provider: BridgeProvider;
+  model: string;
+  digest: string;
+} {
+  const value = requireRecord(raw);
+  assertExactKeys(value, ["id", "provider", "model", "digest"]);
+  return {
+    id: validateFixedAiRequestId(value.id),
+    provider: validateProvider(value.provider),
+    model: validateModel(value.model),
+    digest: requireBoundedText(value.digest, 1, 300_000, "模组摘要"),
   };
 }
 

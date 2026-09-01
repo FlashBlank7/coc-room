@@ -152,6 +152,40 @@ describe("RoomSessionV2", () => {
     host.stop();
   });
 
+  it("lets an editor submit wait through the authentication handshake instead of failing", async () => {
+    const hub = new MemoryTransportHub();
+    const hostRoom = roomRecord("host-peer-authwait", "host", "seat-host");
+    const host = new RoomSessionV2({
+      room: hostRoom,
+      displayName: "KP",
+      repository: new MemoryRepository(),
+      transport: hub.create(participant(hostRoom, "KP"), hostRoom.hostPeerId),
+    });
+    await host.start();
+    const invite = await host.issueSeatInvitation("Alice", "seat-alice");
+    const aliceRoom = playerRoom(invite, "alice-peer-authwait");
+    await saveLocalSeatSecret(aliceRoom.id, invite.seatId, invite.seatSecret);
+    const alice = new RoomSessionV2({
+      room: aliceRoom,
+      displayName: "Alice",
+      repository: new MemoryRepository(),
+      transport: hub.create(participant(aliceRoom, "Alice"), hostRoom.hostPeerId),
+    });
+    await alice.start();
+
+    // Submit immediately: the handshake has not settled yet, but a player who
+    // just clicked 带入房间 should be carried through it, not bounced.
+    const submitted = alice.submitConfirmed({
+      type: "chat.message",
+      audience: { kind: "room" },
+      payload: { message: "认证完成前提交的内容", format: "plain" },
+    });
+    await expect(submitted).resolves.toBeTruthy();
+    expect(alice.isAuthenticated).toBe(true);
+    alice.stop();
+    host.stop();
+  });
+
   it("keeps issued seats visible while offline and refreshes presence after invitation changes", async () => {
     const hub = new MemoryTransportHub();
     const hostRoom = roomRecord("host-seat-roster-v2", "host", "seat-host-roster");

@@ -154,6 +154,11 @@ export class RoomSessionV2 {
   private readonly pendingUploadTransfers = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private assetAdapter?: RoomSessionV2AssetAdapter;
   private readonly pendingCommandConfirmations = new Map<string, PendingCommandConfirmation>();
+  private readonly authenticationWaiters = new Set<{
+    resolve(): void;
+    reject(error: Error): void;
+    timer: ReturnType<typeof globalThis.setTimeout>;
+  }>();
   private readonly readyAssetsBySeat = new Map<string, Set<string>>();
   private readonly assetReadinessWaiters = new Set<PendingAssetReadiness>();
   private stopped = false;
@@ -268,6 +273,11 @@ export class RoomSessionV2 {
     this.uploadLeases.clear();
     for (const pending of this.pendingUploadTransfers.values()) pending.reject(new Error("房间连接已关闭"));
     this.pendingUploadTransfers.clear();
+    for (const waiter of [...this.authenticationWaiters]) {
+      this.authenticationWaiters.delete(waiter);
+      globalThis.clearTimeout(waiter.timer);
+      waiter.reject(new Error("房间连接已关闭"));
+    }
     for (const [commandId, pending] of this.pendingCommandConfirmations) {
       globalThis.clearTimeout(pending.timer);
       pending.reject(new RoomCommandRejectedError("房间连接已关闭", "PAUSED"));
@@ -408,6 +418,7 @@ export class RoomSessionV2 {
     commandId = globalThis.crypto.randomUUID(),
     timeoutMs = 30_000,
   ): Promise<string> {
+    if (!this.isHost && !this.isAuthenticated) await this.waitForAuthentication();
     if (!this.isAuthenticated) throw new Error("席位认证完成前不能发送房间内容");
     if (this.isHost) {
       await this.submit(proposal, commandId);
@@ -1309,6 +1320,39 @@ export class RoomSessionV2 {
   private setAuthenticationState(state: V2AuthenticationState): void {
     this.authenticationState = state;
     this.onAuthenticationState?.(state);
+    this.settleAuthenticationWaiters();
+  }
+
+  private settleAuthenticationWaiters(): void {
+    if (this.authenticationState === "waiting" || this.authenticationState === "challenged") return;
+    for (const waiter of [...this.authenticationWaiters]) {
+      this.authenticationWaiters.delete(waiter);
+      globalThis.clearTimeout(waiter.timer);
+      if (this.authenticationState === "authenticated") waiter.resolve();
+      else waiter.reject(new Error("席位认证失败：邀请可能已被换新，请向 KP 索取新邀请串"));
+    }
+  }
+
+  /**
+   * Authentication normally completes within seconds of joining; editor
+   * actions wait for it instead of greeting the player with an instant error.
+   */
+  private waitForAuthentication(timeoutMs = 15_000): Promise<void> {
+    if (this.isAuthenticated) return Promise.resolve();
+    if (this.authenticationState === "failed") {
+      return Promise.reject(new Error("席位认证失败：邀请可能已被换新，请向 KP 索取新邀请串"));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        resolve,
+        reject,
+        timer: globalThis.setTimeout(() => {
+          this.authenticationWaiters.delete(waiter);
+          reject(new Error("席位还在验证中（房主可能暂时离线）。请稍等几秒重试；若一直如此，请向 KP 确认房间在线。"));
+        }, timeoutMs),
+      };
+      this.authenticationWaiters.add(waiter);
+    });
   }
 
   private settleCommandConfirmation(
