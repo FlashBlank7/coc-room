@@ -192,6 +192,8 @@ export function RoomViewV2({
   const mobileToolsCloseRef = useRef<HTMLButtonElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const currentActionSectionRef = useRef<HTMLElement>(null);
+  const sceneHeroRef = useRef<HTMLElement>(null);
+  const [sceneHeroOffscreen, setSceneHeroOffscreen] = useState(false);
   const activeBoardSectionRef = useRef<HTMLElement>(null);
   const [dismissedCluePromptForEventId, setDismissedCluePromptForEventId] = useState<string>();
   const [acknowledgedPlayerClosureEventId, setAcknowledgedPlayerClosureEventId] = useState<string>();
@@ -467,6 +469,18 @@ export function RoomViewV2({
   useEffect(() => {
     setSeenPublicMaterialSequence(readSeenPublicMaterialSequence(caseFileSeenStorageKey));
   }, [caseFileSeenStorageKey]);
+
+  // The current scene must stay in reach while the table scrolls the story
+  // stream; a slim sticky bar takes over once the hero card leaves the view.
+  useEffect(() => {
+    const hero = sceneHeroRef.current;
+    if (!hero || typeof IntersectionObserver !== "function") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      setSceneHeroOffscreen(entry ? !entry.isIntersecting : false);
+    }, { threshold: 0 });
+    observer.observe(hero);
+    return () => observer.disconnect();
+  }, [activeRoomTab, activeScene?.entityId]);
 
   useEffect(() => {
     setAcknowledgedPlayerClosureEventId(undefined);
@@ -1478,7 +1492,7 @@ export function RoomViewV2({
             </div>
           </section>}
           {activeRoomTab === "scene" && <>
-          <section aria-label="当前情境" className={`mx-auto mb-5 max-w-6xl overflow-hidden rounded-2xl border ${activeScene ? "border-brass/30 bg-gradient-to-br from-brass/10 via-zinc-950 to-zinc-950" : "border-zinc-800 bg-zinc-950/50"}`}>
+          <section ref={sceneHeroRef} aria-label="当前情境" className={`mx-auto mb-5 max-w-6xl overflow-hidden rounded-2xl border ${activeScene ? "border-brass/30 bg-gradient-to-br from-brass/10 via-zinc-950 to-zinc-950" : "border-zinc-800 bg-zinc-950/50"}`}>
             {activeScene ? <div className="p-5 sm:p-7"><div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-brass"><Clapperboard className="h-4 w-4" />当前情境</div><h2 className="mt-3 font-serif text-3xl text-ink">{activeScene.name}</h2>{activeScene.description ? <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm leading-7 text-zinc-300">{activeScene.description}</p> : <p className="mt-3 text-sm text-zinc-500">KP 已推进到这里，正在描述现场。</p>}{activeScenePresentations.length > 0 && <div className="mt-5 grid gap-3 border-t border-white/10 pt-4 md:grid-cols-2">{activeSceneLocations.length > 0 && <section aria-label="当前情境中的地点"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><Map className="h-3.5 w-3.5 text-brass" />眼前的地点</h3><div className="mt-2 grid gap-2">{activeSceneLocations.map((entity) => <article key={entity.entityId} className="rounded-lg bg-black/20 p-3"><b className="text-sm text-zinc-100">{entity.name}</b>{entity.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{entity.description}</p>}<VisibleEntityArtifactMediaV2 entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} /></article>)}</div></section>}{activeSceneNpcs.length > 0 && <section aria-label="当前情境中的人物"><h3 className="flex items-center gap-2 text-xs font-semibold text-zinc-400"><UserRound className="h-3.5 w-3.5 text-brass" />已经登场</h3><div className="mt-2 grid gap-2">{activeSceneNpcs.map((entity) => <SceneNpcCard key={entity.entityId} entity={entity} artifacts={world.artifacts} resolveAsset={resolveAsset} isHost={session?.isHost === true} readOnly={readOnly} speaking={speakAsEntityId === entity.entityId} drafting={npcDraftBusyEntityId === entity.entityId} onSpeakAs={() => beginSpeakAsNpc(entity)} onDraftReply={() => void requestNpcDraft(entity)} onStopDraft={cancelNpcDraft} />)}</div></section>}</div>}</div> : <div className="p-5 sm:p-7">
               <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-zinc-600">当前情境</p>
               {readOnly ? <>
@@ -1516,6 +1530,17 @@ export function RoomViewV2({
               onRepair={() => setActiveView("modules")}
             />}
           </section>
+          {activeScene && sceneHeroOffscreen && <button
+            type="button"
+            aria-label={`回到当前情境：${activeScene.name}`}
+            onClick={() => sceneHeroRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })}
+            className="sticky top-0 z-20 mx-auto -mt-3 mb-4 flex w-full max-w-6xl items-center gap-2 rounded-lg border border-brass/40 bg-zinc-950/95 px-3 py-2 text-left backdrop-blur hover:border-brass/70"
+          >
+            <Clapperboard className="h-4 w-4 shrink-0 text-brass" />
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[.18em] text-brass">当前情境</span>
+            <span className="truncate text-sm text-ink">{activeScene.name}</span>
+            {activeScene.description && <span className="hidden min-w-0 truncate text-xs text-zinc-500 sm:inline">{activeScene.description}</span>}
+          </button>}
           {showFirstInvitationCard && <section aria-label="发送第一份玩家邀请" className="mx-auto mb-5 max-w-4xl rounded-2xl border border-brass/40 bg-gradient-to-br from-brass/15 via-amber-950/10 to-zinc-950 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-brass">开团第 1 步</p>
             <h2 className="mt-2 font-serif text-2xl text-ink">{latestInvitation ? "把这份专属邀请发给玩家" : "邀请第一位调查员"}</h2>
@@ -2375,6 +2400,41 @@ function isCaseFileArtifactKind(kind: RoomArtifactV2["kind"]): boolean {
   return kind === "clue" || kind === "handout" || kind === "note";
 }
 
+/**
+ * One accent per event family so the story stream can be scanned by color:
+ * 情境推进 brass, 地点 emerald, 人物 violet, 公布的线索/资料 sky, 检定 amber.
+ */
+function eventAccentClass(event: RoomEventV2): string {
+  switch (event.type) {
+    case "scene.focused":
+      return "border-brass/50";
+    case "entity.upserted":
+      return event.payload.entity.kind === "location"
+        ? "border-emerald-700/60"
+        : event.payload.entity.kind === "npc"
+          ? "border-violet-700/60"
+          : event.payload.entity.kind === "scene"
+            ? "border-brass/50"
+            : "border-zinc-800/80";
+    case "artifact.upserted":
+    case "clue.claimed":
+    case "clue.unclaimed":
+      return "border-sky-800/60";
+    case "dice.result":
+    case "check.requested":
+    case "check.authorized":
+    case "check.closed":
+    case "check.outcome.described":
+      return "border-amber-800/50";
+    case "npc.session.message":
+      return "border-violet-700/60";
+    case "chat.message":
+      return event.payload.persona ? "border-violet-700/60" : "border-zinc-800/80";
+    default:
+      return "border-zinc-800/80";
+  }
+}
+
 function V2EventCard({
   event,
   resolveAsset,
@@ -2383,7 +2443,7 @@ function V2EventCard({
   resolveAsset?: (asset: AssetDescriptorV1) => Promise<string>;
 }) {
   const persona = event.type === "chat.message" ? event.payload.persona : undefined;
-  return <article className="rounded-xl border border-zinc-800/80 bg-zinc-900/55 px-4 py-3"><header className="mb-1.5 flex items-center gap-2 text-xs text-zinc-500"><span className={`font-medium ${persona ? "text-brass" : "text-zinc-300"}`}>{persona ? persona.name : event.sender.displayName}</span>{persona && <span className="rounded bg-brass/15 px-1.5 py-0.5 text-[9px] font-semibold text-brass">NPC</span>}<time>{new Date(event.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><div className="text-sm leading-6 text-ink">{eventBody(event, resolveAsset)}</div></article>;
+  return <article className={`rounded-xl border border-l-4 bg-zinc-900/55 px-4 py-3 ${eventAccentClass(event)}`}><header className="mb-1.5 flex items-center gap-2 text-xs text-zinc-500"><span className={`font-medium ${persona ? "text-brass" : "text-zinc-300"}`}>{persona ? persona.name : event.sender.displayName}</span>{persona && <span className="rounded bg-brass/15 px-1.5 py-0.5 text-[9px] font-semibold text-brass">NPC</span>}<time>{new Date(event.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><div className="text-sm leading-6 text-ink">{eventBody(event, resolveAsset)}</div></article>;
 }
 
 function RoomErrorNoticeV2({ error, onDismiss }: { error: string; onDismiss(): void }) {
