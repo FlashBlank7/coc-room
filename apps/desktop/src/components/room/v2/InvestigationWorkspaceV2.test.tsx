@@ -715,6 +715,54 @@ describe("immersive V2 investigation workspace", () => {
     expect(serialized).not.toContain("keeperNotes");
   });
 
+  it("aligns the keeper guide step with the selected scene and walks the trail", () => {
+    const base = twoSceneModuleFixture();
+    const modulePackage: ModulePackageV1 = {
+      ...base,
+      keeperGuide: {
+        schemaVersion: 1,
+        truth: "剧院的曲目是召唤仪式。",
+        hook: "从后台唱片室开场。",
+        clueTrail: [
+          {
+            sceneId: "scene-source",
+            title: "唱片室的异样",
+            goal: "让玩家拿到倒放曲序",
+            leadIn: "委托直接引到这里。",
+            keyClues: [{ clueId: "clue-source", summary: "曲目从终幕向序曲倒放", pointsTo: "地下档案室" }],
+            ifStuck: "让演员失手掉落节目单。",
+          },
+          {
+            sceneId: "scene-archive",
+            title: "档案室的暗门",
+            goal: "发现暗门",
+            leadIn: "顺着曲序找到档案室。",
+            keyClues: [],
+            ifStuck: "",
+          },
+        ],
+        timeline: [],
+        endings: [{ title: "落幕", condition: "", outcome: "" }],
+        pacing: "",
+      },
+    };
+    const world = createRoomWorldStateV2("room-guide-strip");
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, world, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;
+
+    render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+
+    // The first scene is selected by default; its guide step shows the goal,
+    // an unpublished key clue, and the backup path.
+    expect(screen.getByText(/运行指引 · 第 1\/2 步：唱片室的异样/)).toBeTruthy();
+    expect(screen.getByText(/这一步要达成：/)).toBeTruthy();
+    expect(screen.getByText("○ 待公开")).toBeTruthy();
+    expect(screen.getByText(/卡关补救：/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "准备下一场：地下档案室" }));
+    expect(screen.getByText(/运行指引 · 第 2\/2 步：档案室的暗门/)).toBeTruthy();
+    expect(screen.getByText(/已是线索链最后一步 · 可选结局：落幕/)).toBeTruthy();
+  });
+
   it("requires KP to write the player-facing opening before presenting a scene", () => {
     const world = createRoomWorldStateV2("room-scene-opening-required");
     const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, world, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;

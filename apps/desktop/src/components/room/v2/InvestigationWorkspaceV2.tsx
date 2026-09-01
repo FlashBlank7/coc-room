@@ -148,6 +148,23 @@ export function KeeperModuleWorkbenchV2({
   const relatedChecks = selectedScene
     ? selectedScene.suggestedCheckIds.flatMap((id) => modulePackage.suggestedChecks.find((item) => item.id === id) ?? [])
     : [];
+  // The keeper guide gives the workbench its sense of PATH: which step this
+  // scene is, what must happen here, and where the trail goes next — the
+  // difference between a parts list and something a first-time keeper can run.
+  const keeperGuide = modulePackage.keeperGuide;
+  const guideSteps = keeperGuide?.clueTrail ?? [];
+  const guideStepIndex = selectedScene
+    ? guideSteps.findIndex((step) => step.sceneId === selectedScene.id)
+    : -1;
+  const guideStep = guideStepIndex >= 0 ? guideSteps[guideStepIndex] : undefined;
+  const nextGuideStep = guideStepIndex >= 0
+    ? guideSteps.slice(guideStepIndex + 1).find((step) =>
+      step.sceneId !== undefined && modulePackage.scenes.some((scene) => scene.id === step.sceneId))
+    : undefined;
+  const nextGuideScene = nextGuideStep
+    ? modulePackage.scenes.find((scene) => scene.id === nextGuideStep.sceneId)
+    : undefined;
+  const isLastGuideStep = guideStepIndex >= 0 && guideStepIndex === guideSteps.length - 1;
   // This component receives the complete local module package, including
   // Keeper-only notes. RoomView only mounts it for the host; keep the same
   // boundary here as defence in depth so a future caller cannot expose those
@@ -211,6 +228,28 @@ export function KeeperModuleWorkbenchV2({
           <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-amber-100/70">{selectedScene.synopsis || selectedScene.description || "无场景摘要"}</p>
           {selectedScene.keeperNotes && <p className="mt-2 whitespace-pre-wrap rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/75">{selectedScene.keeperNotes}</p>}
         </div>
+        {guideStep && keeperGuide && <section aria-label="运行指引：本步怎么跑" className="grid gap-2 rounded-lg border border-brass/40 bg-zinc-950/55 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-brass">运行指引 · 第 {guideStepIndex + 1}/{guideSteps.length} 步：{guideStep.title}</h3>
+            {nextGuideScene && <Button className="h-7 px-2 text-[11px]" variant="secondary" disabled={busy} onClick={() => setSelectedSceneId(nextGuideScene.id)}>准备下一场：{nextGuideScene.name}</Button>}
+          </div>
+          {guideStep.goal && <p className="text-xs leading-5 text-zinc-300"><span className="font-semibold text-zinc-200">这一步要达成：</span>{guideStep.goal}</p>}
+          {guideStep.leadIn && <p className="text-xs leading-5 text-zinc-500"><span className="font-semibold text-zinc-400">玩家怎么到这里：</span>{guideStep.leadIn}</p>}
+          {guideStep.keyClues.length > 0 && <ul className="grid gap-1" aria-label="本步关键线索">
+            {guideStep.keyClues.map((keyClue, index) => {
+              const artifact = keyClue.clueId ? findModuleClueArtifactV2(world, modulePackage, keyClue.clueId) : undefined;
+              const published = Boolean(artifact && !artifact.archived);
+              return <li key={index} className="rounded bg-black/25 p-1.5 text-[11px] leading-4">
+                {keyClue.clueId && <span className={published ? "mr-1 font-semibold text-emerald-300" : "mr-1 font-semibold text-amber-300"}>{published ? "✓ 已公开" : "○ 待公开"}</span>}
+                <span className="text-zinc-300">{keyClue.summary}</span>
+                {keyClue.pointsTo && <span className="text-zinc-500"> → {keyClue.pointsTo}</span>}
+              </li>;
+            })}
+          </ul>}
+          {guideStep.ifStuck && <p className="rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/85"><span className="font-semibold">卡关补救：</span>{guideStep.ifStuck}</p>}
+          {isLastGuideStep && keeperGuide.endings.length > 0 && <p className="text-[11px] leading-4 text-zinc-500">已是线索链最后一步 · 可选结局：{keeperGuide.endings.map((ending) => ending.title).join(" / ")}（详见侧栏「运行指引」）</p>}
+        </section>}
+        {!keeperGuide && <p className="rounded border border-dashed border-zinc-800 p-2 text-[11px] leading-4 text-zinc-600">这份模组还没有运行指引。到 KP 备团 → 模组卡片 → 生成运行指引，之后这里会告诉你每一场的目标、关键线索与卡关补救。</p>}
         <section className="grid gap-2 rounded-lg border border-brass/30 bg-brass/5 p-3" aria-label="向玩家呈现场景">
           <div>
             <h3 className="text-sm font-semibold text-zinc-100">玩家现在看见什么？</h3>
