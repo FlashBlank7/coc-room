@@ -42,6 +42,8 @@ export function SettingsView() {
   const [deepseekModel, setDeepseekModel] = useState(savedDeepseekModel);
   const [key, setKey] = useState("");
   const [hasKey, setHasKey] = useState(false);
+  const [browserKey, setBrowserKey] = useState("");
+  const [hasBrowserKey, setHasBrowserKey] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
   const [diagnosticMode, setDiagnosticMode] = useState<NetworkDiagnosticMode>();
@@ -55,6 +57,14 @@ export function SettingsView() {
     }
     void hasDeepseekKey().then(setHasKey).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, [localAiAvailable]);
+  useEffect(() => {
+    // The deployed web page has no bridge/keyring; its DeepSeek key lives in
+    // this browser's local settings and is sent only to api.deepseek.com.
+    void getRepository()
+      .then((repository) => repository.getSetting("deepseekApiKey"))
+      .then((stored) => setHasBrowserKey(Boolean(stored?.trim())))
+      .catch(() => undefined);
+  }, []);
   useEffect(() => setParserProvider(savedParserProvider), [savedParserProvider]);
   useEffect(() => setRelayUrlDraft(savedRelayUrl), [savedRelayUrl]);
   useEffect(() => setCodexModel(savedCodexModel), [savedCodexModel]);
@@ -80,6 +90,11 @@ export function SettingsView() {
         await saveDeepseekKey(key.trim());
         setKey("");
         setHasKey(true);
+      }
+      if (isWebDevelopment && browserKey.trim()) {
+        await repository.setSetting("deepseekApiKey", browserKey.trim());
+        setBrowserKey("");
+        setHasBrowserKey(true);
       }
       setError(undefined);
       setNotice("设置已保存");
@@ -258,12 +273,18 @@ export function SettingsView() {
                 <Input value={deepseekModel} onChange={(event) => setDeepseekModel(event.target.value)} />
               </Field>
               {isWebDevelopment ? (
-                <div className="rounded-md border border-sky-900/70 bg-sky-950/20 p-3 text-xs leading-5 text-sky-100/80">
-                  {localAiAvailable
-                    ? <>网页不会读取或接收 API Key。本地桥只从 Windows Credential Manager 注入凭据；请在终端运行 <code className="select-all text-sky-200">pnpm ai:key:set</code>，然后刷新本页。
-                      <span className={`mt-2 block ${hasKey ? "text-emerald-400" : "text-amber-300"}`}>{hasKey ? "已检测到本机凭据" : "尚未检测到本机凭据"}</span></>
-                    : <>当前页面没有本地安全桥，因此不会探测、读取或显示这台电脑的凭据状态。需要使用 DeepSeek 时，请先在终端运行 <code className="select-all text-sky-200">pnpm ai:key:set</code>，再打开 KP 开发页。</>}
-                </div>
+                <>
+                  <Field label="DeepSeek API Key" hint={hasBrowserKey ? "已保存在此浏览器；留空不会覆盖。" : "只保存在此浏览器的本地数据里，调用时直接发给 api.deepseek.com，不经过任何中转服务器。"}>
+                    <Input type="password" autoComplete="off" value={browserKey} onChange={(event) => setBrowserKey(event.target.value)} placeholder={hasBrowserKey ? "••••••••••••" : "sk-…"} />
+                  </Field>
+                  {hasBrowserKey && <Button variant="danger" className="w-fit" onClick={() => {
+                    void getRepository()
+                      .then((repository) => repository.setSetting("deepseekApiKey", ""))
+                      .then(() => { setHasBrowserKey(false); setNotice("已删除此浏览器保存的 DeepSeek Key"); })
+                      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+                  }}><Trash2 className="mr-2 h-4 w-4" />删除 Key</Button>}
+                  <p className="text-xs leading-5 text-zinc-500">网页端车卡会用这把 Key 从浏览器直连 DeepSeek；图片生成与模组解析仍需本机 Codex（KP 开发页）。</p>
+                </>
               ) : (
                 <>
                   <Field label="DeepSeek API Key" hint={hasKey ? "已安全保存到 Windows Credential Manager；留空不会覆盖。" : "不会写入 SQLite、日志或命令行。"}>

@@ -119,7 +119,10 @@ describe("SettingsView network diagnostics", () => {
     expect(getCodexStatus).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("AI 文字服务"), { target: { value: "deepseek" } });
-    expect(screen.getByText(/不会探测、读取或显示这台电脑的凭据状态/)).toBeInTheDocument();
+    // A bridge-less web page still cannot inspect host credentials, but it now
+    // offers its own browser-stored key for direct DeepSeek calls.
+    expect(screen.getByPlaceholderText("sk-…")).toBeInTheDocument();
+    expect(screen.getByText(/只保存在此浏览器/)).toBeInTheDocument();
     expect(screen.queryByText("尚未检测到本机凭据")).not.toBeInTheDocument();
   });
 
@@ -147,8 +150,7 @@ describe("SettingsView network diagnostics", () => {
     fireEvent.change(screen.getByLabelText("AI 文字服务"), {
       target: { value: "deepseek" },
     });
-    expect(screen.getByText("pnpm ai:key:set")).toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("sk-…")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("sk-…")).toBeInTheDocument();
     expect(useAppStore.getState().parserProvider).toBe("codex");
 
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));

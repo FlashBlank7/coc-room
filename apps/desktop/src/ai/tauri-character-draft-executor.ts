@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { getRepository } from "../data/repository";
+import { generateBrowserDeepSeekCharacterDraft } from "./browser-deepseek-character-draft";
 import type {
   CharacterDraftExecutionRequest,
   RoomAiDraftExecutor,
@@ -37,6 +39,24 @@ export class TauriCharacterDraftExecutor implements RoomAiDraftExecutor {
       ownerSeatId: input.ownerSeatId,
     };
     if (!("__TAURI_INTERNALS__" in globalThis)) {
+      // DeepSeek is a plain HTTPS API with browser CORS: when the keeper has
+      // stored a key in this browser, call it directly — the deployed test
+      // site has no local bridge, and even the dev bridge holds no key.
+      if (input.provider === "deepseek") {
+        const apiKey = (await (await getRepository()).getSetting("deepseekApiKey"))?.trim();
+        if (apiKey) {
+          return {
+            character: await generateBrowserDeepSeekCharacterDraft({
+              prompt: input.prompt,
+              playerName: input.playerName,
+              ownerSeatId: input.ownerSeatId,
+              apiKey,
+              model: input.model,
+              signal,
+            }),
+          };
+        }
+      }
       return extractCharacterDraft(await this.runWeb("character-draft", request, signal));
     }
 

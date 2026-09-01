@@ -2,8 +2,58 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TauriCharacterDraftExecutor } from "./tauri-character-draft-executor";
 
+const mocks = vi.hoisted(() => ({
+  getSetting: vi.fn(async () => undefined as string | undefined),
+  browserDraft: vi.fn(),
+}));
+
+vi.mock("../data/repository", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../data/repository")>();
+  return { ...actual, getRepository: async () => ({ getSetting: mocks.getSetting }) };
+});
+
+vi.mock("./browser-deepseek-character-draft", () => ({
+  generateBrowserDeepSeekCharacterDraft: mocks.browserDraft,
+}));
+
 describe("TauriCharacterDraftExecutor", () => {
-  afterEach(() => Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__"));
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
+    mocks.getSetting.mockReset();
+    mocks.getSetting.mockResolvedValue(undefined);
+    mocks.browserDraft.mockReset();
+  });
+
+  it("calls DeepSeek directly from the browser when a key is stored locally", async () => {
+    Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
+    mocks.getSetting.mockResolvedValue(" sk-browser ");
+    mocks.browserDraft.mockResolvedValue({ name: "陈默" });
+    const runWeb = vi.fn();
+    const executor = new TauriCharacterDraftExecutor(vi.fn(), runWeb);
+    const signal = new AbortController().signal;
+
+    await expect(executor.executeCharacterDraft({ ...input(), provider: "deepseek" }, signal))
+      .resolves.toEqual({ character: { name: "陈默" } });
+    expect(runWeb).not.toHaveBeenCalled();
+    expect(mocks.browserDraft).toHaveBeenCalledWith(expect.objectContaining({
+      apiKey: "sk-browser",
+      prompt: input().prompt,
+      playerName: "玩家甲",
+      ownerSeatId: "seat-player",
+      signal,
+    }));
+  });
+
+  it("falls back to the local bridge for DeepSeek when no browser key exists", async () => {
+    Reflect.deleteProperty(globalThis, "__TAURI_INTERNALS__");
+    const runWeb = vi.fn(async () => ([{ type: "result", result: { character: { name: "余弦" } } }]));
+    const executor = new TauriCharacterDraftExecutor(vi.fn(), runWeb);
+
+    await expect(executor.executeCharacterDraft({ ...input(), provider: "deepseek" }, new AbortController().signal))
+      .resolves.toEqual({ name: "余弦" });
+    expect(mocks.browserDraft).not.toHaveBeenCalled();
+    expect(runWeb).toHaveBeenCalledOnce();
+  });
 
   it("sends only the closed character-draft request", async () => {
     Object.defineProperty(globalThis, "__TAURI_INTERNALS__", { configurable: true, value: {} });
