@@ -29,6 +29,7 @@
     "ai:key:delete": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/manage-deepseek-key.ps1 -Action Delete",
     "dev:tauri": "pnpm --filter @coc-room/desktop tauri dev",
     "dev:tauri:first": "pnpm prepare:windows && pnpm --filter @coc-room/desktop tauri dev",
-    "build:windows": "pnpm prepare:windows && pnpm --filter @coc-room/desktop tauri build --target x86_64-pc-windows-msvc"
+    "build:windows": "pnpm prepare:windows && pnpm --filter @coc-room/desktop tauri build --target x86_64-pc-windows-msvc",
+    "deploy:test": "pnpm --filter @coc-room/protocol build && pnpm --filter @coc-room/desktop build && pnpm --filter @coc-room/relay run deploy"
   }
 }

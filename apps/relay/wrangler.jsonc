@@ -5,6 +5,13 @@
   "compatibility_date": "2026-08-20",
   "workers_dev": true,
   "preview_urls": false,
+  // Serve the built web app from the same worker: one URL for testers, and
+  // page-to-relay calls become same-origin. /v1/* always reaches the worker.
+  "assets": {
+    "directory": "../desktop/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*"]
+  },
   "observability": {
     "enabled": false
   },
