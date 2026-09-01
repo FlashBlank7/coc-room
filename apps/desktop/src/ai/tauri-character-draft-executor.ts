@@ -56,6 +56,14 @@ export class TauriCharacterDraftExecutor implements RoomAiDraftExecutor {
             }),
           };
         }
+        try {
+          return extractCharacterDraft(await this.runWeb("character-draft", request, signal));
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("本地 AI 开发会话")) {
+            throw new Error("要在网页端使用 DeepSeek 车卡，请先到 设置 → AI 文字服务(DeepSeek) 保存 API Key。");
+          }
+          throw error;
+        }
       }
       return extractCharacterDraft(await this.runWeb("character-draft", request, signal));
     }

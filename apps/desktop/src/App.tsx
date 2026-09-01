@@ -24,7 +24,7 @@ import { isRoomHostAvailable } from "./lib/room-availability";
 import { hasManagedAssetStore, managedAssetStoreKind, resolveManagedAssetUrl } from "./lib/asset-store";
 import { SynchronizedAudioRuntime, type AudioSyncStatus } from "./lib/audio-sync";
 import type { RoomAssetCoordinator } from "./network/RoomAssetCoordinator";
-import type { RoomAiJobCoordinator } from "./ai/room-ai-job-coordinator";
+import type { CharacterDraftExecutionRequest, RoomAiJobCoordinator } from "./ai/room-ai-job-coordinator";
 
 // The lobby is the only unconditional first screen. Preparation, character
 // management, settings, and both room generations are fetched when the user
@@ -297,8 +297,24 @@ export function App() {
         const settings = useAppStore.getState();
         const aiProvider = settings.parserProvider;
         const aiModel = aiProvider === "codex" ? settings.codexModel : settings.deepseekModel;
+        // The provider choice must follow the CURRENT settings, not the ones
+        // from the moment the room was joined — a keeper who switches to
+        // DeepSeek mid-session expects the next draft to honor it.
         const characterDraftExecutor = next.isHost
-          ? new (await import("./ai/tauri-character-draft-executor")).TauriCharacterDraftExecutor()
+          ? await (async () => {
+            const inner = new (await import("./ai/tauri-character-draft-executor")).TauriCharacterDraftExecutor();
+            return {
+              executeCharacterDraft: (request: CharacterDraftExecutionRequest, signal: AbortSignal) => {
+                const state = useAppStore.getState();
+                const provider = state.parserProvider;
+                return inner.executeCharacterDraft({
+                  ...request,
+                  provider,
+                  model: provider === "codex" ? state.codexModel : state.deepseekModel,
+                }, signal);
+              },
+            };
+          })()
           : undefined;
         assertAttemptOwner();
         const aiCoordinator = new RoomAiJobCoordinatorRuntime({
