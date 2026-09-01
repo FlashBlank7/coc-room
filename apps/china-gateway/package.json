@@ -1,0 +1,12 @@
+{
+  "name": "@coc-room/china-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reverse proxy gateway so testers who cannot reach workers.dev can play via an Azure URL",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

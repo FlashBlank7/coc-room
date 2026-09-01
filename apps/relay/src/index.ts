@@ -122,6 +122,12 @@ async function createRoom(request: Request): Promise<Response> {
     `/v1/rooms/${encodeURIComponent(roomId)}/ws`,
     request.url,
   );
+  // Behind a reverse proxy (e.g. an Azure gateway for testers who cannot
+  // reach workers.dev) the invite must point at the proxy, not at us.
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  if (forwardedHost && /^[a-z0-9.-]+(:\d+)?$/i.test(forwardedHost)) {
+    websocketUrl.host = forwardedHost;
+  }
   websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
 
   const response: CreateRoomResponse = {
