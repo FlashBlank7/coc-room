@@ -58,6 +58,7 @@ class MemoryTransportV2 {
   stop(): void {
     this.started = false;
     this.onRelayStateChange?.(false);
+    this.onPresence?.([this.participant]);
     this.hub.presence();
   }
 
@@ -374,6 +375,49 @@ describe("RoomSessionV2", () => {
 
     player.stop();
     host.stop();
+  });
+
+  it.each(["host", "player", "both"])("continues authenticated play when only the %s relay socket is lost and direct reachability survives", async (disconnected) => {
+    const hub = new MemoryTransportHub();
+    const hostRoom = roomRecord(`direct-survival-host-${disconnected}`, "host", `direct-survival-seat-${disconnected}`);
+    const hostTransport = hub.create(participant(hostRoom, "KP"), hostRoom.hostPeerId);
+    const host = new RoomSessionV2({ room: hostRoom, displayName: "KP", repository: new MemoryRepository(), transport: hostTransport });
+    const playerRepository = new MemoryRepository();
+    let player: RoomSessionV2 | undefined;
+    try {
+      await host.start();
+      const invitation = await host.issueSeatInvitation("Alice", `direct-player-seat-${disconnected}`);
+      await saveLocalSeatSecret(invitation.roomId, invitation.seatId, invitation.seatSecret);
+      const joinedRoom = playerRoom(invitation, `direct-player-peer-${disconnected}`);
+      const playerTransport = hub.create(participant(joinedRoom, "Alice"), hostRoom.hostPeerId);
+      player = new RoomSessionV2({ room: joinedRoom, displayName: "Alice", repository: playerRepository, transport: playerTransport });
+      await player.start();
+      await eventually(() => player!.isAuthenticated);
+      const handshakes = () => hub.messages.filter(({ message }) => message.kind === "v2.auth.hello").length;
+      const before = handshakes();
+      // This is the transport's surviving-DataChannel contract: relay state
+      // changes, but the authenticated peer remains reachable in presence.
+      if (disconnected !== "player") hostTransport.onRelayStateChange?.(false);
+      if (disconnected !== "host") playerTransport.onRelayStateChange?.(false);
+      hub.presence();
+      expect(player.isAuthenticated).toBe(true);
+      expect(handshakes()).toBe(before);
+      await host.submitConfirmed({ type: "chat.message", audience: { kind: "room" }, payload: { message: "The scene continues over the surviving path", format: "plain" } });
+      await eventually(() => player!.lastContiguousSequence === 1);
+      await player.submitConfirmed({ type: "chat.message", audience: { kind: "room" }, payload: { message: "The investigator can still act", format: "plain" } });
+      await host.submitConfirmed({ type: "chat.message", audience: { kind: "host" }, payload: { message: "DIRECT_SURVIVAL_KEEPER_SECRET", format: "plain" } });
+      await eventually(() => player!.lastContiguousSequence === 3);
+      expect(JSON.stringify(await playerRepository.listEventViewsV2(hostRoom.id))).not.toContain("DIRECT_SURVIVAL_KEEPER_SECRET");
+      // Losing the remaining path must still pause and later authenticate again.
+      playerTransport.stop();
+      hostTransport.onPresence?.([participant(hostRoom, "KP")]);
+      playerTransport.onPresence?.([participant(joinedRoom, "Alice")]);
+      expect(player.isAuthenticated).toBe(false);
+      await playerTransport.start();
+      await eventually(() => player!.isAuthenticated);
+      await player.submitConfirmed({ type: "chat.message", audience: { kind: "room" }, payload: { message: "Reconnected", format: "plain" } });
+      expect(host.world.lastSequence).toBe(4);
+    } finally { player?.stop(); host.stop(); }
   });
 
   it("paginates at 500 events and enforces the 4 MiB page ceiling", () => {

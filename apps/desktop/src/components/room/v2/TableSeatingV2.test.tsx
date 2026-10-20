@@ -1,0 +1,200 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createRoomCommandV2, HostEventSequencerV2, type RoomEventProposalV2, type SeatV2 } from "@coc-room/protocol";
+import { getRepository } from "../../../data/repository";
+import { RoomSessionV2 } from "../../../network/RoomSessionV2";
+import { miniHostSeat, miniPlayerSeat, miniInvestigator, miniRoomRecord } from "../../../test/scenarios/mini-investigation";
+import { useAppStore } from "../../../store/app-store";
+import { TableSeatingV2 } from "./TableSeatingV2";
+import { CharactersView } from "../../../views/CharactersView";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { coc7CharacterSchema } from "@coc-room/protocol";
+import { TauriCharacterDraftExecutor } from "../../../ai/tauri-character-draft-executor";
+import { auditCharacterCreation } from "../../../lib/character-creation-guidance";
+import { enableSkillAllocation } from "../../../lib/character-skill-allocation";
+import { createCoccharPackage, parseCoccharPackage } from "../../../lib/cocchar-package";
+
+beforeEach(async () => {
+  window.sessionStorage.clear();
+  const repo = await getRepository();
+  for (const card of await repo.listPersonalCharactersV2()) await repo.deletePersonalCharacterV2(card.characterId);
+  useAppStore.setState({ characterTableTarget: undefined, currentRoom: undefined, activeView: "room", events: [], participants: [], paths: {} });
+});
+afterEach(() => { cleanup(); useAppStore.getState().leaveRoom(); vi.restoreAllMocks(); });
+
+function table() {
+  const room = miniRoomRecord("host");
+  const sequencer = new HostEventSequencerV2(room.id);
+  const commit = (sender: SeatV2, proposal: RoomEventProposalV2) => sequencer.commitCommand(createRoomCommandV2(room.id, sender, proposal), sender);
+  const session = (sender: SeatV2) => {
+    const instance = new RoomSessionV2({ room: miniRoomRecord(sender.role), displayName: sender.displayName, repository: {} as never, transport: {} as never });
+    vi.spyOn(instance, "submitConfirmed").mockImplementation(async (proposal) => { commit(sender, proposal); return "accepted"; });
+    return instance;
+  };
+  return { room, sequencer, commit, host: session(miniHostSeat), player: session(miniPlayerSeat) };
+}
+
+it("lets the KP prepare a library card, then the player claims it, edits that exact card, and saves to both the table and personal library", async () => {
+  const { room, sequencer, host, player } = table();
+  const repo = await getRepository();
+  const now = new Date().toISOString();
+  await repo.savePersonalCharacterV2({ characterId: miniInvestigator.id, revision: 1, character: miniInvestigator, privateNotes: "PRIVATE_LIBRARY_NOTES", createdAt: now, updatedAt: now });
+  const props = { participants: [miniHostSeat, miniPlayerSeat] };
+  const hostUI = render(<TableSeatingV2 {...props} session={host} world={sequencer.world} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加座位" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.size).toBe(1));
+  hostUI.rerender(<TableSeatingV2 {...props} session={host} world={sequencer.world} />);
+  const picker = await screen.findByLabelText("座位 1的角色库");
+  await waitFor(() => expect(within(picker).getByRole("option", { name: /林默/ })).toBeTruthy());
+  fireEvent.change(picker, { target: { value: miniInvestigator.id } });
+  fireEvent.click(screen.getByRole("button", { name: "放到座位" }));
+  await waitFor(() => expect([...sequencer.world.tableSeats.values()][0]?.characterId).toBeTruthy());
+  const seat = [...sequencer.world.tableSeats.values()][0]!;
+  expect(seat.characterId).not.toBe(miniInvestigator.id);
+  expect(sequencer.world.latestCharacters.get(seat.characterId!)?.ownerPeerId).toBe(miniHostSeat.seatId);
+  expect(JSON.stringify(sequencer.viewsAfter(miniPlayerSeat, 0))).not.toContain("PRIVATE_LIBRARY_NOTES");
+  hostUI.unmount();
+  const playerUI = render(<TableSeatingV2 {...props} session={player} world={sequencer.world} />);
+  expect(screen.queryByRole("button", { name: "查看并修改角色卡" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "坐在这里" }));
+  await waitFor(() => expect(sequencer.world.latestCharacters.get(seat.characterId!)?.ownerPeerId).toBe(miniPlayerSeat.seatId));
+  playerUI.rerender(<TableSeatingV2 {...props} session={player} world={sequencer.world} />);
+  useAppStore.setState({ currentRoom: miniRoomRecord("player") });
+  fireEvent.click(screen.getByRole("button", { name: "查看并修改角色卡" }));
+  expect(useAppStore.getState().characterTableTarget).toEqual({ roomId: room.id, tableSeatId: seat.tableSeatId });
+  playerUI.unmount();
+  render(<CharactersView session={player} worldV2={sequencer.world} />);
+  expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe(miniInvestigator.name);
+  fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "玩家修改的记者" } });
+  await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "保存到座位并回到现场" }));
+  await waitFor(() => expect(sequencer.world.latestCharacters.get(seat.characterId!)?.name).toBe("玩家修改的记者"));
+  await waitFor(() => expect(useAppStore.getState().activeView).toBe("room"));
+  expect((await repo.listPersonalCharactersV2()).find((card) => card.characterId === seat.characterId)?.character.name).toBe("玩家修改的记者");
+  expect((await repo.listPersonalCharactersV2()).find((card) => card.characterId === miniInvestigator.id)?.privateNotes).toBe("PRIVATE_LIBRARY_NOTES");
+});
+
+it("generates a card at an empty seat using only the confirmed public briefing and retains it in the library", async () => {
+  const { sequencer, host, commit } = table();
+  commit(miniHostSeat, { type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "chair-ai", name: "记者座位" } });
+  commit(miniHostSeat, { type: "room.settings.updated", audience: { kind: "room" }, payload: { defaultVisibility: "public", characterBriefing: { text: "1920 年代东京的剧院调查，调查员互为旧识。", recommendedSkills: ["聆听"] } } });
+  commit(miniHostSeat, { type: "chat.message", audience: { kind: "host" }, payload: { message: "KEEPER_SECRET_MUST_NOT_REACH_AI", format: "plain" } });
+  const generate = vi.fn(async (_prompt: string, _playerName: string) => miniInvestigator);
+  const view = render(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat]} requestCharacterDraft={generate} />);
+  fireEvent.click(screen.getByRole("button", { name: "按模组背景 AI 车卡" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.get("chair-ai")?.characterId).toBeTruthy());
+  expect(generate).toHaveBeenCalledOnce();
+  expect(generate.mock.calls[0]?.[0]).toContain("1920 年代东京");
+  expect(JSON.stringify(generate.mock.calls)).not.toContain("KEEPER_SECRET_MUST_NOT_REACH_AI");
+  const cardId = sequencer.world.tableSeats.get("chair-ai")!.characterId!;
+  expect((await (await getRepository()).listPersonalCharactersV2()).some((card) => card.characterId === cardId)).toBe(true);
+  commit(miniHostSeat, { type: "character.updated", audience: { kind: "room" }, payload: { character: { ...sequencer.world.latestCharacters.get(cardId)!, name: "开团后修改的卡" } } });
+  view.rerender(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat]} requestCharacterDraft={generate} />);
+  await waitFor(() => expect((screen.getByRole("button", { name: "从座位取下角色卡" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "从座位取下角色卡" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.get("chair-ai")?.characterId).toBeUndefined());
+  expect((await (await getRepository()).listPersonalCharactersV2()).find((card) => card.characterId === cardId)?.character.name).toBe("开团后修改的卡");
+});
+
+it("keeps an AI draft in the library without overwriting a seat claimed while generation was running", async () => {
+  const { sequencer, host, commit } = table();
+  commit(miniHostSeat, { type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "chair-race", name: "空座位" } });
+  commit(miniHostSeat, { type: "room.settings.updated", audience: { kind: "room" }, payload: { defaultVisibility: "public", characterBriefing: { text: "公开背景", recommendedSkills: [] } } });
+  let finish!: (card: typeof miniInvestigator) => void;
+  const generate = vi.fn(() => new Promise<typeof miniInvestigator>((resolve) => { finish = resolve; }));
+  const view = render(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat]} requestCharacterDraft={generate} />);
+  fireEvent.click(screen.getByRole("button", { name: "按模组背景 AI 车卡" }));
+  commit(miniPlayerSeat, { type: "table.seat.claimed", audience: { kind: "room" }, payload: { tableSeatId: "chair-race" } });
+  view.rerender(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat, miniPlayerSeat]} requestCharacterDraft={generate} />);
+  await act(async () => finish(miniInvestigator));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("生成期间座位发生了变化"));
+  expect(sequencer.world.tableSeats.get("chair-race")?.characterId).toBeUndefined();
+  expect(await (await getRepository()).listPersonalCharactersV2()).toHaveLength(1);
+});
+
+it.skipIf(!process.env.COC_REAL_GUIDE_DIR || !existsSync(resolve(process.env.COC_REAL_GUIDE_DIR ?? ".", "character-bridge-result.ndjson")))("recovers from a service failure and places an actual bridge-generated card in both the seat and library", async () => {
+  const { sequencer, host, commit } = table();
+  const messages = readFileSync(resolve(process.env.COC_REAL_GUIDE_DIR!, "character-bridge-result.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const bridge = vi.fn().mockResolvedValueOnce([{ type: "error", error: { code: "INTERNAL_ERROR", message: "PRIVATE_DIAGNOSTIC" } }]).mockResolvedValueOnce(messages);
+  const executor = new TauriCharacterDraftExecutor(vi.fn(), bridge);
+  const generate = async (prompt: string, playerName: string) => coc7CharacterSchema.parse(await executor.executeCharacterDraft({ jobId: crypto.randomUUID(), task: "character-draft", provider: "codex", model: "", ownerSeatId: miniHostSeat.seatId, playerName, prompt }, new AbortController().signal));
+  commit(miniHostSeat, { type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "chair-actual", name: "实际生成验证" } });
+  commit(miniHostSeat, { type: "room.settings.updated", audience: { kind: "room" }, payload: { defaultVisibility: "public", characterBriefing: { text: "明治八年的东京吉原调查。", recommendedSkills: [], skillPointMode: "occupation-interest" } } });
+  render(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat]} requestCharacterDraft={generate} />);
+  fireEvent.click(screen.getByRole("button", { name: "按模组背景 AI 车卡" }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("INTERNAL_ERROR"));
+  expect(screen.getByRole("alert").textContent).not.toContain("PRIVATE_DIAGNOSTIC");
+  expect(await (await getRepository()).listPersonalCharactersV2()).toHaveLength(0);
+  expect(sequencer.world.tableSeats.get("chair-actual")?.characterId).toBeUndefined();
+  fireEvent.click(screen.getByRole("button", { name: "按模组背景 AI 车卡" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.get("chair-actual")?.characterId).toBeTruthy());
+  const cardId = sequencer.world.tableSeats.get("chair-actual")!.characterId!;
+  const card = sequencer.world.latestCharacters.get(cardId)!;
+  expect(card.ownerPeerId).toBe(miniHostSeat.seatId);
+  expect(card.name).toBe(messages.find((item) => item.type === "result").result.character.name);
+  expect(card.creation).toBeDefined();
+  expect((await (await getRepository()).listPersonalCharactersV2()).find((item) => item.characterId === cardId)?.character).toEqual(card);
+});
+
+it.skipIf(!process.env.COC_REAL_GUIDE_DIR || !existsSync(resolve(process.env.COC_REAL_GUIDE_DIR ?? ".", "character-allocation-bridge-result.ndjson")))("retains the actual AI doctor's two point pools when the player claims, fine-tunes and saves the card", async () => {
+  const { sequencer, host, player, commit } = table();
+  const messages = readFileSync(resolve(process.env.COC_REAL_GUIDE_DIR!, "character-allocation-bridge-result.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const generated = coc7CharacterSchema.parse(messages.find((item) => item.type === "result").result.character);
+  expect(generated.creation).toMatchObject({ origin: "ai", occupationProfile: "医生", occupationFormula: "edu4", creditMin: 30, creditMax: 80 });
+  const briefing = { text: "明治八年东京吉原调查", recommendedSkills: [], skillPointMode: "occupation-interest" as const, skillMax: 75 };
+  const generatedAudit = auditCharacterCreation(generated, briefing);
+  expect(generatedAudit.issues).toEqual([]);
+  expect(generatedAudit.allocation.occupationSpent).toBe(generatedAudit.allocation.occupation);
+  expect(generatedAudit.allocation.interestSpent).toBe(generatedAudit.allocation.interest);
+  commit(miniHostSeat, { type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "chair-doctor", name: "医者座位" } });
+  commit(miniHostSeat, { type: "room.settings.updated", audience: { kind: "room" }, payload: { defaultVisibility: "public", characterBriefing: briefing } });
+  render(<TableSeatingV2 session={host} world={sequencer.world} participants={[miniHostSeat]} requestCharacterDraft={async () => generated} />);
+  fireEvent.click(screen.getByRole("button", { name: "按模组背景 AI 车卡" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.get("chair-doctor")?.characterId).toBeTruthy());
+  const cardId = sequencer.world.tableSeats.get("chair-doctor")!.characterId!;
+  expect(sequencer.world.latestCharacters.get(cardId)!.creation).toEqual(generated.creation);
+  cleanup();
+  const playerUI = render(<TableSeatingV2 session={player} world={sequencer.world} participants={[miniHostSeat, miniPlayerSeat]} />);
+  fireEvent.click(screen.getByRole("button", { name: "坐在这里" }));
+  await waitFor(() => expect(sequencer.world.tableSeats.get("chair-doctor")?.occupantSeatId).toBe(miniPlayerSeat.seatId));
+  playerUI.rerender(<TableSeatingV2 session={player} world={sequencer.world} participants={[miniHostSeat, miniPlayerSeat]} />);
+  useAppStore.setState({ currentRoom: miniRoomRecord("player") });
+  fireEvent.click(screen.getByRole("button", { name: "查看并修改角色卡" }));
+  playerUI.unmount();
+  render(<CharactersView session={player} worldV2={sequencer.world} />);
+  const skill = generated.skills.find((item) => generated.creation!.allocations[item.id]!.interest > 0)!;
+  const previous = generated.creation!.allocations[skill.id]!;
+  fireEvent.change(screen.getByLabelText(`${skill.name}兴趣投入`), { target: { value: String(previous.interest - 1) } });
+  await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "保存到座位并回到现场" }));
+  await waitFor(() => expect(sequencer.world.latestCharacters.get(cardId)!.creation!.allocations[skill.id]!.interest).toBe(previous.interest - 1));
+  const saved = sequencer.world.latestCharacters.get(cardId)!;
+  expect(saved.creation!.allocations[skill.id]!.occupation).toBe(previous.occupation);
+  expect(saved.skills.find((item) => item.id === skill.id)!.value).toBe(skill.value - 1);
+  expect(saved.creation!.occupationSkillIds).toEqual(generated.creation!.occupationSkillIds);
+  await waitFor(() => expect(screen.queryByText(/个人角色修订冲突|Personal character revision conflict/)).toBeNull());
+  await waitFor(async () => expect((await (await getRepository()).listPersonalCharactersV2()).find((item) => item.characterId === cardId)?.character.creation).toEqual(saved.creation));
+  const restored = await parseCoccharPackage(await createCoccharPackage({ character: saved, privateNotes: "" }));
+  expect(restored.character.creation).toEqual(saved.creation);
+});
+
+it("opens a grown character in current-value mode and never resets growth just by switching to creation editing", async () => {
+  const { sequencer, host, commit } = table();
+  const card = enableSkillAllocation({ ...miniInvestigator, ownerPeerId: miniHostSeat.seatId });
+  card.skills = card.skills.map((skill, index) => index ? skill : { ...skill, value: skill.value + 5 });
+  commit(miniHostSeat, { type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "chair-grown", name: "旧角色" } });
+  commit(miniHostSeat, { type: "table.seat.character.assigned", audience: { kind: "room" }, payload: { tableSeatId: "chair-grown", character: card } });
+  useAppStore.setState({ currentRoom: miniRoomRecord("host") });
+  useAppStore.getState().openTableCharacter(sequencer.world.roomId!, "chair-grown");
+  render(<CharactersView session={host} worldV2={sequencer.world} />);
+  expect((screen.getByLabelText("技能编辑方式") as HTMLSelectElement).value).toBe("current");
+  expect(screen.queryByLabelText("侦查兴趣投入")).toBeNull();
+  expect((screen.getAllByLabelText("当前值")[0] as HTMLInputElement).value).toBe(String(card.skills[0]!.value));
+  fireEvent.change(screen.getByLabelText("技能编辑方式"), { target: { value: "creation" } });
+  expect(screen.getByLabelText("侦查兴趣投入")).toBeTruthy();
+  expect((screen.getAllByLabelText("当前值")[0] as HTMLInputElement).value).toBe(String(card.skills[0]!.value));
+  fireEvent.change(screen.getByLabelText("技能编辑方式"), { target: { value: "current" } });
+  expect(sequencer.world.latestCharacters.get(card.id)!.skills).toEqual(card.skills);
+});

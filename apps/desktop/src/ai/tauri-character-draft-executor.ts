@@ -94,13 +94,37 @@ function extractCharacterDraft(value: unknown): unknown {
   if (!Array.isArray(value)) throw new Error("角色草稿 sidecar 返回了非法消息列表");
   for (const message of value) {
     if (!isRecord(message) || message.type !== "error") continue;
-    throw new Error("角色草稿提供者失败，未生成替代内容");
+    const code = isRecord(message.error) ? message.error.code : undefined;
+    throw new Error(characterDraftErrorMessage(code));
   }
   for (const message of value) {
     if (!isRecord(message) || message.type !== "result" || !isRecord(message.result)) continue;
     if (message.result.character !== undefined) return message.result.character;
   }
   throw new Error("角色草稿提供者没有返回角色卡");
+}
+
+// Only map fixed codes. Upstream messages may contain prompts or credentials.
+function characterDraftErrorMessage(code: unknown): string {
+  switch (code) {
+    case "CODEX_NOT_FOUND": return "未找到本机 Codex。请在设置中检查 Codex 服务，或改用已配置的 DeepSeek。（CODEX_NOT_FOUND）";
+    case "CODEX_NOT_AUTHENTICATED":
+    case "CODEX_LOGIN_REQUIRED": return "本机 Codex 尚未登录。请完成登录后重新生成角色。（CODEX_LOGIN_REQUIRED）";
+    case "CODEX_INCOMPATIBLE": return "本机 Codex 版本不支持角色生成，请更新后重试。（CODEX_INCOMPATIBLE）";
+    case "MISSING_CREDENTIAL":
+    case "DEEPSEEK_KEY_MISSING": return "没有可用的 DeepSeek API Key，请到设置中保存后重试。（MISSING_CREDENTIAL）";
+    case "CODEX_TIMEOUT": return "Codex 生成角色超时，请稍后重试。（CODEX_TIMEOUT）";
+    case "CODEX_EXEC_FAILED": return "Codex 生成进程未能完成，请检查设置中的模型是否可用后重试。（CODEX_EXEC_FAILED）";
+    case "CODEX_STATUS_FAILED": return "无法检查本机 Codex 登录状态，请在设置中重新检查服务。（CODEX_STATUS_FAILED）";
+    case "INVALID_STRUCTURE": return "AI 返回的角色资料格式不完整，无法保存为角色卡，请重新生成。（INVALID_STRUCTURE）";
+    case "EMPTY_RESPONSE": return "AI 没有返回角色资料，请重新生成。（EMPTY_RESPONSE）";
+    case "TRUNCATED_RESPONSE": return "AI 返回的角色资料被截断，请重新生成。（TRUNCATED_RESPONSE）";
+    case "PROVIDER_ERROR": return "AI 服务请求失败，请检查模型和服务连接后重试。（PROVIDER_ERROR）";
+    case "INVALID_CHARACTER_TASK": return "角色生成请求有误，请刷新页面后重试。（INVALID_CHARACTER_TASK）";
+    case "INTERNAL_ERROR":
+    case "BRIDGE_INTERNAL_ERROR": return "角色生成服务发生内部错误，请重试；若仍失败，请反馈错误码 INTERNAL_ERROR。";
+    default: return "角色生成失败，请检查 AI 服务后重试。（LOCAL_AI_FAILED）";
+  }
 }
 
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

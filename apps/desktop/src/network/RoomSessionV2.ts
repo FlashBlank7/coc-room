@@ -45,6 +45,7 @@ const MAX_SYNC_PAGE_RETRIES = 3;
 
 interface RoomTransportV2Like {
   onWireMessage?: (fromPeerId: string, message: RoomWireMessage) => void;
+  /** Peers reachable over either relay or a surviving direct channel. */
   onPresence?: (participants: ParticipantV1[]) => void;
   onPathChange?: (peerId: string, path: ConnectionPath) => void;
   onRelayStateChange?: (connected: boolean) => void;
@@ -635,17 +636,10 @@ export class RoomSessionV2 {
   }
 
   private handleRelayConnectionState(connected: boolean): void {
-    if (!connected && !this.stopped) {
-      if (this.isHost) {
-        for (const peerId of [...this.authenticatedByPeer.keys()]) {
-          if (peerId !== this.room.localPeerId) this.forgetAuthenticatedPeer(peerId);
-        }
-        this.challenges.clear();
-        this.syncByPeer.clear();
-      } else {
-        this.resetPlayerAuthentication();
-      }
-    }
+    // Losing the relay is not losing the peer: RoomTransport emits a reachable
+    // presence snapshot after checking surviving DataChannels. handlePresence
+    // invalidates only peers absent from that snapshot, keeping authenticated
+    // direct play and pending command confirmations alive through relay loss.
     this.onRelayStateChange?.(connected);
   }
 

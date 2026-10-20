@@ -145,6 +145,7 @@ describe("RoomTransport authenticated startup", () => {
 
   afterEach(() => {
     vi.clearAllTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -208,6 +209,7 @@ describe("RoomTransport delivery paths", () => {
 
   afterEach(() => {
     vi.clearAllTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -262,6 +264,28 @@ describe("RoomTransport delivery paths", () => {
       { kind: "relay", targetPeerId: remotePlayer.peerId, payload: wireMessage },
     ]);
     transport.stop();
+  });
+
+  it.each(["missing", "constructor", "offer"])("automatically uses relay when WebRTC startup fails at %s", async (failure) => {
+    if (failure === "missing") vi.stubGlobal("RTCPeerConnection", undefined);
+    if (failure === "constructor") vi.stubGlobal("RTCPeerConnection", class { constructor() { throw new Error("WebRTC unavailable"); } });
+    if (failure === "offer") vi.spyOn(FakeRTCPeerConnection.prototype, "createOffer").mockRejectedValue(new Error("offer failed"));
+    const transport = createTransport();
+    const paths: string[] = [];
+    transport.onPathChange = (peerId, path) => paths.push(`${peerId}:${path}`);
+    const socket = await authenticateTransport(transport, [remotePlayer]);
+    await flushAsyncWork();
+    try {
+      expect(paths.at(-1)).toBe(`${remotePlayer.peerId}:relay`);
+      transport.broadcast(wireMessage);
+      expect(sentEnvelopes(socket).filter(({ kind }) => kind === "relay")).toEqual([
+        { kind: "relay", targetPeerId: remotePlayer.peerId, payload: wireMessage },
+      ]);
+      if (failure === "offer") {
+        expect(FakeRTCPeerConnection.instances[0]!.connectionState).toBe("closed");
+        expect(FakeRTCPeerConnection.instances[0]!.channels.every((channel) => channel.readyState === "closed")).toBe(true);
+      }
+    } finally { transport.stop(); }
   });
 
   it("falls back to WSS relay when an open DataChannel throws during send", async () => {

@@ -18,8 +18,10 @@ import {
   type RoomEntityV2,
   type RoomEventV2,
   type RoomEventViewV2,
+  type TableSeatV2,
 } from "./schemas/room-v2.js";
 import type { Coc7Character } from "./schemas/character.js";
+import type { CharacterBriefingV1 } from "./schemas/character-briefing.js";
 
 export type NpcSessionMessageV2 = Extract<RoomEventV2, { type: "npc.session.message" }>["payload"] & {
   readonly occurredAt: string;
@@ -71,6 +73,7 @@ export interface RoomWorldStateV2 {
   readonly npcSessions: ReadonlyMap<string, NpcInteractionSessionV1>;
   readonly npcMessages: ReadonlyMap<string, readonly NpcSessionMessageV2[]>;
   readonly latestCharacters: ReadonlyMap<string, Coc7Character>;
+  readonly tableSeats: ReadonlyMap<string, TableSeatV2>;
   readonly checkRequests: ReadonlyMap<string, CheckRequestV2>;
   readonly checkAuthorizations: ReadonlyMap<string, CheckAuthorizationV2>;
   readonly checkClosures: ReadonlyMap<string, CheckClosureV2>;
@@ -82,6 +85,7 @@ export interface RoomWorldStateV2 {
   readonly activeSceneEntityId?: string;
   readonly activeModule?: Readonly<{ moduleId: string; revision: number; title: string }>;
   readonly defaultVisibility: "public" | "secret";
+  readonly characterBriefing?: CharacterBriefingV1;
   /** Effective audiences include monotonic `audience.expanded` updates. */
   readonly eventAudiences: ReadonlyMap<string, AudienceV2>;
   /** Content target for each snapshot event, used to replay durable expansions. */
@@ -98,6 +102,7 @@ export function createRoomWorldStateV2(roomId?: string): RoomWorldStateV2 {
     npcSessions: new Map(),
     npcMessages: new Map(),
     latestCharacters: new Map(),
+    tableSeats: new Map(),
     checkRequests: new Map(),
     checkAuthorizations: new Map(),
     checkClosures: new Map(),
@@ -145,6 +150,7 @@ export function reduceRoomWorldStateV2(
       [...candidateState.npcMessages].map(([sessionId, messages]) => [sessionId, [...messages]]),
     ),
     latestCharacters: new Map(candidateState.latestCharacters),
+    tableSeats: new Map(candidateState.tableSeats),
     checkRequests: new Map(candidateState.checkRequests),
     checkAuthorizations: new Map(candidateState.checkAuthorizations),
     checkClosures: new Map(candidateState.checkClosures),
@@ -157,6 +163,7 @@ export function reduceRoomWorldStateV2(
     activeSceneEntityId: candidateState.activeSceneEntityId,
     activeModule: candidateState.activeModule,
     defaultVisibility: candidateState.defaultVisibility,
+    characterBriefing: candidateState.characterBriefing,
     eventAudiences: new Map(candidateState.eventAudiences),
     eventAudienceTargets: new Map(candidateState.eventAudienceTargets),
   };
@@ -197,6 +204,53 @@ export function reduceRoomWorldStateV2(
       });
       break;
     }
+    case "table.seat.updated": {
+      requirePublicTableEvent(event);
+      if (event.sender.role !== "host") throw new Error("只有 KP 可以设置桌上座位");
+      const previous = state.tableSeats.get(event.payload.tableSeatId);
+      if (!previous && state.tableSeats.size >= 7) throw new Error("房间最多放置 7 个玩家座位");
+      state.tableSeats.set(event.payload.tableSeatId, { ...previous, ...event.payload, keeperSeatId: event.sender.seatId });
+      break;
+    }
+    case "table.seat.claimed": {
+      requirePublicTableEvent(event);
+      const seat = requireTableSeat(state, event.payload.tableSeatId);
+      if (seat.occupantSeatId) throw new Error("这个座位已经有人，请选择空位");
+      if ([...state.tableSeats.values()].some((item) => item.occupantSeatId === event.sender.seatId)) throw new Error("你已经入座，请先离开原座位");
+      transferTableCharacter(state, seat, event.sender.seatId, event.occurredAt, event.sender.displayName);
+      state.tableSeats.set(seat.tableSeatId, { ...seat, occupantSeatId: event.sender.seatId });
+      break;
+    }
+    case "table.seat.released": {
+      requirePublicTableEvent(event);
+      const seat = requireTableSeat(state, event.payload.tableSeatId);
+      requireTableControl(seat, event.sender);
+      transferTableCharacter(state, seat, seat.keeperSeatId, event.occurredAt);
+      const { occupantSeatId: _occupant, ...vacant } = seat;
+      state.tableSeats.set(seat.tableSeatId, vacant);
+      break;
+    }
+    case "table.seat.character.assigned": {
+      requirePublicTableEvent(event);
+      const seat = requireTableSeat(state, event.payload.tableSeatId);
+      requireTableControl(seat, event.sender);
+      requireCharacterNotAwaitingRoll(state, seat.characterId);
+      const character = event.payload.character;
+      if (character) {
+        requireCharacterNotAwaitingRoll(state, character.id);
+        const owner = seat.occupantSeatId ?? seat.keeperSeatId;
+        if (character.ownerPeerId !== owner) throw new Error("角色卡必须归属于这个座位的玩家；空位由 KP 保管");
+        if ([...state.tableSeats.values()].some((item) => item.tableSeatId !== seat.tableSeatId && item.characterId === character.id)) throw new Error("这张角色卡已放在另一个座位，请使用独立副本");
+        const existing = state.latestCharacters.get(character.id);
+        if (existing && existing.ownerPeerId !== owner) throw new Error("不能借放置角色卡取得其他玩家的角色");
+        state.latestCharacters.set(character.id, character);
+        state.tableSeats.set(seat.tableSeatId, { ...seat, characterId: character.id });
+      } else {
+        const { characterId: _character, ...empty } = seat;
+        state.tableSeats.set(seat.tableSeatId, empty);
+      }
+      break;
+    }
     case "character.updated": {
       const character = event.payload.character;
       const existing = state.latestCharacters.get(character.id);
@@ -220,8 +274,11 @@ export function reduceRoomWorldStateV2(
         throw new Error(`duplicate check request ${event.payload.requestId}`);
       }
       const character = state.latestCharacters.get(event.payload.characterId);
-      if (character === undefined || character.ownerPeerId !== event.sender.seatId) {
+      if (character === undefined || (event.sender.role !== "host" && character.ownerPeerId !== event.sender.seatId)) {
         throw new Error("a check request requires the requester's room character");
+      }
+      if (character.ownerPeerId !== event.sender.seatId && !isAudienceMemberV2(event.audience, { seatId: character.ownerPeerId, role: "player" })) {
+        throw new Error("a keeper-initiated check must be visible to the investigator");
       }
       if (character.name !== event.payload.characterName) {
         throw new Error("check request character name does not match the room character");
@@ -278,7 +335,7 @@ export function reduceRoomWorldStateV2(
       }
       state.checkRequests.set(event.payload.requestId, {
         ...event.payload,
-        requesterSeatId: event.sender.seatId,
+        requesterSeatId: character.ownerPeerId,
         requestedAt: event.occurredAt,
         audience: event.audience,
       });
@@ -437,6 +494,9 @@ export function reduceRoomWorldStateV2(
       state.activeModule = event.payload;
       break;
     case "room.settings.updated":
+      if (event.sender.role !== "host") throw new Error("only the host may change room settings");
+      if (event.payload.characterBriefing && event.audience.kind !== "room") throw new Error("character briefing must be public");
+      if (event.payload.characterBriefing) state.characterBriefing = event.payload.characterBriefing;
       state.defaultVisibility = event.payload.defaultVisibility;
       break;
     case "artifact.upserted":
@@ -624,6 +684,7 @@ interface MutableRoomWorldStateV2 {
   npcSessions: Map<string, NpcInteractionSessionV1>;
   npcMessages: Map<string, NpcSessionMessageV2[]>;
   latestCharacters: Map<string, Coc7Character>;
+  tableSeats: Map<string, TableSeatV2>;
   checkRequests: Map<string, CheckRequestV2>;
   checkAuthorizations: Map<string, CheckAuthorizationV2>;
   checkClosures: Map<string, CheckClosureV2>;
@@ -634,8 +695,42 @@ interface MutableRoomWorldStateV2 {
   activeSceneEntityId?: string;
   activeModule?: { moduleId: string; revision: number; title: string };
   defaultVisibility: "public" | "secret";
+  characterBriefing?: CharacterBriefingV1;
   eventAudiences: Map<string, AudienceV2>;
   eventAudienceTargets: Map<string, AudienceTargetV2>;
+}
+
+function requirePublicTableEvent(event: RoomEventV2): void {
+  if (event.audience.kind !== "room") throw new Error("桌上座位变更必须让全房间可见");
+}
+
+function requireTableSeat(state: MutableRoomWorldStateV2, id: string): TableSeatV2 {
+  const seat = state.tableSeats.get(id);
+  if (!seat) throw new Error("座位不存在，请等待 KP 设置座位");
+  return seat;
+}
+
+function requireTableControl(seat: TableSeatV2, sender: RoomEventV2["sender"]): void {
+  if (sender.role !== "host" && seat.occupantSeatId !== sender.seatId) throw new Error("只能调整自己座位上的角色卡");
+}
+
+function requireCharacterNotAwaitingRoll(state: MutableRoomWorldStateV2, characterId?: string): void {
+  if (characterId && [...state.checkRequests.values()].some((request) => request.characterId === characterId
+    && !state.checkClosures.has(request.requestId) && !state.checkAuthorizations.get(request.requestId)?.resolvedByEventId)) {
+    throw new Error("这张角色卡还有未完成的检定，请先完成或取消检定再调整座位");
+  }
+}
+
+function transferTableCharacter(state: MutableRoomWorldStateV2, seat: TableSeatV2, ownerSeatId: string, updatedAt: string, playerName?: string): void {
+  requireCharacterNotAwaitingRoll(state, seat.characterId);
+  const character = seat.characterId ? state.latestCharacters.get(seat.characterId) : undefined;
+  if (!character || character.ownerPeerId === ownerSeatId) return;
+  state.latestCharacters.set(character.id, { ...character, ownerPeerId: ownerSeatId, updatedAt, ...(playerName ? { playerName } : {}) });
+  // Existing tokens follow the same explicit transfer, including after replay.
+  for (const entity of state.entities.values()) if (entity.kind === "character" && entity.data.characterId === character.id
+    && (typeof entity.data.ownerSeatId !== "string" || entity.data.ownerSeatId === character.ownerPeerId)) {
+    state.entities.set(entity.entityId, { ...entity, revision: entity.revision + 1, data: { ...entity.data, ownerSeatId } });
+  }
 }
 
 function applyArtifact(
@@ -1195,6 +1290,7 @@ function freezeStateShape(state: MutableRoomWorldStateV2): RoomWorldStateV2 {
       [...state.npcMessages].map(([sessionId, messages]) => [sessionId, [...messages]]),
     ),
     latestCharacters: new Map(state.latestCharacters),
+    tableSeats: new Map(state.tableSeats),
     checkRequests: new Map(state.checkRequests),
     checkAuthorizations: new Map(state.checkAuthorizations),
     checkClosures: new Map(state.checkClosures),
@@ -1209,6 +1305,7 @@ function freezeStateShape(state: MutableRoomWorldStateV2): RoomWorldStateV2 {
       : { activeSceneEntityId: state.activeSceneEntityId }),
     ...(state.activeModule === undefined ? {} : { activeModule: { ...state.activeModule } }),
     defaultVisibility: state.defaultVisibility,
+    ...(state.characterBriefing === undefined ? {} : { characterBriefing: { ...state.characterBriefing, recommendedSkills: [...state.characterBriefing.recommendedSkills] } }),
     eventAudiences: new Map(state.eventAudiences),
     eventAudienceTargets: new Map(state.eventAudienceTargets),
   };

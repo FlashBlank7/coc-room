@@ -6,11 +6,12 @@
   "workers_dev": true,
   "preview_urls": false,
   // Serve the built web app from the same worker: one URL for testers, and
-  // page-to-relay calls become same-origin. /v1/* always reaches the worker.
+  // page-to-relay calls become same-origin. API and health requests always
+  // reach the worker instead of falling through to the SPA's index.html.
   "assets": {
     "directory": "../desktop/dist",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/v1/*"]
+    "run_worker_first": ["/v1/*", "/health"]
   },
   "observability": {
     "enabled": false

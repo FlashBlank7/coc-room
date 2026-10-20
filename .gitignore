@@ -33,3 +33,14 @@ apps/desktop/src-tauri/icons/Square*Logo.png
 apps/desktop/src-tauri/icons/StoreLogo.png
 local-modules/
 /观止-见世之蝶.zip
+
+# Machine-local module imports and generated play-session packages.
+/*.zip
+/*.cocmod
+/*.cocmod.json
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*client_secret*.json
+*credentials*.json

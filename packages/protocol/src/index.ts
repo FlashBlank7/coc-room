@@ -8,6 +8,7 @@ export * from "./room-world.js";
 export * from "./room-world-v2.js";
 export * from "./sync.js";
 export * from "./schemas/character.js";
+export * from "./schemas/character-briefing.js";
 export * from "./schemas/common.js";
 export * from "./schemas/module.js";
 export * from "./schemas/relay.js";

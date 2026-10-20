@@ -281,6 +281,7 @@ _CHECK_DIFFICULTY_SUFFIXES: tuple[tuple[str, CheckDifficulty], ...] = (
     ("极难", CheckDifficulty.EXTREME),
     ("困难", CheckDifficulty.HARD),
     ("常规", CheckDifficulty.REGULAR),
+    ("普通", CheckDifficulty.REGULAR),
 )
 
 
@@ -299,15 +300,33 @@ def _resolve_scene_checks(
 
     resolved: list[str] = []
     for raw in scene.suggested_check_ids:
+        explicit = next((check for check in checks if check.id == raw), None)
+        if explicit is not None:
+            resolved.append(explicit.id)
+            continue
+        normalized = re.sub(r"(?:检定)?成功$|检定$", "", raw.strip()).strip()
+        for token, _level in _CHECK_DIFFICULTY_SUFFIXES:
+            normalized = re.sub(rf"^{token}|{token}$", "", normalized).strip()
+        # Independent world/evidence extraction can name a reference differently.
+        # Prefer the actual, fully specified check for THIS scene, never a same-
+        # skill roll from an unrelated scene or an empty invented replacement.
+        local = [check for check in checks if check.scene_id == scene.id and _lookup_key(check.skill) == _lookup_key(normalized)]
+        if local:
+            resolved.extend(check.id for check in local)
+            continue
         direct = check_aliases.get(raw) or check_aliases.get(_lookup_key(raw))
         if direct is not None:
             resolved.append(direct)
             continue
-        skill = raw.strip()
+        skill = re.sub(r"(?:检定)?成功$|检定$", "", raw.strip()).strip()
         difficulty = CheckDifficulty.REGULAR
         for suffix, level in _CHECK_DIFFICULTY_SUFFIXES:
             if skill.endswith(suffix) and len(skill) > len(suffix):
                 skill = skill[: -len(suffix)].strip()
+                difficulty = level
+                break
+            if skill.startswith(suffix) and len(skill) > len(suffix):
+                skill = skill[len(suffix):].strip()
                 difficulty = level
                 break
         base = check_aliases.get(skill) or check_aliases.get(_lookup_key(skill))
@@ -1169,7 +1188,6 @@ class ModuleParser:
                 context=f"scene {scene.id} handouts",
                 issues=issues,
             )
-            _resolve_scene_checks(scene, check_aliases, checks, issues)
         for clue in clues:
             clue.scene_ids = _resolve_many(
                 clue.scene_ids, scene_aliases, context=f"clue {clue.id} scenes", issues=issues
@@ -1201,6 +1219,19 @@ class ModuleParser:
             )
 
         scene_by_id = {scene.id: scene for scene in scenes}
+        # The evidence stage supplies its own scene links. They are authoritative
+        # links too; discarding them strands clues even though the text was extracted.
+        clue_by_id = {clue.id: clue for clue in clues}
+        for clue in clues:
+            for scene_id in clue.scene_ids:
+                if clue.id not in scene_by_id[scene_id].clue_ids:
+                    scene_by_id[scene_id].clue_ids.append(clue.id)
+        for scene in scenes:
+            for clue_id in scene.clue_ids:
+                if scene.id not in clue_by_id[clue_id].scene_ids:
+                    clue_by_id[clue_id].scene_ids.append(scene.id)
+            _resolve_scene_checks(scene, check_aliases, checks, issues)
+            scene.suggested_check_ids = _unique_strings(scene.suggested_check_ids + [check.id for check in checks if check.scene_id == scene.id])
         handout_by_id = {handout.id: handout for handout in handouts}
         for handout in handouts:
             for scene_id in handout.scene_ids:

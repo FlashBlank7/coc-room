@@ -462,6 +462,7 @@ describe("table investigation core (components + V2 protocol; not file import, R
       />,
     );
     expect(screen.getByLabelText("调查员进入了另一个场景").textContent).toContain(miniInvestigator.name);
+    await waitFor(() => expect(screen.getByLabelText("玩家可见的开场描述").hasAttribute("disabled")).toBe(false));
     fireEvent.change(screen.getByLabelText("玩家可见的开场描述"), {
       target: { value: tableStory.opening },
     });
@@ -480,8 +481,10 @@ describe("table investigation core (components + V2 protocol; not file import, R
         session={mockSession(authority.world, miniHostSeat, locationSubmit)}
       />,
     );
+    await waitFor(() => expect((screen.getByLabelText(`玩家可见介绍：${structuredModule.locations[0]!.name}`) as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText(`玩家可见介绍：${structuredModule.locations[0]!.name}`), { target: { value: structuredModule.locations[0]!.playerDescription } });
     fireEvent.click(screen.getByRole("button", { name: "让地点在当前情境登场" }));
-    await waitFor(() => expect(locationSubmit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(locationSubmit).toHaveBeenCalledOnce());
     expect(serializedCalls(locationSubmit)).toContain(tableStory.location);
     assertNoPrivateCanaries(locationSubmit.mock.calls);
     authority.commitCalls(miniHostSeat, locationSubmit);
@@ -498,8 +501,10 @@ describe("table investigation core (components + V2 protocol; not file import, R
         session={mockSession(authority.world, miniHostSeat, npcSubmit)}
       />,
     );
+    await waitFor(() => expect((screen.getByLabelText(`玩家可见介绍：${structuredModule.npcs[0]!.name}`) as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText(`玩家可见介绍：${structuredModule.npcs[0]!.name}`), { target: { value: structuredModule.npcs[0]!.playerDescription } });
     fireEvent.click(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }));
-    await waitFor(() => expect(npcSubmit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(npcSubmit).toHaveBeenCalledOnce());
     expect(serializedCalls(npcSubmit)).toContain(tableStory.npc);
     expect(serializedCalls(npcSubmit)).not.toContain("board.item.upserted");
     assertNoPrivateCanaries(npcSubmit.mock.calls);
@@ -622,11 +627,11 @@ describe("table investigation core (components + V2 protocol; not file import, R
     });
     cleanup();
 
-    // A success is not the end of a tabletop action: the player now waits for
-    // the Keeper's narrated consequence and cannot immediately submit another.
+    // The table may narrate through voice or chat. A separate outcome record
+    // remains available without blocking the next ordinary action.
     renderRoom(authority.aliceWorld, miniPlayerSeat, vi.fn().mockResolvedValue("confirmed"), authority.aliceViews);
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
-    expect(screen.queryByLabelText("你想怎么做")).toBeNull();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
+    expect(screen.getByLabelText("你想怎么做")).toBeTruthy();
     cleanup();
 
     const consequenceSubmit = vi.fn().mockResolvedValue("confirmed");

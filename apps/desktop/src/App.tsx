@@ -637,6 +637,8 @@ export function App() {
           {activeView === "lobby" && <LobbyView onConnect={connect} onOpenLocalRecord={openLocalRecord} />}
           {activeView === "room" && currentRoom && (currentRoom.protocolVersion ?? 1) === 2
             ? <RoomViewV2
+                requestCharacterDraft={requestCharacterDraft}
+                aiDraftStage={aiDraftStage}
                 room={currentRoom}
                 session={sessionV2}
                 views={viewsV2}
@@ -654,6 +656,15 @@ export function App() {
                 onAudioVolumeChange={setAudioVolume}
                 onAudioMutedChange={setAudioMuted}
                 onLeave={leave}
+                hostCharacterRequests={hostCharacterRequests}
+                onApproveHostCharacterRequest={(jobId) => {
+                  aiCoordinatorRef.current?.approveRequest(jobId);
+                  setHostCharacterRequests((current) => current.filter((request) => request.jobId !== jobId));
+                }}
+                onRejectHostCharacterRequest={(jobId) => {
+                  aiCoordinatorRef.current?.rejectRequest(jobId);
+                  setHostCharacterRequests((current) => current.filter((request) => request.jobId !== jobId));
+                }}
               />
             : activeView === "room" && <RoomView session={session} readOnly={isViewingLocalRecord} onLeave={leave} />}
           {activeView === "characters" && <CharactersView

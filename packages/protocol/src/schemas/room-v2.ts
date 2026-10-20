@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { diceRollResultSchema } from "../dice.js";
 import { coc7CharacterSchema } from "./character.js";
+import { characterBriefingSchema } from "./character-briefing.js";
 import {
   entityIdSchema,
   extensionsSchema,
@@ -476,6 +477,33 @@ export const characterUpdatedEventV2Schema = roomEventV2BaseSchema
   })
   .strict();
 
+/** Table positions are separate from authenticated participant identities. */
+export const tableSeatV2Schema = z.object({
+  tableSeatId: entityIdSchema,
+  name: z.string().trim().min(1).max(80),
+  keeperSeatId: entityIdSchema,
+  occupantSeatId: entityIdSchema.optional(),
+  characterId: entityIdSchema.optional(),
+}).strict();
+export type TableSeatV2 = z.infer<typeof tableSeatV2Schema>;
+
+export const tableSeatUpdatedEventV2Schema = roomEventV2BaseSchema.extend({
+  type: z.literal("table.seat.updated"),
+  payload: z.object({ tableSeatId: entityIdSchema, name: z.string().trim().min(1).max(80) }).strict(),
+}).strict();
+export const tableSeatClaimedEventV2Schema = roomEventV2BaseSchema.extend({
+  type: z.literal("table.seat.claimed"),
+  payload: z.object({ tableSeatId: entityIdSchema }).strict(),
+}).strict();
+export const tableSeatReleasedEventV2Schema = roomEventV2BaseSchema.extend({
+  type: z.literal("table.seat.released"),
+  payload: z.object({ tableSeatId: entityIdSchema }).strict(),
+}).strict();
+export const tableSeatCharacterAssignedEventV2Schema = roomEventV2BaseSchema.extend({
+  type: z.literal("table.seat.character.assigned"),
+  payload: z.object({ tableSeatId: entityIdSchema, character: coc7CharacterSchema.nullable() }).strict(),
+}).strict();
+
 export const checkRequestedEventV2Schema = roomEventV2BaseSchema
   .extend({
     type: z.literal("check.requested"),
@@ -589,6 +617,7 @@ export const roomSettingsUpdatedEventV2Schema = roomEventV2BaseSchema
     type: z.literal("room.settings.updated"),
     payload: z.object({
       defaultVisibility: z.enum(["public", "secret"]),
+      characterBriefing: characterBriefingSchema.optional(),
     }).strict(),
   })
   .strict();
@@ -784,6 +813,10 @@ export const roomEventV2Schema = z.discriminatedUnion("type", [
   systemNoticeEventV2Schema,
   diceResultEventV2Schema,
   characterUpdatedEventV2Schema,
+  tableSeatUpdatedEventV2Schema,
+  tableSeatClaimedEventV2Schema,
+  tableSeatReleasedEventV2Schema,
+  tableSeatCharacterAssignedEventV2Schema,
   checkRequestedEventV2Schema,
   checkAuthorizedEventV2Schema,
   checkClosedEventV2Schema,
@@ -815,6 +848,10 @@ export const roomEventTypeV2Schema = z.enum([
   "system.notice",
   "dice.result",
   "character.updated",
+  "table.seat.updated",
+  "table.seat.claimed",
+  "table.seat.released",
+  "table.seat.character.assigned",
   "check.requested",
   "check.authorized",
   "check.closed",

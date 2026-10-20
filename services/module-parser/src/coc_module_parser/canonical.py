@@ -82,6 +82,7 @@ class CanonicalEntityBase(CanonicalModel):
 
 
 class CanonicalSceneV1(CanonicalEntityBase):
+    playerDescription: str | None = Field(default=None, max_length=8_000)
     synopsis: str = Field(max_length=100_000)
     locationIds: list[str] = Field(max_length=100)
     npcIds: list[str] = Field(max_length=200)
@@ -422,6 +423,7 @@ def to_canonical_package(
                 id=scene.id,
                 name=scene.title[:240],
                 description=scene.summary[:100_000],
+                playerDescription=scene.player_description,
                 synopsis=scene.summary[:100_000],
                 locationIds=scene.location_ids[:100],
                 npcIds=scene.npc_ids[:200],

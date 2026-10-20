@@ -14,6 +14,7 @@ import {
   type BoardV1,
   type CheckAuthorizationV2,
   type CheckRequestV2,
+  type Coc7Character,
   type ModulePackageV1,
   type NpcInteractionSessionV1,
   type RoomArtifactV2,
@@ -87,7 +88,19 @@ import {
   type NpcStatsDraftV1,
 } from "../ai/tauri-npc-stats-draft-executor";
 
+import { HostCharacterRequests, type HostCharacterDraftRequest } from "../components/characters/HostCharacterRequests";
+import { DirectCheckComposer, type DirectCheckPreset } from "../components/room/v2/DirectCheckComposer";
+import { TableSeatingV2 } from "../components/room/v2/TableSeatingV2";
+import { tableCharacters } from "../lib/table-seating";
+import { CharacterBriefingEditor } from "../components/characters/CharacterBriefingEditor";
+import { currentCharacterBriefing } from "../lib/character-creation-guidance";
+
 export interface RoomViewV2Props {
+  requestCharacterDraft?: (prompt: string, playerName: string) => Promise<Coc7Character>;
+  aiDraftStage?: string;
+  hostCharacterRequests?: readonly HostCharacterDraftRequest[];
+  onApproveHostCharacterRequest?(jobId: string): void;
+  onRejectHostCharacterRequest?(jobId: string): void;
   room: RoomRecord;
   session?: RoomSessionV2;
   views: RoomEventViewV2[];
@@ -145,7 +158,13 @@ export function RoomViewV2({
   onAudioVolumeChange,
   onAudioMutedChange,
   onLeave,
+  hostCharacterRequests = [],
+  onApproveHostCharacterRequest,
+  onRejectHostCharacterRequest,
+  requestCharacterDraft,
+  aiDraftStage,
 }: RoomViewV2Props) {
+  const [directCheckPreset, setDirectCheckPreset] = useState<DirectCheckPreset>();
   const setActiveView = useAppStore((state) => state.setActiveView);
   const [activeRoomTab, setActiveRoomTab] = useState<"scene" | "clues" | "record">("scene");
   // Keep the original storage key so existing players do not see old clues as
@@ -211,6 +230,7 @@ export function RoomViewV2({
   const [selectedBoardItemId, setSelectedBoardItemId] = useState<string>();
   const [caseFileBoardId, setCaseFileBoardId] = useState<string>();
   const [message, setMessage] = useState("");
+  const [openingPreview, setOpeningPreview] = useState<string>();
   const [checkOutcomeDrafts, setCheckOutcomeDrafts] = useState<Record<string, string>>({});
   const [dice, setDice] = useState("1d100");
   const [reason, setReason] = useState("");
@@ -467,7 +487,7 @@ export function RoomViewV2({
       + pendingModuleSceneEntries.length
     : ownReadyChecks.length + (playerClosureHandoff ? 1 : 0);
   const ownRoomCharacters = session
-    ? [...world.latestCharacters.values()].filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
+    ? tableCharacters(world).filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
     : [];
   const playerSeats = seats.filter(({ role }) => role === "player");
   const showFirstInvitationCard = Boolean(
@@ -1412,7 +1432,8 @@ export function RoomViewV2({
   // chapter order) published as the opening without a detour through forms.
   const quickOpeningScene = (() => {
     if (!activeModulePackage || activeModulePackage.scenes.length === 0) return undefined;
-    const guideSceneId = activeModulePackage.keeperGuide?.clueTrail.find((step) => step.sceneId)?.sceneId;
+    const guideSceneId = activeModulePackage.keeperGuide?.preparation?.scenes[0]?.sceneId
+      ?? activeModulePackage.keeperGuide?.clueTrail.find((step) => step.sceneId)?.sceneId;
     const byGuide = guideSceneId
       ? activeModulePackage.scenes.find((scene) => scene.id === guideSceneId)
       : undefined;
@@ -1425,11 +1446,12 @@ export function RoomViewV2({
     return byGuide ?? byChapter ?? activeModulePackage.scenes[0];
   })();
 
+  useEffect(() => setOpeningPreview(undefined), [room.id, activeModulePackage?.moduleId, activeModulePackage?.revision]);
+
   const presentQuickOpening = () => run(async () => {
-    if (!session?.isHost || !activeModulePackage || !quickOpeningScene) return;
-    const opening = (quickOpeningScene.description || quickOpeningScene.synopsis).trim()
-      || `${quickOpeningScene.name}。`;
-    await presentModuleSceneV2(session, activeModulePackage, quickOpeningScene, opening);
+    if (!session?.isHost || !activeModulePackage || !quickOpeningScene || !openingPreview?.trim()) return;
+    await presentModuleSceneV2(session, activeModulePackage, quickOpeningScene, openingPreview.trim());
+    setOpeningPreview(undefined);
   });
 
   const openKeeperSceneWorkbench = () => {
@@ -1544,11 +1566,18 @@ export function RoomViewV2({
                     ? "本机模组资料暂时不可用。你可以先用不引用模组私密内容的临时开场继续跑团，之后再恢复备团资料。"
                     : `正在读取《${world.activeModule.title}》的本地备团资料。`}</p>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {activeModuleHasScenes && quickOpeningScene && <Button onClick={() => void presentQuickOpening()}><Play className="mr-2 h-4 w-4" />一键开场：{quickOpeningScene.name}</Button>}
+                  {activeModuleHasScenes && quickOpeningScene && <Button onClick={() => setOpeningPreview(quickOpeningScene.playerDescription ?? activeModulePackage?.keeperGuide?.preparation?.scenes.find((scene) => scene.sceneId === quickOpeningScene.id)?.openingDraft ?? "")}><Play className="mr-2 h-4 w-4" />准备开场：{quickOpeningScene.name}</Button>}
                   {activeModuleHasScenes && <Button variant="secondary" onClick={openKeeperSceneWorkbench}><Clapperboard className="mr-2 h-4 w-4" />选择并呈现开场</Button>}
                   {activeModuleLoadError && <Button onClick={openManualScenePresenter}><Clapperboard className="mr-2 h-4 w-4" />先用临时开场继续</Button>}
                   {activeModuleLoadError && <Button variant="secondary" onClick={() => setActiveView("modules")}><FolderKanban className="mr-2 h-4 w-4" />去 KP 备团</Button>}
                 </div>
+                {openingPreview !== undefined && <section aria-label="开场公开预览" className="mt-4 grid gap-3 rounded-xl border border-emerald-900/60 bg-zinc-950 p-4">
+                  <p className="text-sm text-emerald-200">确认调查员此刻看到、听到的内容</p>
+                  <p className="text-xs leading-5 text-zinc-400">只会向所有玩家发送下方文字。主持摘要、真相和笔记留在你的备团资料中。</p>
+                  {!openingPreview.trim() && <p className="text-xs text-amber-200">这份资料还没有玩家开场文案。先写下眼前情境，或在备团中补全；不会用主持摘要代替。</p>}
+                  <Textarea aria-label="开场公开正文" maxLength={8_000} value={openingPreview} onChange={(event) => setOpeningPreview(event.target.value)} />
+                  <div className="flex gap-2"><Button disabled={commandsDisabled || !openingPreview.trim()} onClick={() => void presentQuickOpening()}>确认开场，向所有玩家呈现</Button><Button variant="ghost" onClick={() => setOpeningPreview(undefined)}>收起预览</Button></div>
+                </section>}
               </> : <>
                 <h2 className="mt-2 font-serif text-2xl text-zinc-300">先呈现第一幕</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-500">没有模组也能直接开场：只写调查员此刻能看见、听见或感受到的内容。也可以先去备团，再从结构化场景开始。</p>
@@ -1671,11 +1700,17 @@ export function RoomViewV2({
               <Button onClick={() => void copyLatestInvitation()}><Copy className="mr-2 h-4 w-4" />复制并发给这位玩家</Button>
             </div>}
           </section>}
-          {!readOnly && session && !session.isHost && ownRoomCharacters.length === 0 && <section aria-label="下一步" className="mx-auto mb-5 max-w-4xl rounded-xl border border-amber-800/50 bg-amber-950/15 p-4">
+          {!readOnly && session && <TableSeatingV2 session={session} world={world} participants={seats} disabled={commandsDisabled} requestCharacterDraft={requestCharacterDraft} aiDraftStage={aiDraftStage} />}
+          {!readOnly && session && !session.isHost && !world.tableSeats?.size && ownRoomCharacters.length === 0 && <section aria-label="下一步" className="mx-auto mb-5 max-w-4xl rounded-xl border border-amber-800/50 bg-amber-950/15 p-4">
             <h2 className="text-sm font-semibold text-amber-100">先带入你的调查员</h2>
             <p className="mt-1 text-xs leading-5 text-zinc-400">你可以先听 KP 描述；准备行动和检定前，只需创建或选择一张角色卡。</p>
             <Button className="mt-3" onClick={() => setActiveView("characters")}><UserRound className="mr-2 h-4 w-4" />去选择调查员</Button>
           </section>}
+          {!readOnly && session?.isHost && <div className="mx-auto max-w-4xl">
+            <CharacterBriefingEditor key={`${room.id}:${world.activeModule?.moduleId ?? ""}`} session={session} world={world} modulePackage={activeModulePackage} disabled={commandsDisabled} onError={setConnectionError} />
+            <DirectCheckComposer session={session} world={world} preset={directCheckPreset} disabled={commandsDisabled} onError={setConnectionError} />
+          </div>}
+          {!session?.isHost && currentCharacterBriefing(world) && <section className="mx-auto mb-4 max-w-4xl rounded-lg border border-zinc-700 p-3" aria-label="本团公开车卡说明"><h2 className="text-sm font-semibold">本团车卡说明</h2><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-zinc-400">{currentCharacterBriefing(world)!.text}</p><Button variant="ghost" onClick={() => setActiveView("characters")}>按本团要求检查调查员</Button></section>}
           {!readOnly && session && ((session.isHost && pendingCheckRequests.length > 0) || (!session.isHost && ownRoomCharacters.length > 0)) && <section ref={currentActionSectionRef} aria-label="当前行动" className="mx-auto scroll-mt-4 max-w-4xl">
             <CheckNegotiationV2
               world={world}
@@ -1724,7 +1759,7 @@ export function RoomViewV2({
               <Textarea className="mt-3" aria-label={`检定叙述结果：${request.characterName}`} aria-required="true" maxLength={4_000} value={draftText} onChange={(event) => setCheckOutcomeDrafts((current) => ({ ...current, [requestId]: event.target.value }))} placeholder={succeeded ? "例如：夹层发出轻响，一封折叠的信落进你手中。" : wasPushed ? "写下此前声明的严重代价，以及故事如何继续。" : "例如：锁芯没有转动，里面却传来一声金属碰撞；你可以换一种做法再试。"} />
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button disabled={commandsDisabled || !draftText.trim()} onClick={() => void publishOutcome(draftText.trim())}>发布这次叙述结果</Button>
-                <Button variant="secondary" disabled={commandsDisabled} onClick={() => void publishOutcome("（KP 已在桌面上口头描述了这次结果。）")}>已口头描述，直接解锁玩家</Button>
+                <Button variant="secondary" disabled={commandsDisabled} onClick={() => void publishOutcome("（KP 已在桌面上口头描述了这次结果。）")}>记录为已口头描述</Button>
                 {activeModulePackage && <Button variant="ghost" onClick={openKeeperSceneWorkbench}>查看当前场景的线索</Button>}
               </div>
             </section>;
@@ -1737,6 +1772,7 @@ export function RoomViewV2({
               <Button variant="secondary" onClick={() => setDismissedCluePromptForEventId(latestCheckOutcomeEvent.eventId)}>这次没有线索，继续</Button>
             </div>
           </section>}
+          {session?.isHost && <div className="mx-auto max-w-4xl"><HostCharacterRequests requests={hostCharacterRequests} disabled={commandsDisabled} onApprove={onApproveHostCharacterRequest} onReject={onRejectHostCharacterRequest} /></div>}
           <section ref={liveStorySectionRef} aria-labelledby="live-story" className="mx-auto max-w-4xl scroll-mt-12">
             <div className="mb-3 flex items-center justify-between"><h2 id="live-story" className="text-sm font-semibold text-zinc-300">正在发生</h2><span className="text-[10px] text-zinc-600">最新在最上 · 对话、检定与公开信息</span></div>
             <div className="grid gap-2">{liveStoryEvents.length === 0 ? <div className="rounded-xl border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">还没有现场记录。说出第一句开场，调查就开始了。</div> : liveStoryEvents.map((event) => <V2EventCard key={event.eventId} event={event} resolveAsset={resolveAsset} />)}</div>
@@ -1947,6 +1983,12 @@ export function RoomViewV2({
           session={session}
           readOnly={readOnly}
           onError={setConnectionError}
+          onPrepareCheck={(preset) => {
+            setDirectCheckPreset(preset);
+            setActiveRoomTab("scene");
+            setMobileToolsOpen(false);
+            globalThis.setTimeout(() => document.getElementById("keeper-direct-check")?.scrollIntoView?.({ behavior: "smooth", block: "center" }), 0);
+          }}
         />}
 
         {!readOnly && session?.isHost && board && <ToolDisclosure title="画面与棋子" icon={Map} hint={selectedBoardItem ? `已选：${selectedBoardItem.label || "未命名项目"}` : `${board.items.length} 个项目`}>
@@ -1962,7 +2004,7 @@ export function RoomViewV2({
           </Panel>
         </ToolDisclosure>}
 
-        {!readOnly && session?.isHost && activeModulePackage?.keeperGuide && <ToolDisclosure title="运行指引" icon={FileText} hint="背景真相 · 线索链 · 结局">
+        {!readOnly && session?.isHost && activeModulePackage?.keeperGuide && <ToolDisclosure title="主持参考" icon={FileText} hint="真相 · 人物 · 调查去向 · 原文依据">
           <Panel className="max-h-[70vh] overflow-y-auto p-4">
             <KeeperGuideContentV2 guide={activeModulePackage.keeperGuide} modulePackage={activeModulePackage} />
           </Panel>
@@ -2274,8 +2316,13 @@ function isHumanRecordEvent(event: RoomEventV2): boolean {
     case "board.edge.removed":
     case "board.fog.revealed":
     case "audience.expanded":
-    case "room.settings.updated":
+    case "table.seat.updated":
+    case "table.seat.claimed":
+    case "table.seat.released":
+    case "table.seat.character.assigned":
       return false;
+    case "room.settings.updated":
+      return event.payload.characterBriefing !== undefined;
     default:
       return true;
   }
@@ -2516,14 +2563,18 @@ function eventBody(
     case "system.notice": return <p>{event.payload.message}</p>;
     case "dice.result": return <p><b className="text-brass">{event.payload.result.total}</b><span className="ml-2 text-zinc-400">{event.payload.reason || event.payload.result.expression}</span>{event.payload.result.kind === "percentile" && event.payload.result.check && <span className={event.payload.result.check.success ? "ml-2 text-emerald-300" : "ml-2 text-red-300"}>{checkOutcomeLabel(event.payload.result.check.outcome)} · {event.payload.result.check.success ? "通过" : "未通过"}</span>}</p>;
     case "character.updated": return <p>更新角色卡：<b>{event.payload.character.name}</b></p>;
-    case "check.requested": return <div><p><b>{event.payload.characterName}</b> 提交行动：{event.payload.goal ?? event.payload.reason}</p><p className="mt-1 text-zinc-400">做法：{event.payload.approach ?? event.payload.reason}{event.payload.suggestedSkillName ? ` · 建议 ${event.payload.suggestedSkillName}${event.payload.proposedTarget ? ` ${event.payload.proposedTarget}` : ""}` : ""}</p></div>;
+    case "table.seat.updated": return <p>设置座位：{event.payload.name}</p>;
+    case "table.seat.claimed": return <p>选择了调查员座位</p>;
+    case "table.seat.released": return <p>腾出了调查员座位</p>;
+    case "table.seat.character.assigned": return <p>{event.payload.character ? `放置角色卡：${event.payload.character.name}` : "取下座位上的角色卡"}</p>;
+    case "check.requested": return <div><p>{event.sender.role === "host" ? "KP 为" : ""}<b>{event.payload.characterName}</b>{event.sender.role === "host" ? "发起检定" : "提交行动"}：{event.payload.goal ?? event.payload.reason}</p><p className="mt-1 text-zinc-400">做法：{event.payload.approach ?? event.payload.reason}{event.payload.suggestedSkillName ? ` · 建议 ${event.payload.suggestedSkillName}${event.payload.proposedTarget ? ` ${event.payload.proposedTarget}` : ""}` : ""}</p></div>;
     case "check.authorized": return <p>KP 允许检定：{event.payload.skillName ? <><b>{event.payload.skillName}</b> · </> : null}目标 <b>{event.payload.target}</b> · {difficultyLabel(event.payload.requiredDifficulty)}</p>;
     case "check.closed": return <p>{event.payload.outcome === "no-roll" ? "KP 判断无需掷骰，直接推进" : event.payload.outcome === "declined" ? "KP 判断这项行动当前不可行" : event.sender.role === "host" ? "KP 撤回了这次裁定" : "调查员撤回了行动申请"}{event.payload.note ? `：${event.payload.note}` : ""}</p>;
     case "check.outcome.described": return <div><p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-400">本次行动的叙述结果</p><p className="mt-1 whitespace-pre-wrap">{event.payload.text}</p></div>;
     case "clue.claimed": return <p><b>{event.payload.characterName}</b> 将一条公开线索加入了自己的线索栏</p>;
     case "clue.unclaimed": return <p><b>{event.payload.characterName}</b> 将一条公开线索移出了自己的重点</p>;
     case "module.switched": return <p>本次调查改用模组：<b>{event.payload.title}</b></p>;
-    case "room.settings.updated": return <p>房间新内容默认设为{event.payload.defaultVisibility === "public" ? "公开" : "秘密"}</p>;
+    case "room.settings.updated": return event.payload.characterBriefing ? <p className="whitespace-pre-wrap">KP 更新了本团车卡说明：{event.payload.characterBriefing.text}</p> : <p>房间新内容默认设为{event.payload.defaultVisibility === "public" ? "公开" : "秘密"}</p>;
     case "scene.focused": return <p>KP 推进了当前情境</p>;
     case "entity.upserted": return <div><b>{event.payload.entity.name}</b><p className="mt-1 whitespace-pre-wrap text-zinc-400">{event.payload.entity.description}</p></div>;
     case "artifact.upserted": return <div><b>{event.payload.artifact.title}</b><p className="mt-1 whitespace-pre-wrap text-zinc-400">{event.payload.artifact.body}</p><ArtifactAttachmentViewerV2 artifact={event.payload.artifact} resolveAsset={resolveAsset} compact /></div>;

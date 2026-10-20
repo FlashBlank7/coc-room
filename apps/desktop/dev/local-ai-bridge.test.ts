@@ -6,6 +6,7 @@ import {
   createBridgeSidecarEnvironment,
   FIXED_AI_TIMEOUT_MS,
   hasExactlyOneTerminalMessage,
+  keepFixedAiResponseAlive,
   sanitizeSidecarMessage,
   SIDECAR_IDLE_TIMEOUT_MS,
   SIDECAR_TOTAL_TIMEOUT_MS,
@@ -22,6 +23,26 @@ import {
 
 const origin = "http://127.0.0.1:1420";
 const sessionToken = "a".repeat(43);
+
+it("treats keeper preparation as a fixed AI operation and redacts its provider error", () => {
+  expect(sanitizeSidecarMessage({ protocol_version: "1.0", request_id: "keeper", type: "error", message: "private source text", error: { code: "INVALID_STRUCTURE", message: "private source text" } }, "generate_keeper_guide"))
+    .toMatchObject({ message: "主持引导生成失败，已整理资料仍保留", error: { code: "INVALID_STRUCTURE" } });
+});
+
+it("keeps long fixed AI responses alive without emitting a terminal or extending task deadlines", () => {
+  vi.useFakeTimers();
+  try {
+    const write = vi.fn();
+    const stop = keepFixedAiResponseAlive("request-one", write);
+    expect(write).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(310_000);
+    expect(write).toHaveBeenCalledTimes(11);
+    expect(write.mock.calls.every(([message]) => message.type === "progress" && message.request_id === "request-one")).toBe(true);
+    stop();
+    vi.advanceTimersByTime(60_000);
+    expect(write).toHaveBeenCalledTimes(11);
+  } finally { vi.useRealTimers(); }
+});
 
 describe("local AI bridge boundary", () => {
   it("accepts any loopback spelling of the Vite origin and requires the session header", () => {

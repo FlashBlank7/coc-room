@@ -127,6 +127,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByText("调查笔记"));
     fireEvent.change(screen.getByLabelText("自由记录"), { target: { value: "在庭院里见过蝶影。" } });
 
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -174,11 +175,57 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "林蝶" } });
     fireEvent.change(screen.getByLabelText("职业"), { target: { value: "记者" } });
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
     await waitFor(() => expect(useAppStore.getState().activeView).toBe("room"));
     expect(submitConfirmed).toHaveBeenCalledWith(expect.objectContaining({ type: "character.updated" }));
+  });
+
+  it("finishes a full occupation and interest allocation under public house rules before bringing the character into a V2 room", async () => {
+    const v2Room: RoomRecord = { ...createRoom("player", "player-allocation"), id: "allocation-room", protocolVersion: 2, localSeatId: "seat-allocation", hostSeatId: "seat-host-allocation", seatCredentialVersion: 1 };
+    useAppStore.setState({ currentRoom: v2Room, activeView: "characters" });
+    const session = new RoomSessionV2({ room: v2Room, displayName: "Alice", repository: {} as never, transport: {} as never });
+    const submitConfirmed = vi.spyOn(session, "submitConfirmed").mockResolvedValue("accepted");
+    const world = { ...createRoomWorldStateV2(v2Room.id), characterBriefing: { text: "回应委托并调查失踪事件。", recommendedSkills: ["侦查"], skillPointMode: "occupation-interest" as const, skillMax: 75 } };
+    render(<CharactersView session={session} worldV2={world} />);
+    fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "林蝶" } });
+    fireEvent.click(screen.getByRole("button", { name: "按职业点＋兴趣点分配" }));
+    fireEvent.change(screen.getByLabelText("职业起步配置"), { target: { value: "记者" } });
+    fireEvent.change(screen.getByLabelText(/^教育 EDU/), { target: { value: "60" } });
+    const skillIndex = (name: string) => screen.getAllByLabelText("技能名").findIndex((input) => (input as HTMLInputElement).value === name);
+    expect((screen.getAllByLabelText(/^基础值/)[skillIndex("母语")] as HTMLInputElement).value).toBe("60");
+    expect((screen.getByRole("button", { name: "带入并回到现场" }) as HTMLButtonElement).disabled).toBe(true);
+    for (const [name, base] of [["说服", 10], ["侦查", 25], ["聆听", 20]] as const) {
+      fireEvent.click(screen.getByRole("button", { name: "添加其他技能" }));
+      fireEvent.change(screen.getAllByLabelText("技能名").at(-1)!, { target: { value: name } });
+      fireEvent.change(screen.getAllByLabelText("基础值").at(-1)!, { target: { value: String(base) } });
+      fireEvent.click(screen.getByLabelText(`${name}是职业技能`));
+    }
+    fireEvent.change(screen.getAllByLabelText("专攻（可选）")[skillIndex("母语")]!, { target: { value: "日语" } });
+    for (const [name, points] of [["艺术/手艺（摄影）", 35], ["历史", 35], ["图书馆使用", 40], ["母语", 5], ["心理学", 40], ["信用评级", 20], ["说服", 30], ["侦查", 35]] as const) fireEvent.change(screen.getByLabelText(`${name}职业投入`), { target: { value: String(points) } });
+    fireEvent.change(screen.getByLabelText("聆听兴趣投入"), { target: { value: "30" } });
+    fireEvent.change(screen.getByLabelText("侦查兴趣投入"), { target: { value: "20" } });
+    expect(screen.getByLabelText("车卡待修改项").textContent).toContain("侦查超出技能上限 75");
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("侦查兴趣投入"), { target: { value: "15" } });
+    expect(screen.getByText("职业点：240 / 240，剩余 0")).toBeTruthy();
+    expect(screen.getByText("兴趣点：45 / 100，剩余 55")).toBeTruthy();
+    expect(screen.queryByLabelText("车卡待修改项")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
+    const proposal = submitConfirmed.mock.calls[0]![0];
+    if (proposal.type !== "character.updated") throw new Error("Expected character update");
+    const character = coc7CharacterSchema.parse(proposal.payload.character);
+    expect(character.creation).toMatchObject({ occupationProfile: "记者", occupationFormula: "edu4" });
+    expect(character.creation!.occupationSkillIds).toHaveLength(9);
+    expect(character.skills.find((skill) => skill.name === "侦查")).toMatchObject({ baseValue: 25, value: 75 });
+    const archive = await createCoccharPackage({ character, privateNotes: "调查时使用的私人笔记" });
+    const restored = await parseCoccharPackage(archive);
+    expect(restored.character.creation).toEqual(character.creation);
+    expect(restored.character.skills.find((skill) => skill.name === "母语")).toMatchObject({ baseValue: 60, baseSource: "edu", value: 65 });
   });
 
   it("selects the most recently used local investigator in a new room and keeps that handoff after remount", async () => {
@@ -214,8 +261,9 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     expect((screen.getByLabelText("仅自己可见") as HTMLTextAreaElement).value).toBe("庭院里的蝶影只留给自己");
     fireEvent.change(screen.getByLabelText("居住地"), { target: { value: "东京" } });
-    expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false));
 
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -252,6 +300,7 @@ describe("CharactersView permissions and editing", () => {
     expect((screen.getByLabelText("仅自己可见") as HTMLTextAreaElement).value).toBe("这段恢复内容绝不能进入房间事件");
     expect(await (await getRepository()).listPersonalCharactersV2()).toHaveLength(0);
 
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
     await waitFor(() => expect(window.sessionStorage.length).toBe(0));
@@ -294,6 +343,7 @@ describe("CharactersView permissions and editing", () => {
     expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("离线角色草稿");
     expect(screen.queryByRole("button", { name: /带入.*房间|更新当前房间角色卡/ })).toBeNull();
 
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "保存到我的角色库" }));
 
     const repository = await getRepository();
@@ -304,6 +354,43 @@ describe("CharactersView permissions and editing", () => {
       character: { name: "离线角色草稿" },
     });
     expect(window.sessionStorage.getItem(recoveryKey)).toBeNull();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("waits for a slow library before publishing a room edit, retaining its revision and private notes", async () => {
+    const own = createCharacter("slow-library-own", "player-local", "已有调查员", "Alice");
+    const repository = await getRepository();
+    await repository.savePersonalCharacterV2({ characterId: own.id, revision: 1, character: own, privateNotes: "已有的私人线索", createdAt: own.updatedAt, updatedAt: own.updatedAt });
+    const records = await repository.listPersonalCharactersV2();
+    const pendingRead = createDeferred<typeof records>();
+    vi.spyOn(repository, "listPersonalCharactersV2").mockImplementationOnce(() => pendingRead.promise);
+    useAppStore.setState({ events: [characterEvent(own, 1)] });
+    const { session, submit } = createSession("player", "player-local", "Alice");
+    render(<CharactersView session={session} />);
+    fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "读取期间的修改" } });
+    const save = screen.getByRole("button", { name: "更新并回到现场" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(submit).not.toHaveBeenCalled();
+    await act(async () => pendingRead.resolve(records));
+    await waitFor(() => expect(save.disabled).toBe(false));
+    expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("读取期间的修改");
+    expect((screen.getByLabelText("仅自己可见") as HTMLTextAreaElement).value).toBe("已有的私人线索");
+    fireEvent.click(save);
+    await waitFor(() => expect(useAppStore.getState().activeView).toBe("room"));
+    expect(await repository.listPersonalCharactersV2()).toEqual([expect.objectContaining({ revision: 2, privateNotes: "已有的私人线索", character: expect.objectContaining({ name: "读取期间的修改" }) })]);
+    expect(JSON.stringify(submit.mock.calls)).not.toContain("已有的私人线索");
+  });
+
+  it("can retry a failed initial library read without losing the current draft", async () => {
+    const repository = await getRepository();
+    vi.spyOn(repository, "listPersonalCharactersV2").mockRejectedValueOnce(new Error("read temporarily unavailable"));
+    const { session, submit } = createSession("player", "player-local", "Alice");
+    render(<CharactersView session={session} />);
+    fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "等待恢复的调查员" } });
+    fireEvent.click(await screen.findByRole("button", { name: "重试读取角色库" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("等待恢复的调查员");
     expect(submit).not.toHaveBeenCalled();
   });
 
@@ -322,6 +409,7 @@ describe("CharactersView permissions and editing", () => {
     render(<CharactersView session={session} />);
 
     fireEvent.change(screen.getByLabelText("姓名"), { target: { value: "等待保存的完整内容" } });
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "保存到我的角色库" }));
     await waitFor(() => expect(savePersonal).toHaveBeenCalledOnce());
 
@@ -356,6 +444,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     fireEvent.change(screen.getByLabelText("仅自己可见"), { target: { value: "确认期间也不能消失" } });
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
 
@@ -393,6 +482,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "加入常见调查技能" }));
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     fireEvent.change(screen.getByLabelText("仅自己可见"), { target: { value: "拒绝后仍可恢复" } });
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
 
@@ -462,7 +552,7 @@ describe("CharactersView permissions and editing", () => {
     expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("房间里的最新版");
     expect(screen.queryByLabelText("角色草稿版本冲突")).toBeNull();
     fireEvent.change(screen.getByLabelText("居住地"), { target: { value: "最新版上的新修改" } });
-    expect((screen.getByRole("button", { name: "更新并回到现场" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole("button", { name: "更新并回到现场" }) as HTMLButtonElement).disabled).toBe(false));
   });
 
   it("discards invalid and oversized recovery values without touching the formal library", async () => {
@@ -597,6 +687,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText(/^当前生命 HP/), { target: { value: "8" } });
 
     expect(screen.getByLabelText("角色创建进度").textContent).toContain("保存这次角色修改");
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "更新并回到现场" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -636,6 +727,7 @@ describe("CharactersView permissions and editing", () => {
     const name = screen.getByLabelText("姓名") as HTMLInputElement;
     expect(name.disabled).toBe(false);
     fireEvent.change(name, { target: { value: "已修正调查员" } });
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "更新当前房间角色卡" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -666,19 +758,20 @@ describe("CharactersView permissions and editing", () => {
     expect((screen.getByLabelText("姓名") as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByLabelText("姓名") as HTMLInputElement).value).toBe("KP 尚未保存的修正");
 
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "更新当前房间角色卡" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
     const published = (submit.mock.calls[0]![1] as { character: Coc7Character }).character;
     expect(published).toMatchObject({ name: "KP 尚未保存的修正", ownerPeerId: "other-player" });
   });
 
-  it("keeps personal drafting available while an offline room record cannot be updated", () => {
+  it("keeps personal drafting available while an offline room record cannot be updated", async () => {
     useAppStore.setState({ participants: [], paths: {} });
     render(<CharactersView />);
 
     expect((screen.getByRole("button", { name: "新建我的角色" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByLabelText("姓名") as HTMLInputElement).disabled).toBe(false);
-    expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByRole("button", { name: "带入当前房间" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -748,6 +841,7 @@ describe("CharactersView permissions and editing", () => {
     fireEvent.change(screen.getByLabelText("当前值"), { target: { value: "60" } });
     fireEvent.click(screen.getByText("只给自己看的笔记"));
     fireEvent.change(screen.getByLabelText("仅自己可见"), { target: { value: "不能公开的秘密" } });
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "保存到我的角色库" }));
 
     await waitFor(() => expect((screen.getByRole("button", { name: "保存到我的角色库" }) as HTMLButtonElement).disabled).toBe(true));
@@ -755,6 +849,7 @@ describe("CharactersView permissions and editing", () => {
     expect(submit).not.toHaveBeenCalled();
 
     expect((screen.getByRole("button", { name: "带入并回到现场" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect(screen.queryByText("正在读取本机角色库；读取完成后即可保存。")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "带入并回到现场" }));
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
     const character = (submit.mock.calls[0]![1] as { character: Coc7Character }).character;

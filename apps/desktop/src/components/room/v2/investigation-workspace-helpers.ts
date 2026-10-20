@@ -145,14 +145,16 @@ export async function presentModuleSceneV2(
   if (!existing || existing.name !== entity.name || existing.description !== entity.description) {
     await session.submitConfirmed({ type: "entity.upserted", audience, payload: { entity } });
   }
-  await session.submitConfirmed({ type: "scene.focused", audience, payload: { sceneEntityId: entity.entityId } });
+  if (session.world.activeSceneEntityId !== entity.entityId) {
+    await session.submitConfirmed({ type: "scene.focused", audience, payload: { sceneEntityId: entity.entityId } });
+  }
   return session.world.entities.get(entity.entityId) ?? entity;
 }
 
 export async function ensureModuleEntityV2(
   session: RoomSessionV2,
   modulePackage: ModulePackageV1,
-  input: { sourceId: string; kind: "scene" | "location" | "npc"; name: string; description: string; audience: AudienceV2 },
+  input: { sourceId: string; kind: "scene" | "location" | "npc"; name: string; description: string; audience: AudienceV2; data?: RoomEntityV2["data"] },
 ): Promise<RoomEntityV2> {
   const existing = [...session.world.entities.values()].find((entity) => {
     const sourceRef = entity.data.sourceRef;
@@ -173,7 +175,7 @@ export async function ensureModuleEntityV2(
     description: input.description,
     artifactIds: [],
     audience: input.audience,
-    data: { sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: input.kind, id: input.sourceId } },
+    data: { ...input.data, sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: input.kind, id: input.sourceId } },
     extensions: {},
   };
   await session.submitConfirmed({ type: "entity.upserted", audience: entity.audience, payload: { entity } });

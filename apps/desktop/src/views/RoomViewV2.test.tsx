@@ -39,6 +39,19 @@ afterEach(() => {
 });
 
 describe("RoomViewV2 board creation", () => {
+  it("lets the keeper handle player AI requests without leaving the live room", () => {
+    const room = roomRecord("room-live-ai-approval", "host");
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" } } as unknown as RoomSessionV2;
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    render(<RoomViewV2 room={room} session={session} views={[]} world={createRoomWorldStateV2(room.id)} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()}
+      hostCharacterRequests={[{ jobId: "job-car", requesterSeatId: "seat-player", requesterName: "小林", playerName: "小林", prompt: "我想演记者" }]} onApproveHostCharacterRequest={onApprove} onRejectHostCharacterRequest={onReject} />);
+    const request = screen.getByLabelText("AI 车卡申请");
+    fireEvent.click(within(request).getByRole("button", { name: "同意并开始生成" }));
+    expect(onApprove).toHaveBeenCalledWith("job-car");
+    fireEvent.click(within(request).getByRole("button", { name: "拒绝" }));
+    expect(onReject).toHaveBeenCalledWith("job-car");
+  });
   it("treats the mobile tools as a dismissible focus-managed dialog", async () => {
     const room = roomRecord("room-v2-mobile-tools", "player");
     const session = {
@@ -289,8 +302,9 @@ describe("RoomViewV2 board creation", () => {
     expect(within(workbench).getByText("这是 KP 才能看的场景摘要")).toBeTruthy();
   });
 
-  it("publishes the module's first scene as the opening with one click", async () => {
-    const modulePackage = { ...openingModuleFixture(), moduleId: "module-quick-opening" };
+  it.each([undefined, "雨水顺着剧院后门流下。"])("previews only public opening copy and never falls back to keeper summaries (%s)", async (publicCopy) => {
+    const modulePackage = { ...openingModuleFixture(), moduleId: publicCopy ? "module-public-opening" : "module-private-opening-preview" };
+    modulePackage.scenes[0]!.playerDescription = publicCopy;
     await (await getRepository()).saveModule({ package: modulePackage, sourceText: "本地 KP 原文" });
     const room = roomRecord("room-v2-quick-opening", "host");
     const submitConfirmed = vi.fn().mockResolvedValue(undefined);
@@ -308,11 +322,20 @@ describe("RoomViewV2 board creation", () => {
 
     render(<RoomViewV2 room={room} session={session} views={[]} world={world} seats={[]} paths={{}} authenticationState="authenticated" setConnectionError={vi.fn()} onLeave={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "一键开场：剧院后门" }));
+    fireEvent.click(await screen.findByRole("button", { name: "准备开场：剧院后门" }));
+    const preview = screen.getByRole("region", { name: "开场公开预览" });
+    expect((within(preview).getByLabelText("开场公开正文") as HTMLTextAreaElement).value).toBe(publicCopy ?? "");
+    expect(preview.textContent).not.toContain("这是 KP 才能看的场景摘要");
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    if (!publicCopy) {
+      expect((within(preview).getByRole("button", { name: "确认开场，向所有玩家呈现" }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.change(within(preview).getByLabelText("开场公开正文"), { target: { value: "雨水顺着剧院后门流下。" } });
+    }
+    fireEvent.click(within(preview).getByRole("button", { name: "确认开场，向所有玩家呈现" }));
     await waitFor(() => expect(submitConfirmed).toHaveBeenCalledTimes(2));
     expect(submitConfirmed.mock.calls[0]![0]).toMatchObject({
       type: "entity.upserted",
-      payload: { entity: expect.objectContaining({ kind: "scene", name: "剧院后门", description: "这是 KP 才能看的场景摘要" }) },
+      payload: { entity: expect.objectContaining({ kind: "scene", name: "剧院后门", description: "雨水顺着剧院后门流下。" }) },
     });
     expect(submitConfirmed.mock.calls[1]![0]).toMatchObject({ type: "scene.focused" });
   });
@@ -1178,8 +1201,8 @@ describe("RoomViewV2 board creation", () => {
     const props = { room, session, seats: [] as SeatV2[], paths: {}, authenticationState: "authenticated" as const, setConnectionError: vi.fn(), onLeave: vi.fn() };
     const view = render(<RoomViewV2 {...props} views={[rollView]} world={world} />);
 
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
-    expect(screen.queryByLabelText("你想怎么做")).toBeNull();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
+    expect(screen.getByLabelText("你想怎么做")).toBeTruthy();
 
     const narrationView = fullView({
       roomId: room.id,
@@ -1191,7 +1214,7 @@ describe("RoomViewV2 board creation", () => {
     });
     view.rerender(<RoomViewV2 {...props} views={[rollView, narrationView]} world={world} />);
 
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
 
     const sceneView = fullView({
       roomId: room.id,
@@ -1202,7 +1225,7 @@ describe("RoomViewV2 board creation", () => {
       payload: { sceneEntityId: "scene-next" },
     });
     view.rerender(<RoomViewV2 {...props} views={[rollView, sceneView]} world={world} />);
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
 
     const publicClue = roomArtifact("artifact-check-result", "clue", "夹层里的曲目单", { kind: "room" });
     const publicArtifactView = fullView({
@@ -1214,7 +1237,7 @@ describe("RoomViewV2 board creation", () => {
       payload: { artifact: publicClue },
     });
     view.rerender(<RoomViewV2 {...props} views={[rollView, publicArtifactView]} world={world} />);
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
 
     const privateNote = roomArtifact("artifact-private-follow-up", "note", "我的私人推测", { kind: "seats", seatIds: ["seat-player"] });
     const privateArtifactView = fullView({
@@ -1227,7 +1250,7 @@ describe("RoomViewV2 board creation", () => {
       payload: { artifact: privateNote },
     });
     view.rerender(<RoomViewV2 {...props} views={[rollView, privateArtifactView]} world={world} />);
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
 
     (world.checkOutcomes as Map<string, CheckOutcomeV2>).set(request.requestId, {
       requestId: request.requestId,
@@ -1245,13 +1268,13 @@ describe("RoomViewV2 board creation", () => {
       payload: { requestId: request.requestId, text: "你在夹层里找到一张被折起的曲目单。" },
     });
     view.rerender(<RoomViewV2 {...props} views={[rollView, narrationView, outcomeView]} world={world} />);
-    expect(screen.queryByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "检定已完成，可以继续行动" })).toBeNull();
     expect(screen.getByRole("heading", { name: "你想怎么做？" })).toBeTruthy();
   });
 
   it.each([
     { pushed: false, expectedHeading: "第一次检定失败了" },
-    { pushed: true, expectedHeading: "检定已完成，等待 KP 描述结果" },
+    { pushed: true, expectedHeading: "检定已完成，可以继续行动" },
   ])("waits after a pushed failure=$pushed but keeps an ordinary failure actionable", ({ pushed, expectedHeading }) => {
     const room = roomRecord(`room-v2-player-failed-${pushed ? "push" : "ordinary"}`, "player");
     const { world, request } = playerCheckWorldFixture(room.id, { authorization: "resolved-failure", pushed });
@@ -1286,7 +1309,7 @@ describe("RoomViewV2 board creation", () => {
 
     expect(screen.getByRole("heading", { name: expectedHeading })).toBeTruthy();
     if (pushed) {
-      expect(screen.queryByLabelText("你想怎么做")).toBeNull();
+      expect(screen.getByLabelText("你想怎么做")).toBeTruthy();
     } else {
       expect(screen.getByRole("button", { name: "换一种做法申请强推" })).toBeTruthy();
     }

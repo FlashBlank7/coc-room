@@ -9,6 +9,19 @@ import {
 
 const characteristicSchema = z.number().int().min(0).max(100);
 
+export const coc7CreationPlanSchema = z.object({
+  origin: z.literal("ai").optional(),
+  occupationProfile: z.enum(["作家", "记者", "教授", "医生"]).optional(),
+  occupationFormula: z.enum(["edu4", "edu2-str2", "edu2-dex2", "edu2-app2", "edu2-pow2", "custom"]),
+  occupationBudget: z.number().int().min(0).max(10_000).optional(),
+  interestBudget: z.number().int().min(0).max(10_000).optional(),
+  creditMin: z.number().int().min(0).max(99).optional(),
+  creditMax: z.number().int().min(0).max(99).optional(),
+  occupationSkillIds: z.array(entityIdSchema).max(200),
+  allocations: z.record(entityIdSchema, z.object({ occupation: z.number().int().min(0).max(100), interest: z.number().int().min(0).max(100) }).strict()),
+}).strict();
+export type Coc7CreationPlan = z.infer<typeof coc7CreationPlanSchema>;
+
 export const coc7CharacteristicsSchema = z
   .object({
     str: characteristicSchema,
@@ -60,6 +73,7 @@ export const coc7SkillSchema = z
     name: z.string().min(1).max(120),
     specialization: z.string().min(1).max(120).optional(),
     baseValue: z.number().int().min(0).max(100),
+    baseSource: z.enum(["edu", "half-dex"]).optional(),
     value: z.number().int().min(0).max(100),
     checked: z.boolean(),
   })
@@ -114,6 +128,7 @@ export const coc7CharacterSchema = z
     characteristics: coc7CharacteristicsSchema,
     derived: coc7DerivedStatsSchema,
     skills: z.array(coc7SkillSchema).max(200),
+    creation: coc7CreationPlanSchema.optional(),
     status: coc7StatusSchema,
     inventory: z.array(coc7InventoryItemSchema).max(500),
     background: coc7BackgroundSchema,
@@ -134,6 +149,11 @@ export const coc7CharacterSchema = z
       }
       skillIds.add(skill.id);
     });
+    if (character.creation) {
+      const references = [...character.creation.occupationSkillIds, ...Object.keys(character.creation.allocations)];
+      for (const id of references) if (!skillIds.has(id)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["creation"], message: `creation references unknown skill: ${id}` });
+      if (new Set(character.creation.occupationSkillIds).size !== character.creation.occupationSkillIds.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ["creation", "occupationSkillIds"], message: "duplicate occupation skill" });
+    }
   });
 
 /** Public type name used by the desktop application. */

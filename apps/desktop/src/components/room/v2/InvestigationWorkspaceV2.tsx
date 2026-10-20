@@ -23,6 +23,14 @@ import { RoomCommandRejectedError, type RoomSessionV2 } from "../../../network/R
 import { Button } from "../../ui/Button";
 import { Field, Input, Textarea } from "../../ui/Field";
 import { Panel } from "../../ui/Panel";
+import { GuideNote } from "../../modules/KeeperPreparationReader";
+import { ClueDiscoveryGuidance } from "../../modules/ClueDiscoveryGuidance";
+import { SceneEntityGuidance } from "../../modules/SceneEntityGuidance";
+import { sceneOpeningDraftKey, scenePublicationGuideKey, scenePublicationKey, scenePublicationNameKey, storedScenePublications } from "../../../lib/scene-publications";
+import { useScenePublications } from "./use-scene-publications";
+import { usePublicationDrafts } from "./use-publication-drafts";
+import { tableCharacters } from "../../../lib/table-seating";
+import type { DirectCheckPreset } from "./DirectCheckComposer";
 import { BOARD_EXTERNAL_DROP_MIME } from "./board-constants";
 import {
   ArtifactAttachmentViewerV2,
@@ -69,6 +77,7 @@ export function KeeperModuleWorkbenchV2({
   session,
   readOnly = false,
   onError,
+  onPrepareCheck,
 }: {
   readonly modulePackage: ModulePackageV1;
   readonly world: RoomWorldStateV2;
@@ -76,13 +85,18 @@ export function KeeperModuleWorkbenchV2({
   readonly session: RoomSessionV2;
   readonly readOnly?: boolean;
   readonly onError?: (message?: string) => void;
+  readonly onPrepareCheck?: (preset: DirectCheckPreset) => void;
 }) {
   const activeModuleSceneId = activeModuleSceneSourceId(world, modulePackage);
   const moduleSceneIds = modulePackage.scenes.map(({ id }) => id).join("\u0000");
   const [selectedSceneId, setSelectedSceneId] = useState(() => activeModuleSceneId ?? modulePackage.scenes[0]?.id ?? "");
-  const [publicOpening, setPublicOpening] = useState("");
+  const [presentationSelection, setPresentationSelection] = useState<string[]>([]);
+  const [presentationPreview, setPresentationPreview] = useState(false);
+  const operationRef = useRef(false);
   const [clueQuery, setClueQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const publicationDrafts = usePublicationDrafts(`room-publication:${JSON.stringify([world.roomId, modulePackage.moduleId, modulePackage.revision])}`, session.isHost);
+  const scenePublications = useScenePublications(modulePackage, publicationDrafts.setText);
   const entries = useMemo(() => detectSceneEntriesV2(world, board), [board, world]);
   const pendingSceneEntries = useMemo(
     () => pendingModuleSceneEntriesV2(world, modulePackage, board),
@@ -90,12 +104,48 @@ export function KeeperModuleWorkbenchV2({
   );
   const selectedScene = modulePackage.scenes.find(({ id }) => id === selectedSceneId)
     ?? modulePackage.scenes[0];
+  const preparedScene = modulePackage.keeperGuide?.preparation?.scenes.find((scene) => scene.sceneId === selectedScene?.id);
+  const phaseEntries = storedScenePublications(publicationDrafts.values[scenePublicationGuideKey(selectedScene?.id ?? "")]) ?? preparedScene?.publicEntities ?? [];
+  const entriesFor = (kind: "npc" | "location", entityId: string) => phaseEntries.filter((entry) => entry.kind === kind && entry.entityId === entityId);
+  const legacyEntityText = (kind: "npc" | "location", entityId: string) => publicationDrafts.values[`${kind}:${entityId}`]
+    ?? findModuleEntityV2(world, modulePackage, entityId, kind, { kind: "room" })?.description
+    ?? (kind === "npc" ? modulePackage.npcs : modulePackage.locations).find((item) => item.id === entityId)?.playerDescription ?? "";
+  const publicEntityText = (kind: "npc" | "location", entity: ModuleNpcV1 | ModuleLocationV1) => {
+    const written = publicationDrafts.values[scenePublicationKey(selectedScene?.id ?? "", kind, entity.id)];
+    if (written !== undefined) return written;
+    const versions = entriesFor(kind, entity.id);
+    if (versions.length) return versions.length === 1 ? versions[0]!.text : "";
+    const published = findModuleEntityV2(world, modulePackage, entity.id, kind, { kind: "room" });
+    const roomScene = selectedScene ? findModuleEntityV2(world, modulePackage, selectedScene.id, "scene", { kind: "room" }) : undefined;
+    const oldScenes = published?.data.presentedInSceneEntityIds;
+    const belongsToOnlyThisScene = !published?.data.publicDescriptionSceneEntityId && Array.isArray(oldScenes) && oldScenes.length === 1 && oldScenes[0] === roomScene?.entityId;
+    return roomScene && published && (published.data.publicDescriptionSceneEntityId === roomScene.entityId || belongsToOnlyThisScene) ? published.description : "";
+  };
+  const publicEntityName = (kind: "npc" | "location", entity: ModuleNpcV1 | ModuleLocationV1) => {
+    const written = publicationDrafts.values[scenePublicationNameKey(selectedScene?.id ?? "", kind, entity.id)];
+    if (written !== undefined) return written;
+    const versions = entriesFor(kind, entity.id);
+    const text = publicEntityText(kind, entity).trim();
+    const matching = versions.filter((entry) => entry.text.trim() === text);
+    const names = new Set((matching.length ? matching : versions).map((entry) => entry.name));
+    if (versions.length) return names.size === 1 ? [...names][0] ?? "" : "";
+    return findModuleEntityV2(world, modulePackage, entity.id, kind, { kind: "room" })?.name ?? entity.name;
+  };
+  const updatePublicEntity = (kind: "npc" | "location", entityId: string, text: string, name?: string) => {
+    publicationDrafts.setText(scenePublicationKey(selectedScene?.id ?? "", kind, entityId), text);
+    if (name !== undefined) publicationDrafts.setText(scenePublicationNameKey(selectedScene?.id ?? "", kind, entityId), name);
+    setPresentationPreview(false);
+  };
   const publishedScene = selectedScene
     ? findModuleEntityV2(world, modulePackage, selectedScene.id, "scene", { kind: "room" })
     : undefined;
   const isPresentedSceneActive = publishedScene !== undefined
     && world.activeSceneEntityId === publishedScene.entityId;
   const activePublishedScene = isPresentedSceneActive ? publishedScene : undefined;
+  const publicOpening = publicationDrafts.values[sceneOpeningDraftKey(selectedScene?.id ?? "")]
+    ?? publishedScene?.description ?? selectedScene?.playerDescription ?? preparedScene?.openingDraft ?? "";
+  const openingUnchanged = isPresentedSceneActive && publishedScene.name === selectedScene?.name
+    && publishedScene.description === publicOpening.trim();
 
   useEffect(() => {
     if (activeModuleSceneId) {
@@ -108,11 +158,13 @@ export function KeeperModuleWorkbenchV2({
   }, [activeModuleSceneId, modulePackage.moduleId, modulePackage.revision, moduleSceneIds]);
 
   useEffect(() => {
-    setPublicOpening(publishedScene?.description ?? "");
-  }, [publishedScene?.entityId, publishedScene?.revision, selectedScene?.id]);
+    setPresentationSelection([]);
+    setPresentationPreview(false);
+  }, [selectedScene?.id, modulePackage.moduleId, modulePackage.revision]);
 
   const run = async (operation: () => Promise<void>) => {
-    if (busy || readOnly) return;
+    if (operationRef.current || busy || readOnly) return;
+    operationRef.current = true;
     setBusy(true);
     onError?.(undefined);
     try {
@@ -120,6 +172,7 @@ export function KeeperModuleWorkbenchV2({
     } catch (error) {
       onError?.(friendlyInvestigationError(error));
     } finally {
+      operationRef.current = false;
       setBusy(false);
     }
   };
@@ -128,10 +181,10 @@ export function KeeperModuleWorkbenchV2({
     ? entries.find(({ scene }) => sourceRefId(scene) === selectedScene.id)?.sceneItem
     : undefined;
   const relatedLocations = selectedScene
-    ? selectedScene.locationIds.flatMap((id) => modulePackage.locations.find((item) => item.id === id) ?? [])
+    ? selectedScene.locationIds.flatMap((id) => modulePackage.locations.find((item) => item.id === id) ?? []).map((item) => ({ ...item, publicName: publicEntityName("location", item), playerDescription: publicEntityText("location", item) }))
     : [];
   const relatedNpcs = selectedScene
-    ? selectedScene.npcIds.flatMap((id) => modulePackage.npcs.find((item) => item.id === id) ?? [])
+    ? selectedScene.npcIds.flatMap((id) => modulePackage.npcs.find((item) => item.id === id) ?? []).map((item) => ({ ...item, publicName: publicEntityName("npc", item), playerDescription: publicEntityText("npc", item) }))
     : [];
   const relatedClues = selectedScene
     ? selectedScene.clueIds.flatMap((id) => modulePackage.clues.find((item) => item.id === id) ?? [])
@@ -139,15 +192,18 @@ export function KeeperModuleWorkbenchV2({
   const relatedClueIds = new Set(relatedClues.map(({ id }) => id));
   const otherClues = modulePackage.clues.filter(({ id }) => !relatedClueIds.has(id));
   const normalizedClueQuery = clueQuery.trim().toLocaleLowerCase();
-  const matchingOtherClues = normalizedClueQuery
-    ? otherClues.filter((clue) => moduleClueSearchText(clue).includes(normalizedClueQuery))
-    : otherClues;
-  const relatedQueryMatchCount = normalizedClueQuery
-    ? relatedClues.filter((clue) => moduleClueSearchText(clue).includes(normalizedClueQuery)).length
-    : 0;
+  const matchingClues = normalizedClueQuery
+    ? modulePackage.clues.filter((clue) => moduleClueSearchText(clue).includes(normalizedClueQuery))
+    : [];
   const relatedChecks = selectedScene
     ? selectedScene.suggestedCheckIds.flatMap((id) => modulePackage.suggestedChecks.find((item) => item.id === id) ?? [])
     : [];
+  const presentationOptions = [
+    ...relatedLocations.map((item) => ({ id: `location:${item.id}`, label: item.name, name: item.publicName, text: item.playerDescription ?? "", publish: (sceneId: string) => publishModuleLocationV2(session, modulePackage, { ...item, name: item.publicName }, sceneId) })),
+    ...relatedNpcs.map((item) => ({ id: `npc:${item.id}`, label: item.name, name: item.publicName, text: item.playerDescription ?? "", publish: (sceneId: string) => publishModuleNpcV2(session, modulePackage, { ...item, name: item.publicName }, sceneId) })),
+    ...relatedClues.map((item) => ({ id: `clue:${item.id}`, label: item.name, name: item.name, text: item.revealText, publish: (_sceneId: string) => publishModuleClueV2(session, modulePackage, item) })),
+  ];
+  const selectedPresentation = presentationOptions.filter((item) => presentationSelection.includes(item.id) && item.name.trim() && item.text.trim());
   // The keeper guide gives the workbench its sense of PATH: which step this
   // scene is, what must happen here, and where the trail goes next — the
   // difference between a parts list and something a first-time keeper can run.
@@ -184,6 +240,8 @@ export function KeeperModuleWorkbenchV2({
       <p className="rounded border border-zinc-800 bg-zinc-950 p-2 text-[11px] leading-4 text-zinc-500">
         先向玩家呈现当前情境，再根据行动公开地点、NPC 与线索。地图只是可选的视觉辅助；拖入地图只会建立不含剧情正文的标记。
       </p>
+      {publicationDrafts.error && <p role="alert" className="text-xs text-amber-200">{publicationDrafts.error}</p>}
+      {scenePublications.error && <p role="alert" className="text-xs text-amber-200">{scenePublications.error}</p>}
 
       {pendingSceneEntries.length > 0 && <section role="status" aria-label="调查员进入了另一个场景" className="grid gap-3 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
         <div>
@@ -222,141 +280,9 @@ export function KeeperModuleWorkbenchV2({
         })}
       </div>
 
-      {selectedScene && <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/45 p-3">
-        <div>
-          <h3 className="text-sm font-semibold text-zinc-200">{selectedScene.name}</h3>
-          <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-amber-100/70">{selectedScene.synopsis || selectedScene.description || "无场景摘要"}</p>
-          {selectedScene.keeperNotes && <p className="mt-2 whitespace-pre-wrap rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/75">{selectedScene.keeperNotes}</p>}
-        </div>
-        {guideStep && keeperGuide && <section aria-label="运行指引：本步怎么跑" className="grid gap-2 rounded-lg border border-brass/40 bg-zinc-950/55 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-brass">运行指引 · 第 {guideStepIndex + 1}/{guideSteps.length} 步：{guideStep.title}</h3>
-            {nextGuideScene && <Button className="h-7 px-2 text-[11px]" variant="secondary" disabled={busy} onClick={() => setSelectedSceneId(nextGuideScene.id)}>准备下一场：{nextGuideScene.name}</Button>}
-          </div>
-          {guideStep.goal && <p className="text-xs leading-5 text-zinc-300"><span className="font-semibold text-zinc-200">这一步要达成：</span>{guideStep.goal}</p>}
-          {guideStep.leadIn && <p className="text-xs leading-5 text-zinc-500"><span className="font-semibold text-zinc-400">玩家怎么到这里：</span>{guideStep.leadIn}</p>}
-          {guideStep.keyClues.length > 0 && <ul className="grid gap-1" aria-label="本步关键线索">
-            {guideStep.keyClues.map((keyClue, index) => {
-              const artifact = keyClue.clueId ? findModuleClueArtifactV2(world, modulePackage, keyClue.clueId) : undefined;
-              const published = Boolean(artifact && !artifact.archived);
-              return <li key={index} className="rounded bg-black/25 p-1.5 text-[11px] leading-4">
-                {keyClue.clueId && <span className={published ? "mr-1 font-semibold text-emerald-300" : "mr-1 font-semibold text-amber-300"}>{published ? "✓ 已公开" : "○ 待公开"}</span>}
-                <span className="text-zinc-300">{keyClue.summary}</span>
-                {keyClue.pointsTo && <span className="text-zinc-500"> → {keyClue.pointsTo}</span>}
-              </li>;
-            })}
-          </ul>}
-          {guideStep.ifStuck && <p className="rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/85"><span className="font-semibold">卡关补救：</span>{guideStep.ifStuck}</p>}
-          {isLastGuideStep && keeperGuide.endings.length > 0 && <p className="text-[11px] leading-4 text-zinc-500">已是线索链最后一步 · 可选结局：{keeperGuide.endings.map((ending) => ending.title).join(" / ")}（详见侧栏「运行指引」）</p>}
-        </section>}
-        {!keeperGuide && <p className="rounded border border-dashed border-zinc-800 p-2 text-[11px] leading-4 text-zinc-600">这份模组还没有运行指引。到 KP 备团 → 模组卡片 → 生成运行指引，之后这里会告诉你每一场的目标、关键线索与卡关补救。</p>}
-        <section className="grid gap-2 rounded-lg border border-brass/30 bg-brass/5 p-3" aria-label="向玩家呈现场景">
-          <div>
-            <h3 className="text-sm font-semibold text-zinc-100">玩家现在看见什么？</h3>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">只会发送你在这里写下的文字。上方模组摘要与主持人笔记不会自动带入。</p>
-          </div>
-          <Textarea
-            aria-label="玩家可见的开场描述"
-            value={publicOpening}
-            maxLength={8_000}
-            onChange={(event) => setPublicOpening(event.target.value)}
-            placeholder="例如：雨水顺着剧院后门的铁皮棚流下。门缝里透出一线暖黄灯光，唱针摩擦声断断续续……"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled={busy || readOnly || !publicOpening.trim()} onClick={() => void run(async () => {
-              await presentModuleSceneV2(session, modulePackage, selectedScene, publicOpening);
-            })}>
-              <Eye className="mr-2 h-4 w-4" />
-              {isPresentedSceneActive ? "更新当前情境" : "向所有人呈现这个场景"}
-            </Button>
-            {isPresentedSceneActive && <span className="text-xs text-emerald-300">玩家正在经历这里</span>}
-          </div>
-        </section>
-        {board && !sceneItem && <Button disabled={busy || readOnly} variant="secondary" onClick={() => void run(async () => {
-          await placeModuleSceneOnBoardV2(session, modulePackage, selectedScene, board.boardId, boardCenter(board));
-        })}><PackagePlus className="mr-2 h-4 w-4" />放到当前地图中央</Button>}
-
-        <WorkbenchGroup title="相关地点" empty="这个场景没有关联地点。">
-          {relatedLocations.map((location) => {
-            const roomLocation = findModuleEntityV2(world, modulePackage, location.id, "location", { kind: "room" });
-            const alreadyPresented = Boolean(activePublishedScene && roomLocation && entityPresentedInSceneV2(roomLocation, activePublishedScene.entityId));
-            return <ModulePublicationRow
-              key={location.id}
-              label={location.name}
-              keeperDetail={location.description || "模组没有补充这个地点的 KP 参考。"}
-              publicDetail={location.playerDescription || "未填写玩家可见描述"}
-              status={alreadyPresented ? "玩家已看见" : "尚未公开"}
-              disabled={busy || readOnly || !location.playerDescription?.trim() || !activePublishedScene || alreadyPresented}
-              action={alreadyPresented ? "已在当前情境公开" : !publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : "让地点在当前情境登场"}
-              onClick={() => void run(async () => {
-                if (!activePublishedScene) throw new Error("请先把这个场景呈现为当前情境，再公开相关地点");
-                await publishModuleLocationV2(session, modulePackage, location, activePublishedScene.entityId);
-              })}
-            />;
-          })}
-        </WorkbenchGroup>
-
-        <WorkbenchGroup title="相关 NPC" empty="这个场景没有关联 NPC。">
-          {relatedNpcs.map((npc, index) => {
-            const roomNpc = findModuleEntityV2(world, modulePackage, npc.id, "npc", { kind: "room" });
-            const alreadyPresented = Boolean(activePublishedScene && roomNpc && entityPresentedInSceneV2(roomNpc, activePublishedScene.entityId));
-            const representationCount = board && roomNpc
-              ? board.items.filter((item) => item.reference.kind === "entity" && item.reference.entityId === roomNpc.entityId).length
-              : 0;
-            return <div key={npc.id} className="grid gap-1">
-              <ModulePublicationRow
-                label={npc.name}
-                keeperDetail={npcKeeperReference(npc)}
-                publicDetail={npc.playerDescription || "未填写玩家可见摘要"}
-                status={alreadyPresented ? "玩家已看见" : "尚未公开"}
-                disabled={busy || readOnly || !npc.playerDescription?.trim() || !activePublishedScene || alreadyPresented}
-                action={alreadyPresented ? "已在当前情境公开" : !publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : "让 NPC 在当前情境登场"}
-                onClick={() => void run(async () => {
-                  if (!activePublishedScene) throw new Error("请先把这个场景呈现为当前情境，再让相关人物登场");
-                  await publishModuleNpcV2(session, modulePackage, npc, activePublishedScene.entityId);
-                })}
-              />
-              {alreadyPresented && board && roomNpc && <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-zinc-800 px-2 py-1.5 text-[11px] text-zinc-500">
-                <span>{representationCount > 0 ? `当前画面已有 ${representationCount} 个表现棋子` : "人物已公开，但还没有放到画面上"}</span>
-                <Button className="h-8 px-2 text-[11px]" variant="ghost" disabled={busy || readOnly} onClick={() => void run(async () => {
-                  const origin = sceneItem?.position ?? boardCenter(board);
-                  await placeEntityOnBoardV2(session, board.boardId, roomNpc, {
-                    x: origin.x + 150 + (index + representationCount) * 45,
-                    y: origin.y + 120 + (index + representationCount) * 35,
-                  }, false, true);
-                })}>{representationCount > 0 ? "再放一个 NPC 棋子" : "放一个 NPC 棋子到当前画面"}</Button>
-              </div>}
-            </div>;
-          })}
-        </WorkbenchGroup>
-
-        <WorkbenchGroup title="建议检定" empty="这个场景没有建议检定。">
-          {relatedChecks.map((check) => <div key={check.id} aria-label={`检定参考：${check.skill}`} className="rounded border border-zinc-800 bg-zinc-950 p-2 text-xs">
-            <b>{check.skill} · {difficultyLabel(check.difficulty)}</b>
-            <p className="mt-1 text-zinc-500">{check.purpose || "等玩家提交行动后，在现场直接裁定。"}</p>
-            {(check.onSuccess || check.onFailure) && <div className="mt-2 grid gap-1 border-t border-zinc-800 pt-2 text-[11px] leading-4">
-              <p className="text-emerald-300/80"><span className="font-semibold">成功：</span>{check.onSuccess || "按现场情况推进。"}</p>
-              <p className="text-amber-300/80"><span className="font-semibold">失败：</span>{check.onFailure || "说明代价，并让调查继续。"}</p>
-            </div>}
-          </div>)}
-        </WorkbenchGroup>
-
-        <WorkbenchGroup title="与当前场景相关的线索" empty="这个场景没有预设关联线索；你仍可从下方搜索整个模组。">
-          {relatedClues.map((clue) => <ModuleCluePublicationRow
-            key={clue.id}
-            clue={clue}
-            modulePackage={modulePackage}
-            world={world}
-            disabled={busy || readOnly}
-            sceneGuardAction={!publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : undefined}
-            onPublish={() => void run(async () => { await publishModuleClueV2(session, modulePackage, clue); })}
-          />)}
-        </WorkbenchGroup>
-      </div>}
-
       <section className="grid gap-2 rounded-lg border border-zinc-800 bg-zinc-950/35 p-3" aria-label="模组线索速查">
         <div>
-          <h3 className="text-xs font-semibold text-zinc-200">{selectedScene ? "其他模组线索" : "全部模组线索"}</h3>
+          <h3 className="text-xs font-semibold text-zinc-200">全部模组线索</h3>
           <p className="mt-1 text-[11px] leading-4 text-zinc-500">
             调查方向改变或玩家卡住时，可以从整个模组寻找线索。当前场景之外的内容会标为“跨场景”，并在公开前再次请你确认。
           </p>
@@ -370,20 +296,19 @@ export function KeeperModuleWorkbenchV2({
         />
         {normalizedClueQuery
           ? <div className="grid gap-1" aria-label="模组线索搜索结果">
-            {matchingOtherClues.map((clue) => <ModuleCluePublicationRow
+            {matchingClues.map((clue) => <ModuleCluePublicationRow
               key={clue.id}
               clue={clue}
               modulePackage={modulePackage}
               world={world}
               disabled={busy || readOnly}
-              crossScene={Boolean(selectedScene)}
+              crossScene={Boolean(selectedScene) && !relatedClueIds.has(clue.id)}
+              sceneGuardAction={relatedClueIds.has(clue.id) ? !publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : undefined : undefined}
               currentSceneName={selectedScene?.name}
               onPublish={() => void run(async () => { await publishModuleClueV2(session, modulePackage, clue); })}
             />)}
-            {matchingOtherClues.length === 0 && <p role="status" className="rounded border border-dashed border-zinc-800 p-3 text-[11px] leading-4 text-zinc-500">
-              {relatedQueryMatchCount > 0
-                ? `找到 ${relatedQueryMatchCount} 条当前场景线索，已显示在上方；没有额外的模组线索。`
-                : `没有找到与“${clueQuery.trim()}”相符的线索。换个名称或关键词试试。`}
+            {matchingClues.length === 0 && <p role="status" className="rounded border border-dashed border-zinc-800 p-3 text-[11px] leading-4 text-zinc-500">
+              {`没有找到与“${clueQuery.trim()}”相符的线索。换个名称或关键词试试。`}
             </p>}
           </div>
           : selectedScene
@@ -418,6 +343,185 @@ export function KeeperModuleWorkbenchV2({
               : <p className="rounded border border-dashed border-zinc-800 p-3 text-[11px] leading-4 text-zinc-500">这个模组还没有可公开的线索。可以继续用聊天推进，或回到模组库补充玩家可见正文。</p>}
       </section>
 
+      {selectedScene && <div className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/45 p-3">
+        <div>
+          <h3 className="text-sm font-semibold text-zinc-200">{selectedScene.name}</h3>
+          <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-amber-100/70">{selectedScene.synopsis || selectedScene.description || "无场景摘要"}</p>
+          {selectedScene.keeperNotes && <p className="mt-2 whitespace-pre-wrap rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/75">{selectedScene.keeperNotes}</p>}
+        </div>
+        {preparedScene && <section aria-label="这一幕的主持参考" className="grid gap-3">
+          <GuideNote note={preparedScene.purpose} modulePackage={modulePackage} />
+          <details><summary className="cursor-pointer text-sm text-brass">玩家可能怎么查</summary><div className="mt-2 grid gap-3">{preparedScene.actions.map((action, index) => <section key={index}><p className="mb-2 text-sm text-zinc-300">玩家：{action.intent}</p><GuideNote note={action.response} modulePackage={modulePackage} /></section>)}</div></details>
+          <details><summary className="cursor-pointer text-sm text-brass">调查去向与卡关建议</summary><div className="mt-2 grid gap-3">{[...preparedScene.exits, ...preparedScene.pitfalls].map((note, index) => <GuideNote key={index} note={note} modulePackage={modulePackage} />)}</div></details>
+        </section>}
+        {guideStep && keeperGuide && !preparedScene && <section aria-label="运行指引：本步怎么跑" className="grid gap-2 rounded-lg border border-brass/40 bg-zinc-950/55 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-brass">运行指引 · 第 {guideStepIndex + 1}/{guideSteps.length} 步：{guideStep.title}</h3>
+            {nextGuideScene && <Button className="h-7 px-2 text-[11px]" variant="secondary" disabled={busy} onClick={() => setSelectedSceneId(nextGuideScene.id)}>准备下一场：{nextGuideScene.name}</Button>}
+          </div>
+          {guideStep.goal && <p className="text-xs leading-5 text-zinc-300"><span className="font-semibold text-zinc-200">这一步要达成：</span>{guideStep.goal}</p>}
+          {guideStep.leadIn && <p className="text-xs leading-5 text-zinc-500"><span className="font-semibold text-zinc-400">玩家怎么到这里：</span>{guideStep.leadIn}</p>}
+          {guideStep.keyClues.length > 0 && <ul className="grid gap-1" aria-label="本步关键线索">
+            {guideStep.keyClues.map((keyClue, index) => {
+              const artifact = keyClue.clueId ? findModuleClueArtifactV2(world, modulePackage, keyClue.clueId) : undefined;
+              const published = Boolean(artifact && !artifact.archived);
+              return <li key={index} className="rounded bg-black/25 p-1.5 text-[11px] leading-4">
+                {keyClue.clueId && <span className={published ? "mr-1 font-semibold text-emerald-300" : "mr-1 font-semibold text-amber-300"}>{published ? "✓ 已公开" : "○ 待公开"}</span>}
+                <span className="text-zinc-300">{keyClue.summary}</span>
+                {keyClue.pointsTo && <span className="text-zinc-500"> → {keyClue.pointsTo}</span>}
+              </li>;
+            })}
+          </ul>}
+          {guideStep.ifStuck && <p className="rounded bg-amber-950/25 p-2 text-[11px] leading-4 text-amber-200/85"><span className="font-semibold">卡关补救：</span>{guideStep.ifStuck}</p>}
+          {isLastGuideStep && keeperGuide.endings.length > 0 && <p className="text-[11px] leading-4 text-zinc-500">已是线索链最后一步 · 可选结局：{keeperGuide.endings.map((ending) => ending.title).join(" / ")}（详见侧栏「运行指引」）</p>}
+        </section>}
+        {(relatedLocations.length > 0 || relatedNpcs.length > 0) && <section aria-label="整理本幕登场介绍" className="grid gap-2 rounded border border-zinc-700 p-3">
+          <p className="text-xs leading-5 text-zinc-400">人物与地点的介绍按这一幕单独准备。整理会参考原文和已有资料，区分现在可说的内容、需满足的条件与后续剧情；手写草稿会保留。</p>
+          <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy || readOnly || !publicationDrafts.ready || Boolean(scenePublications.runningSceneId)} onClick={() => void scenePublications.generate(selectedScene.id)}>{scenePublications.runningSceneId ? "正在整理登场条件与介绍…" : phaseEntries.length ? "重新整理本幕人物与地点介绍" : "整理本幕人物与地点介绍"}</Button>{scenePublications.runningSceneId && <Button variant="ghost" onClick={scenePublications.stop}>停止整理</Button>}</div>
+          {scenePublications.runningSceneId && <p role="status" className="text-xs text-brass">整理的是《{modulePackage.scenes.find((scene) => scene.id === scenePublications.runningSceneId)?.name}》；完成后只保存到本机，不会自动公开。</p>}
+        </section>}
+        <section className="grid gap-2 rounded-lg border border-brass/30 bg-brass/5 p-3" aria-label="向玩家呈现场景">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">玩家现在看见什么？</h3>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">只会发送你在这里写下的文字。上方模组摘要与主持人笔记不会自动带入。</p>
+          </div>
+          <Textarea
+            aria-label="玩家可见的开场描述"
+            value={publicOpening}
+            maxLength={8_000}
+            disabled={readOnly || busy || !publicationDrafts.ready}
+            onChange={(event) => {
+              publicationDrafts.setText(sceneOpeningDraftKey(selectedScene.id), event.target.value);
+              setPresentationPreview(false);
+            }}
+            placeholder="例如：雨水顺着剧院后门的铁皮棚流下。门缝里透出一线暖黄灯光，唱针摩擦声断断续续……"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button disabled={busy || readOnly || !publicationDrafts.ready || !publicOpening.trim() || openingUnchanged} onClick={() => void run(async () => {
+              await presentModuleSceneV2(session, modulePackage, selectedScene, publicOpening);
+            })}>
+              <Eye className="mr-2 h-4 w-4" />
+              {openingUnchanged ? "已呈现，修改后可更新" : isPresentedSceneActive ? "更新当前情境" : "向所有人呈现这个场景"}
+            </Button>
+            {isPresentedSceneActive && <span className="text-xs text-emerald-300">玩家正在经历这里</span>}
+          </div>
+          <p className="text-[11px] text-zinc-500">开场草稿自动保存在本机，切换场景后仍会保留；点击呈现才会发给玩家。</p>
+          <details className="mt-1 border-t border-brass/20 pt-2">
+            <summary className="cursor-pointer text-xs text-brass">准备一起登场的内容</summary>
+            <p className="my-2 text-xs text-zinc-400">只勾选此刻已经可见的地点、人物和线索。人物和地点的介绍可在下方直接填写。</p>
+            {presentationOptions.map((item) => <div key={item.id}><label className="my-1 flex items-center gap-2 text-xs"><input type="checkbox" disabled={busy || readOnly || !item.name.trim() || !item.text.trim()} checked={presentationSelection.includes(item.id)} onChange={(event) => {
+              setPresentationSelection((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id));
+              setPresentationPreview(false);
+            }} />{item.name || item.label}{!item.text.trim() ? "（缺少公开正文）" : !item.name.trim() ? "（缺少玩家可见称呼）" : ""}</label>{item.id.startsWith("clue:") ? <div className="mb-2 ml-5"><ClueDiscoveryGuidance modulePackage={modulePackage} clueId={item.id.slice(5)} publicText={item.text} compact /></div> : <div className="mb-2 ml-5"><SceneEntityGuidance compact name={item.label} entries={item.id.startsWith("npc:") ? entriesFor("npc", item.id.slice(4)) : entriesFor("location", item.id.slice(9))} text={item.text} modulePackage={modulePackage} /></div>}</div>)}
+            <Button variant="secondary" className="mt-2" disabled={busy || readOnly || !publicationDrafts.ready || !publicOpening.trim() || !selectedPresentation.length} onClick={() => setPresentationPreview(true)}>预览一起登场</Button>
+          </details>
+          {presentationPreview && <section aria-label="成组呈现公开预览" className="grid gap-2 rounded border border-brass/50 p-3">
+            <p className="text-xs text-brass">以下标题和正文将向所有玩家公开</p>
+            <article><b>{selectedScene.name}</b><p className="whitespace-pre-wrap text-xs">{publicOpening}</p></article>
+            {selectedPresentation.map((item) => <article key={item.id}><b className="text-sm">{item.name}</b><p className="whitespace-pre-wrap text-xs">{item.text}</p></article>)}
+            <Button disabled={busy || readOnly || !publicationDrafts.ready || !publicOpening.trim()} onClick={() => void run(async () => {
+              const scene = await presentModuleSceneV2(session, modulePackage, selectedScene, publicOpening);
+              for (const item of selectedPresentation) {
+                try { await item.publish(scene.entityId); }
+                catch { throw new Error(`场景及此前完成的内容已公开；“${item.name}”未完成，请检查登场状态后重试。`); }
+              }
+              setPresentationPreview(false);
+              setPresentationSelection([]);
+            })}>确认呈现场景与 {selectedPresentation.length} 项内容</Button>
+            <Button variant="ghost" onClick={() => setPresentationPreview(false)}>返回选择</Button>
+          </section>}
+        </section>
+        {board && !sceneItem && <Button disabled={busy || readOnly} variant="secondary" onClick={() => void run(async () => {
+          await placeModuleSceneOnBoardV2(session, modulePackage, selectedScene, board.boardId, boardCenter(board));
+        })}><PackagePlus className="mr-2 h-4 w-4" />放到当前地图中央</Button>}
+
+        <WorkbenchGroup title="相关地点" empty="这个场景没有关联地点。">
+          {relatedLocations.map((location) => {
+            const roomLocation = findModuleEntityV2(world, modulePackage, location.id, "location", { kind: "room" });
+            const alreadyPresented = Boolean(activePublishedScene && roomLocation && entityPresentedInSceneV2(roomLocation, activePublishedScene.entityId));
+            const changed = roomLocation?.description !== location.playerDescription.trim() || roomLocation?.name !== location.publicName.trim();
+            return <div key={location.id}><ModulePublicationRow
+              label={location.name}
+              keeperDetail={location.description || "模组没有补充这个地点的 KP 参考。"}
+              publicDetail={location.playerDescription || "未填写玩家可见描述"}
+              publicNameEditor={{ value: location.publicName, disabled: busy || readOnly || !publicationDrafts.ready, onChange: (name) => { publicationDrafts.setText(scenePublicationNameKey(selectedScene.id, "location", location.id), name); setPresentationPreview(false); } }}
+              publicEditor={{ value: location.playerDescription, disabled: busy || readOnly || !publicationDrafts.ready, onChange: (text) => updatePublicEntity("location", location.id, text) }}
+              status={alreadyPresented ? "玩家已看见" : "尚未公开"}
+              disabled={busy || readOnly || !location.publicName.trim() || !location.playerDescription?.trim() || !activePublishedScene || (alreadyPresented && !changed)}
+              action={alreadyPresented ? changed ? "更新玩家可见介绍" : "已在当前情境公开" : !publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : "让地点在当前情境登场"}
+              onClick={() => void run(async () => {
+                if (!activePublishedScene) throw new Error("请先把这个场景呈现为当前情境，再公开相关地点");
+                await publishModuleLocationV2(session, modulePackage, { ...location, name: location.publicName }, activePublishedScene.entityId);
+              })}
+            /><SceneEntityGuidance name={location.name} entries={entriesFor("location", location.id)} text={location.playerDescription} legacyText={legacyEntityText("location", location.id)} modulePackage={modulePackage} disabled={busy || readOnly || !publicationDrafts.ready} onChoose={(text, name) => updatePublicEntity("location", location.id, text, name)} /></div>;
+          })}
+        </WorkbenchGroup>
+
+        <WorkbenchGroup title="相关 NPC" empty="这个场景没有关联 NPC。">
+          {relatedNpcs.map((npc, index) => {
+            const roomNpc = findModuleEntityV2(world, modulePackage, npc.id, "npc", { kind: "room" });
+            const alreadyPresented = Boolean(activePublishedScene && roomNpc && entityPresentedInSceneV2(roomNpc, activePublishedScene.entityId));
+            const changed = roomNpc?.description !== npc.playerDescription.trim() || roomNpc?.name !== npc.publicName.trim();
+            const representationCount = board && roomNpc
+              ? board.items.filter((item) => item.reference.kind === "entity" && item.reference.entityId === roomNpc.entityId).length
+              : 0;
+            return <div key={npc.id} className="grid gap-1">
+              <ModulePublicationRow
+                label={npc.name}
+                keeperDetail={npcKeeperReference(npc)}
+                publicDetail={npc.playerDescription || "未填写玩家可见摘要"}
+                publicNameEditor={{ value: npc.publicName, disabled: busy || readOnly || !publicationDrafts.ready, onChange: (name) => { publicationDrafts.setText(scenePublicationNameKey(selectedScene.id, "npc", npc.id), name); setPresentationPreview(false); } }}
+                publicEditor={{ value: npc.playerDescription, disabled: busy || readOnly || !publicationDrafts.ready, onChange: (text) => updatePublicEntity("npc", npc.id, text) }}
+                status={alreadyPresented ? "玩家已看见" : "尚未公开"}
+                disabled={busy || readOnly || !npc.publicName.trim() || !npc.playerDescription?.trim() || !activePublishedScene || (alreadyPresented && !changed)}
+                action={alreadyPresented ? changed ? "更新玩家可见介绍" : "已在当前情境公开" : !publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : "让 NPC 在当前情境登场"}
+                onClick={() => void run(async () => {
+                  if (!activePublishedScene) throw new Error("请先把这个场景呈现为当前情境，再让相关人物登场");
+                  await publishModuleNpcV2(session, modulePackage, { ...npc, name: npc.publicName }, activePublishedScene.entityId);
+                })}
+              />
+              <SceneEntityGuidance name={npc.name} entries={entriesFor("npc", npc.id)} text={npc.playerDescription} legacyText={legacyEntityText("npc", npc.id)} modulePackage={modulePackage} disabled={busy || readOnly || !publicationDrafts.ready} onChoose={(text, name) => updatePublicEntity("npc", npc.id, text, name)} />
+              {alreadyPresented && board && roomNpc && <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-zinc-800 px-2 py-1.5 text-[11px] text-zinc-500">
+                <span>{representationCount > 0 ? `当前画面已有 ${representationCount} 个表现棋子` : "人物已公开，但还没有放到画面上"}</span>
+                <Button className="h-8 px-2 text-[11px]" variant="ghost" disabled={busy || readOnly} onClick={() => void run(async () => {
+                  const origin = sceneItem?.position ?? boardCenter(board);
+                  await placeEntityOnBoardV2(session, board.boardId, roomNpc, {
+                    x: origin.x + 150 + (index + representationCount) * 45,
+                    y: origin.y + 120 + (index + representationCount) * 35,
+                  }, false, true);
+                })}>{representationCount > 0 ? "再放一个 NPC 棋子" : "放一个 NPC 棋子到当前画面"}</Button>
+              </div>}
+            </div>;
+          })}
+        </WorkbenchGroup>
+
+        <WorkbenchGroup title="建议检定" empty="这个场景没有建议检定。">
+          {relatedChecks.map((check) => <div key={check.id} aria-label={`检定参考：${check.skill}`} className="rounded border border-zinc-800 bg-zinc-950 p-2 text-xs">
+            <b>{check.skill} · {difficultyLabel(check.difficulty)}</b>
+            {onPrepareCheck && <Button variant="secondary" className="ml-2 h-7 text-xs" disabled={readOnly} onClick={() => onPrepareCheck({ skill: check.skill, difficulty: check.difficulty })}>选择调查员发起</Button>}
+            <p className="mt-1 text-zinc-500">{check.purpose || "等玩家提交行动后，在现场直接裁定。"}</p>
+            {(check.onSuccess || check.onFailure) && <div className="mt-2 grid gap-1 border-t border-zinc-800 pt-2 text-[11px] leading-4">
+              <p className="text-emerald-300/80"><span className="font-semibold">成功：</span>{check.onSuccess || "按现场情况推进。"}</p>
+              <p className="text-amber-300/80"><span className="font-semibold">失败：</span>{check.onFailure || "说明代价，并让调查继续。"}</p>
+            </div>}
+          </div>)}
+        </WorkbenchGroup>
+
+        <WorkbenchGroup title="与当前场景相关的线索" empty="这个场景没有预设关联线索；你仍可从下方搜索整个模组。">
+          {relatedClues.map((clue) => <ModuleCluePublicationRow
+            key={clue.id}
+            clue={clue}
+            modulePackage={modulePackage}
+            world={world}
+            disabled={busy || readOnly}
+            sceneGuardAction={!publishedScene ? "先呈现这个场景" : !isPresentedSceneActive ? "先切换到此场景" : undefined}
+            onPublish={() => void run(async () => { await publishModuleClueV2(session, modulePackage, clue); })}
+          />)}
+        </WorkbenchGroup>
+      </div>}
+
+
+
       {entries.length > 0 && <div className="grid gap-1 rounded-lg border border-emerald-900/40 bg-emerald-950/10 p-3">
         <h3 className="text-xs font-semibold text-emerald-200">谁进入了场景区域</h3>
         {entries.map((entry) => <p key={entry.sceneItem.itemId} className="text-[11px] text-zinc-400">
@@ -425,8 +529,8 @@ export function KeeperModuleWorkbenchV2({
         </p>)}
       </div>}
 
-      {board && world.latestCharacters.size > 0 && <WorkbenchGroup title="调查员棋子" empty="房间中还没有角色卡。">
-        {[...world.latestCharacters.values()].map((character, index) => {
+      {board && tableCharacters(world).length > 0 && <WorkbenchGroup title="调查员棋子" empty="房间中还没有角色卡。">
+        {tableCharacters(world).map((character, index) => {
           const entity = findCharacterEntity(world, character.id);
           const placed = entity && board.items.some((item) => item.reference.kind === "entity" && item.reference.entityId === entity.entityId);
           return <ModulePublicationRow
@@ -464,7 +568,7 @@ export function CheckNegotiationV2({
   readonly onError?: (message?: string) => void;
 }) {
   const ownCharacters = session
-    ? [...world.latestCharacters.values()].filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
+    ? tableCharacters(world).filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
     : [];
   const [characterId, setCharacterId] = useState(ownCharacters[0]?.id ?? "");
   const character = ownCharacters.find(({ id }) => id === characterId) ?? ownCharacters[0];
@@ -577,15 +681,14 @@ export function CheckNegotiationV2({
     session
       && !session.isHost
       && ownPending.length === 0
-      && ready.length === 0
-      && !waitingForKeeperOutcome,
+      && ready.length === 0,
   );
   const heading = session?.isHost
     ? pending.length > 0 ? pendingPushCount > 0 ? `需要说明强推代价 · ${pendingPushCount}` : `需要你裁定的行动 · ${pending.length}` : "等待调查员行动"
     : readyPushCount > 0 ? "先决定是否承担强推代价"
       : ready.length > 0 ? "KP 已允许你掷骰"
       : ownPending.length > 0 ? "行动已交给 KP"
-        : waitingForKeeperOutcome ? "检定已完成，等待 KP 描述结果"
+        : waitingForKeeperOutcome ? "检定已完成，可以继续行动"
         : pushCandidate ? "第一次检定失败了"
         : "你想怎么做？";
 
@@ -596,7 +699,7 @@ export function CheckNegotiationV2({
       : readyPushCount > 0 ? "先读清 KP 说明的严重后果。只有你明确接受后才会掷骰；不接受也可以继续调查。"
         : ready.length > 0 ? "这次检定已经确定，只需掷一次；结果会由房主生成并让所有人看见。"
         : ownPending.length > 0 ? "KP 会决定直接给出结果，还是让你掷骰。等待时仍可在现场继续交谈。"
-          : waitingForKeeperOutcome ? "骰子结果已经记录。先听 KP 说明你达成了什么、现场发生了什么变化，再继续下一项行动。"
+          : waitingForKeeperOutcome ? "骰子结果已经记录。若已通过语音或现场发言说明结果，可直接继续下一项行动；无需等待补写记录。强推仍需先明确失败结果和代价。"
           : pushCandidate ? "你可以说明一种真正不同的做法申请强推。KP 会先告诉你再次失败的严重后果，看到后仍可放弃。"
           : "交谈或查看眼前明显信息时，直接用下方现场发言；结果可能有风险或不确定时，在这里提交行动让 KP 裁定。"}</p>
 
@@ -776,7 +879,7 @@ export function PublicClueBoardV2({
 }) {
   const clues = [...world.artifacts.values()].filter((artifact) => artifact.kind === "clue" && !artifact.archived && artifact.audience.kind === "room");
   const ownCharacters = session
-    ? [...world.latestCharacters.values()].filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
+    ? tableCharacters(world).filter(({ ownerPeerId }) => ownerPeerId === session.localSeat.seatId)
     : [];
   const [characterId, setCharacterId] = useState(ownCharacters[0]?.id ?? "");
   const character = ownCharacters.find(({ id }) => id === characterId) ?? ownCharacters[0];
@@ -862,15 +965,26 @@ export function PublicClueBoardV2({
 async function publishModuleLocationV2(session: RoomSessionV2, modulePackage: ModulePackageV1, location: ModuleLocationV1, sceneEntityId: string) {
   const description = location.playerDescription?.trim();
   if (!description) throw new Error(`地点“${location.name}”没有玩家可见描述`);
-  const entity = await ensureModuleEntityV2(session, modulePackage, { sourceId: location.id, kind: "location", name: location.name, description, audience: { kind: "room" } });
-  return attachEntityPresentationV2(session, entity, sceneEntityId);
+  return preparePublicEntity(session, modulePackage, location.id, "location", location.name, description, sceneEntityId);
 }
 
 async function publishModuleNpcV2(session: RoomSessionV2, modulePackage: ModulePackageV1, npc: ModuleNpcV1, sceneEntityId: string) {
   const description = npc.playerDescription?.trim();
   if (!description) throw new Error(`人物“${npc.name}”还没有可公开的介绍`);
-  const entity = await ensureModuleEntityV2(session, modulePackage, { sourceId: npc.id, kind: "npc", name: npc.name, description, audience: { kind: "room" } });
-  return attachEntityPresentationV2(session, entity, sceneEntityId);
+  return preparePublicEntity(session, modulePackage, npc.id, "npc", npc.name, description, sceneEntityId);
+}
+
+async function preparePublicEntity(session: RoomSessionV2, modulePackage: ModulePackageV1, sourceId: string, kind: "npc" | "location", name: string, description: string, sceneEntityId: string) {
+  name = name.trim();
+  if (!name) throw new Error("请先填写玩家此刻知道的名称或称呼。");
+  const entity = findModuleEntityV2(session.world, modulePackage, sourceId, kind, { kind: "room" });
+  const previousScenes = Array.isArray(entity?.data.presentedInSceneEntityIds) ? entity.data.presentedInSceneEntityIds.filter((id): id is string => typeof id === "string") : [];
+  const data = { ...entity?.data, publicDescriptionSceneEntityId: sceneEntityId, presentedInSceneEntityIds: [...new Set([...previousScenes, sceneEntityId])] };
+  if (!entity) return ensureModuleEntityV2(session, modulePackage, { sourceId, kind, name, description, audience: { kind: "room" }, data });
+  if (entity.name === name && entity.description === description && entity.data.publicDescriptionSceneEntityId === sceneEntityId && previousScenes.includes(sceneEntityId)) return entity;
+  const updated = { ...entity, revision: entity.revision + 1, name, description, data };
+  await session.submitConfirmed({ type: "entity.upserted", audience: updated.audience, payload: { entity: updated } });
+  return session.world.entities.get(updated.entityId) ?? updated;
 }
 
 async function publishModuleClueV2(session: RoomSessionV2, modulePackage: ModulePackageV1, clue: ModuleClueV1) {
@@ -1085,6 +1199,7 @@ function ModuleCluePublicationRow({
           ? "重新放回调查案卷"
           : "公开到调查案卷";
   return <div className="grid gap-1" aria-label={`模组线索：${clue.name}`}>
+    <ClueDiscoveryGuidance modulePackage={modulePackage} clueId={clue.id} publicText={clue.revealText ?? ""} />
     <ModulePublicationRow
       label={`${clue.isCore ? "核心 · " : ""}${clue.name}`}
       keeperDetail={clue.description || "模组没有补充这条线索的真实含义。"}
@@ -1115,11 +1230,13 @@ function ModuleCluePublicationRow({
   </div>;
 }
 
-function ModulePublicationRow({ label, detail, keeperDetail, publicDetail, status, warning, action, disabled, onClick }: {
+function ModulePublicationRow({ label, detail, keeperDetail, publicDetail, publicNameEditor, publicEditor, status, warning, action, disabled, onClick }: {
   readonly label: string;
   readonly detail?: string;
   readonly keeperDetail?: string;
   readonly publicDetail?: string;
+  readonly publicEditor?: { value: string; disabled: boolean; onChange(text: string): void };
+  readonly publicNameEditor?: { value: string; disabled: boolean; onChange(text: string): void };
   readonly status?: string;
   readonly warning?: string;
   readonly action: string;
@@ -1135,7 +1252,11 @@ function ModulePublicationRow({ label, detail, keeperDetail, publicDetail, statu
           {warning && <span className="rounded bg-amber-950/70 px-1.5 py-0.5 text-[9px] text-amber-300">{warning}</span>}
         </div>
         {keeperDetail && <PublicationReference label={`仅 KP 参考：${label}`} prefix="仅 KP" text={keeperDetail} tone="keeper" />}
+        {publicNameEditor && <label className="mt-2 grid gap-1 text-[11px] text-zinc-300">玩家可见名称<Input aria-label={`玩家可见名称：${label}`} value={publicNameEditor.value} disabled={publicNameEditor.disabled} maxLength={240} onChange={(event) => publicNameEditor.onChange(event.target.value)} placeholder="只写此刻已知的称呼或名称" /></label>}
+        {publicEditor && <label className="mt-2 grid gap-1 text-[11px] text-zinc-300">玩家可见介绍<Textarea aria-label={`玩家可见介绍：${label}`} value={publicEditor.value} disabled={publicEditor.disabled} maxLength={20_000} onChange={(event) => publicEditor.onChange(event.target.value)} placeholder="在这里写下此刻要介绍给玩家的内容。" /><span className="text-zinc-500">输入只保存到本机的本幕草稿；点击登场或更新后才发给玩家。</span></label>}
         {publicDetail && <PublicationReference label={`公开预览：${label}`} prefix="玩家会看到" text={publicDetail} tone="public" />}
+        {publicEditor && !publicEditor.value.trim() && <p className="mt-1 text-[11px] text-amber-200">先在上方填写介绍，就能公开。</p>}
+        {publicNameEditor && !publicNameEditor.value.trim() && <p className="mt-1 text-[11px] text-amber-200">先填写玩家此刻知道的名称或称呼。</p>}
         {detail && <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[11px] leading-4 text-zinc-500">{detail}</p>}
       </div>
       <Button className="h-8 shrink-0 px-2 text-[11px]" variant="secondary" disabled={disabled} onClick={onClick}>{action}</Button>

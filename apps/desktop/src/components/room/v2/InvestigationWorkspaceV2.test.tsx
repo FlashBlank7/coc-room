@@ -24,6 +24,91 @@ import { detectSceneEntriesV2 } from "./investigation-workspace-helpers";
 afterEach(cleanup);
 
 describe("immersive V2 investigation workspace", () => {
+  it("lets KP write a missing NPC introduction on the spot, recover it after navigation, and publish only that text", async () => {
+    const world = createRoomWorldStateV2("room-inline-npc-draft");
+    const modulePackage = moduleFixture();
+    const npc = modulePackage.npcs[0]!;
+    npc.playerDescription = undefined;
+    const active = entity("scene-inline-npc", "scene", "后台唱片室", { sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: "scene", id: "scene-source" } });
+    (world.entities as Map<string, RoomEntityV2>).set(active.entityId, active);
+    (world as { activeSceneEntityId?: string }).activeSceneEntityId = active.entityId;
+    const submitConfirmed = vi.fn().mockResolvedValue("confirmed");
+    const session = { isHost: true, world, localSeat: { seatId: "seat-host", role: "host" }, submitConfirmed } as unknown as RoomSessionV2;
+    const view = render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    const label = `玩家可见介绍：${npc.name}`;
+    const input = screen.getByLabelText(label) as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe("");
+    expect(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.change(input, { target: { value: "她抱着一把三味线，抬头望向你们。" } });
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }).hasAttribute("disabled")).toBe(false);
+    // Wait for the actual local repository write, then navigate away and back.
+    const { getRepository } = await import("../../../data/repository");
+    const repository = await getRepository();
+    const key = `room-publication:${JSON.stringify([world.roomId, modulePackage.moduleId, modulePackage.revision])}`;
+    await waitFor(async () => expect(await repository.getSetting(key)).toContain("三味线"));
+    view.unmount();
+    render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    await waitFor(() => expect((screen.getByLabelText(label) as HTMLTextAreaElement).value).toBe("她抱着一把三味线，抬头望向你们。"));
+    fireEvent.click(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
+    expect(submitConfirmed.mock.calls[0]![0].payload.entity.description).toBe("她抱着一把三味线，抬头望向你们。");
+    expect(JSON.stringify(submitConfirmed.mock.calls)).not.toContain(npc.motivation);
+    expect(JSON.stringify(submitConfirmed.mock.calls)).not.toContain(npc.description);
+    expect(modulePackage.npcs[0]!.playerDescription).toBeUndefined();
+  });
+
+  it("previews and presents only selected public scene companions, without copying keeper references", async () => {
+    const world = createRoomWorldStateV2("room-batch-preview");
+    const modulePackage = moduleFixture();
+    const submitConfirmed = vi.fn(async () => "published");
+    const session = { isHost: true, world, localSeat: { seatId: "seat-host", role: "host" }, submitConfirmed } as unknown as RoomSessionV2;
+    render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    await waitFor(() => expect((screen.getByLabelText("玩家可见介绍：剧院后门") as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("玩家可见的开场描述"), { target: { value: "雨中的剧院门口。" } });
+    fireEvent.change(screen.getByLabelText("玩家可见介绍：剧院后门"), { target: { value: "锈蚀的铁门上挂着一道崭新的锁。" } });
+    fireEvent.click(screen.getByText("准备一起登场的内容"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "剧院后门" }));
+    fireEvent.click(screen.getByRole("button", { name: "预览一起登场" }));
+    const preview = screen.getByLabelText("成组呈现公开预览");
+    expect(preview.textContent).toContain("锈蚀的铁门上挂着一道崭新的锁");
+    expect(preview.textContent).not.toContain("KP 知道门锁已被调包");
+    expect(preview.textContent).not.toContain("沉默的演员");
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    fireEvent.click(within(preview).getByRole("button", { name: "确认呈现场景与 1 项内容" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledTimes(3));
+    const payloads = JSON.stringify(submitConfirmed.mock.calls);
+    expect(payloads).toContain("雨中的剧院门口");
+    expect(payloads).not.toContain("KP 知道门锁已被调包");
+    expect(payloads).not.toContain("KP 秘密动机");
+    expect(payloads).not.toContain("沉默的演员");
+  });
+
+  it("lets KP revise an already published introduction without resetting its scene associations", async () => {
+    const world = createRoomWorldStateV2("room-edit-published-npc");
+    const modulePackage = moduleFixture();
+    const npc = modulePackage.npcs[0]!;
+    const active = entity("scene-edit-published", "scene", "后台唱片室", { sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: "scene", id: "scene-source" } });
+    const published = { ...entity("npc-edit-published", "npc", npc.name, { sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: "npc", id: npc.id }, presentedInSceneEntityIds: [active.entityId] }), description: "你们已经见过的演员。" };
+    for (const item of [active, published]) (world.entities as Map<string, RoomEntityV2>).set(item.entityId, item);
+    (world as { activeSceneEntityId?: string }).activeSceneEntityId = active.entityId;
+    const submitConfirmed = vi.fn(async (proposal) => {
+      if (proposal.type === "entity.upserted") (world.entities as Map<string, RoomEntityV2>).set(proposal.payload.entity.entityId, proposal.payload.entity);
+      return "confirmed";
+    });
+    const session = { isHost: true, world, localSeat: { seatId: "seat-host", role: "host" }, submitConfirmed } as unknown as RoomSessionV2;
+    render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    const input = screen.getByLabelText(`玩家可见介绍：${npc.name}`) as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe(published.description);
+    fireEvent.change(input, { target: { value: "演员将一封信递给你们。" } });
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "更新玩家可见介绍" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
+    expect(world.entities.get(published.entityId)).toMatchObject({ revision: published.revision + 1, description: "演员将一封信递给你们。", data: { presentedInSceneEntityIds: [active.entityId] } });
+    expect(screen.getByRole("button", { name: "已在当前情境公开" }).hasAttribute("disabled")).toBe(true);
+  });
   it("detects a character token entering a scene zone without publishing hidden module text", () => {
     const world = createRoomWorldStateV2("room-immersive");
     const scene = entity("scene-room", "scene", "唱片室", { sourceRef: { id: "scene-source", kind: "scene" } });
@@ -239,15 +324,15 @@ describe("immersive V2 investigation workspace", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledWith("刚才的操作没有完成：sequencer storage exploded"));
   });
 
-  it("holds the next action until KP has narrated a completed check", () => {
+  it("allows another ordinary action without requiring a separate narration record", () => {
     const world = pushCheckWorld("successful");
     const session = { isHost: false, localSeat: { seatId: "seat-player", role: "player", displayName: "玩家" }, submitConfirmed: vi.fn(), isAuthenticated: true } as unknown as RoomSessionV2;
 
     const view = render(<CheckNegotiationV2 world={world} session={session} waitingForKeeperOutcome />);
 
-    expect(screen.getByRole("heading", { name: "检定已完成，等待 KP 描述结果" })).toBeTruthy();
-    expect(screen.getByText(/先听 KP 说明你达成了什么/)).toBeTruthy();
-    expect(screen.queryByLabelText("你想怎么做")).toBeNull();
+    expect(screen.getByRole("heading", { name: "检定已完成，可以继续行动" })).toBeTruthy();
+    expect(screen.getByText(/无需等待补写记录/)).toBeTruthy();
+    expect(screen.getByLabelText("你想怎么做")).toBeTruthy();
 
     view.rerender(<CheckNegotiationV2 world={world} session={session} waitingForKeeperOutcome={false} />);
     expect(screen.getByRole("heading", { name: "你想怎么做？" })).toBeTruthy();
@@ -792,7 +877,7 @@ describe("immersive V2 investigation workspace", () => {
     expect(screen.getByRole("button", { name: "模组场景：地下档案室" }).textContent).toContain("当前情境");
     expect(screen.getByRole("button", { name: "模组场景：后台唱片室" }).getAttribute("aria-pressed")).toBe("false");
     expect((screen.getByLabelText("玩家可见的开场描述") as HTMLTextAreaElement).value).toBe("铁架之间积着厚厚的灰尘。");
-    expect(screen.getByRole("button", { name: "更新当前情境" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "已呈现，修改后可更新" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("never renders the complete KP module package for a player caller", () => {
@@ -806,7 +891,7 @@ describe("immersive V2 investigation workspace", () => {
     expect(screen.queryByText("KP 秘密动机")).toBeNull();
   });
 
-  it("keeps the facts KP needs beside the exact public text and check consequences", () => {
+  it("keeps the facts KP needs beside the exact public text and check consequences", async () => {
     const world = createRoomWorldStateV2("room-keeper-quick-reference");
     const base = moduleFixture();
     const modulePackage: ModulePackageV1 = {
@@ -827,6 +912,11 @@ describe("immersive V2 investigation workspace", () => {
     render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
 
     expect(screen.getByLabelText("仅 KP 参考：剧院后门").textContent).toContain("KP 知道门锁已被调包");
+    expect((screen.getByLabelText("玩家可见介绍：剧院后门") as HTMLTextAreaElement).value).toBe("");
+    const reference = screen.getByLabelText("本幕登场参考：剧院后门");
+    fireEvent.click(within(reference).getByText("查看以前的介绍（未按本幕核对）"));
+    await waitFor(() => expect((within(reference).getByRole("button", { name: "复制旧介绍后修改" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(reference).getByRole("button", { name: "复制旧介绍后修改" }));
     expect(screen.getByLabelText("公开预览：剧院后门").textContent).toContain("锈蚀的铁门上挂着一道崭新的锁");
     expect(screen.getByLabelText("仅 KP 参考：沉默的演员").textContent).toContain("动机：KP 秘密动机");
     expect(screen.getByLabelText("仅 KP 参考：核心 · 倒放的曲序").textContent).toContain("KP 才能知道的线索含义");
@@ -1084,6 +1174,7 @@ describe("immersive V2 investigation workspace", () => {
     const publicOpening = "雨水敲打剧院后门，门缝里传来断续的唱针摩擦声。";
 
     render(<KeeperModuleWorkbenchV2 modulePackage={moduleFixture()} world={world} session={session} />);
+    await waitFor(() => expect(screen.getByLabelText("玩家可见的开场描述").hasAttribute("disabled")).toBe(false));
     fireEvent.change(screen.getByLabelText("玩家可见的开场描述"), { target: { value: publicOpening } });
     fireEvent.click(screen.getByRole("button", { name: "向所有人呈现这个场景" }));
 
@@ -1128,6 +1219,61 @@ describe("immersive V2 investigation workspace", () => {
       payload: { artifact: { description: "", body: "曲目必须从终幕向序曲倒放。" } },
     });
     expect(JSON.stringify(submitConfirmed.mock.calls)).not.toContain("KP 才能知道的线索含义");
+  });
+
+  it("uses the adopted disclosure's conditions in both publication paths and flags later manual edits", async () => {
+    const world = createRoomWorldStateV2("room-discovery-variants");
+    const modulePackage = moduleFixture();
+    const clue = modulePackage.clues[0]!;
+    const note = { title: "发现条件", text: "仅供 KP 核对", kind: "advice" as const, sources: [] };
+    const gated = { clueId: clue.id, text: "检定后才知道的食物产地。", when: { ...note, title: "辨认食物", text: "注意到食物并通过知识检定后透露。" } };
+    const free = { clueId: clue.id, text: "侍女告诉你她来自长野。", when: { ...note, title: "直接询问", text: "询问侍女即可，无需检定。" } };
+    modulePackage.keeperGuide = { schemaVersion: 1, truth: "", hook: "", clueTrail: [], timeline: [], endings: [], pacing: "", preparation: {
+      truth: note, hook: note, essentials: [note], playerBriefing: note, cast: [], scenes: [], timeline: [], endings: [], publicClues: [gated, free],
+    } };
+    clue.revealText = free.text;
+    const active = entity("scene-discovery-variants", "scene", "后台唱片室", { sourceRef: { moduleId: modulePackage.moduleId, revision: modulePackage.revision, kind: "scene", id: "scene-source" } });
+    (world.entities as Map<string, RoomEntityV2>).set(active.entityId, active);
+    (world as { activeSceneEntityId?: string }).activeSceneEntityId = active.entityId;
+    const submitConfirmed = vi.fn().mockResolvedValue("confirmed");
+    const session = { isHost: true, world, localSeat: { seatId: "seat-host", role: "host" }, submitConfirmed } as unknown as RoomSessionV2;
+    const view = render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    const conditions = screen.getAllByLabelText(`发现条件：${clue.name}`);
+    expect(conditions).toHaveLength(2);
+    for (const element of conditions) {
+      expect(element.textContent).toContain(free.when.text);
+      expect(element.textContent).not.toContain(gated.when.text);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "公开到调查案卷" }));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
+    expect(submitConfirmed.mock.calls[0]![0].payload.artifact.body).toBe(free.text);
+    expect(JSON.stringify(submitConfirmed.mock.calls)).not.toContain(free.when.text);
+    expect(JSON.stringify(submitConfirmed.mock.calls)).not.toContain(gated.text);
+
+    const edited = { ...modulePackage, clues: [{ ...clue, revealText: "KP 手工合并的公开正文。" }, ...modulePackage.clues.slice(1)] };
+    view.rerender(<KeeperModuleWorkbenchV2 modulePackage={edited} world={world} session={session} />);
+    for (const element of screen.getAllByLabelText(`发现条件：${clue.name}`)) {
+      expect(element.textContent).toContain("当前公开正文与草稿不同");
+      expect(element.textContent).toContain(gated.when.text);
+      expect(element.textContent).toContain(free.when.text);
+      expect(element.textContent).toContain(gated.text);
+      expect(element.textContent).toContain(free.text);
+    }
+  });
+
+  it("returns current-scene matches beside the search box and preserves their publication guard", () => {
+    const world = createRoomWorldStateV2("room-current-clue-search");
+    const modulePackage = floatingClueModuleFixture();
+    const submitConfirmed = vi.fn();
+    const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host" }, world, submitConfirmed } as unknown as RoomSessionV2;
+    render(<KeeperModuleWorkbenchV2 modulePackage={modulePackage} world={world} session={session} />);
+    fireEvent.change(screen.getByLabelText("搜索全部模组线索"), { target: { value: "倒放" } });
+    const results = screen.getByLabelText("模组线索搜索结果");
+    expect(within(results).getByText("核心 · 倒放的曲序")).toBeTruthy();
+    expect(within(results).queryByText("跨场景")).toBeNull();
+    expect(within(results).getByRole("button", { name: "先呈现这个场景" }).hasAttribute("disabled")).toBe(true);
+    expect(submitConfirmed).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("模组线索速查").compareDocumentPosition(screen.getByLabelText("向玩家呈现场景")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("marks a clue from another scene and requires explicit confirmation before publishing it", async () => {
@@ -1233,14 +1379,16 @@ describe("immersive V2 investigation workspace", () => {
     const session = { isHost: true, localSeat: { seatId: "seat-host", role: "host", displayName: "KP" }, world, submitConfirmed, isAuthenticated: true } as unknown as RoomSessionV2;
 
     render(<KeeperModuleWorkbenchV2 modulePackage={moduleFixture()} world={world} board={board} session={session} />);
+    await waitFor(() => expect((screen.getByLabelText("玩家可见介绍：沉默的演员") as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("玩家可见介绍：沉默的演员"), { target: { value: "一个浑身湿透、神情紧张的年轻演员。" } });
     fireEvent.click(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }));
 
-    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(submitConfirmed).toHaveBeenCalledOnce());
     expect(submitConfirmed.mock.calls[0]?.[0]).toMatchObject({
       type: "entity.upserted",
       payload: { entity: { kind: "npc", name: "沉默的演员", description: "一个浑身湿透、神情紧张的年轻演员。" } },
     });
-    expect(submitConfirmed.mock.calls[1]?.[0]).toMatchObject({
+    expect(submitConfirmed.mock.calls[0]?.[0]).toMatchObject({
       type: "entity.upserted",
       payload: { entity: { kind: "npc", data: { presentedInSceneEntityIds: [presentedScene.entityId] } } },
     });

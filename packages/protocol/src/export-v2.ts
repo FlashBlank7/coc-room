@@ -245,6 +245,14 @@ function renderFullEvent(event: RoomEventV2): RenderedEventV2 {
       };
     case "character.updated":
       return { ...base, label: "角色卡更新", paragraphs: [], fields: characterFields(event.payload.character) };
+    case "table.seat.updated":
+      return { ...base, label: "设置桌上座位", paragraphs: [event.payload.name], fields: [] };
+    case "table.seat.claimed":
+      return { ...base, label: "玩家入座", paragraphs: [], fields: [["座位", event.payload.tableSeatId]] };
+    case "table.seat.released":
+      return { ...base, label: "空出桌上座位", paragraphs: [], fields: [["座位", event.payload.tableSeatId]] };
+    case "table.seat.character.assigned":
+      return { ...base, label: event.payload.character ? "放置座位角色卡" : "取下座位角色卡", paragraphs: [], fields: event.payload.character ? characterFields(event.payload.character) : [] };
     case "check.requested":
       return {
         ...base,
@@ -331,7 +339,7 @@ function renderFullEvent(event: RoomEventV2): RenderedEventV2 {
       return {
         ...base,
         label: "房间设置更新",
-        paragraphs: [],
+        paragraphs: event.payload.characterBriefing ? [event.payload.characterBriefing.text] : [],
         fields: [["新内容默认可见范围", event.payload.defaultVisibility === "public" ? "公开" : "秘密"]],
       };
     case "entity.upserted": {

@@ -27,5 +27,26 @@ export function removeEntityAndReferences(
   }));
   next.keeperNotes = next.keeperNotes.map((item) => ({ ...item, relatedEntityIds: item.relatedEntityIds.filter((ref) => ref !== id) }));
   next.relations = next.relations.filter((relation) => relation.fromEntityId !== id && relation.toEntityId !== id);
+  if (next.keeperGuide) {
+    const guide = next.keeperGuide;
+    next.keeperGuide = {
+      ...guide,
+      clueTrail: guide.clueTrail.filter((step) => collection !== "scenes" || step.sceneId !== id).map((step) => ({ ...step,
+        keyClues: step.keyClues.filter((clue) => collection !== "clues" || clue.clueId !== id),
+      })),
+      ...(guide.preparation ? { preparation: { ...guide.preparation,
+        publicClues: guide.preparation.publicClues?.filter((clue) => collection !== "clues" || clue.clueId !== id),
+        cast: guide.preparation.cast.filter((npc) => collection !== "npcs" || npc.npcId !== id),
+        scenes: guide.preparation.scenes.filter((scene) => collection !== "scenes" || scene.sceneId !== id).map((scene) => ({ ...scene,
+          publicEntities: scene.publicEntities?.filter((entry) => !((collection === "npcs" && entry.kind === "npc") || (collection === "locations" && entry.kind === "location")) || entry.entityId !== id),
+          actions: scene.actions.map((action) => {
+            if (collection !== "suggestedChecks" || action.checkId !== id) return action;
+            const { checkId: _removed, ...rest } = action;
+            return rest;
+          }),
+        })),
+      } } : {}),
+    };
+  }
   return next;
 }

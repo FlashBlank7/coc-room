@@ -98,7 +98,21 @@ describe("TauriCharacterDraftExecutor", () => {
       error: { message: "possibly sensitive upstream error" },
     }]));
     await expect(executor.executeCharacterDraft(input(), new AbortController().signal))
-      .rejects.toThrow("角色草稿提供者失败，未生成替代内容");
+      .rejects.toThrow("角色生成失败，请检查 AI 服务后重试。（LOCAL_AI_FAILED）");
+  });
+
+  it.each([
+    ["CODEX_LOGIN_REQUIRED", "尚未登录"],
+    ["MISSING_CREDENTIAL", "DeepSeek API Key"],
+    ["INVALID_STRUCTURE", "角色资料格式不完整"],
+    ["INTERNAL_ERROR", "INTERNAL_ERROR"],
+  ])("explains %s without exposing provider details", async (code, expected) => {
+    const runWeb = vi.fn(async () => [{ type: "error", error: { code, message: "PRIVATE_PROMPT_OR_CREDENTIAL" } }]);
+    const executor = new TauriCharacterDraftExecutor(vi.fn(), runWeb);
+    const error = await executor.executeCharacterDraft(input(), new AbortController().signal).catch((cause) => cause as Error);
+    if (!(error instanceof Error)) throw new Error("Expected a failed character draft");
+    expect(error.message).toContain(expected);
+    expect(error.message).not.toContain("PRIVATE_PROMPT_OR_CREDENTIAL");
   });
 
   it("uses the fixed web-development action without exposing native controls", async () => {

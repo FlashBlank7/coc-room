@@ -21,6 +21,7 @@ interface AppState {
   rooms: RoomRecord[];
   modules: ModulePackageV1[];
   pendingRoomModule?: PendingRoomModule;
+  characterTableTarget?: { roomId: string; tableSeatId: string };
   currentRoom?: RoomRecord;
   events: RoomEventV1[];
   participants: ParticipantV1[];
@@ -29,6 +30,7 @@ interface AppState {
   connectionPhase: ConnectionPhase;
   connectionError?: string;
   setActiveView(view: AppView): void;
+  openTableCharacter(roomId: string, tableSeatId: string): void;
   setRelayUrl(value: string): void;
   setParserProvider(value: ModuleParserProvider): void;
   setCodexModel(value: string): void;
@@ -60,7 +62,8 @@ export const useAppStore = create<AppState>((set) => ({
   paths: {},
   relayConnected: false,
   connectionPhase: "idle",
-  setActiveView: (activeView) => set({ activeView }),
+  setActiveView: (activeView) => set({ activeView, ...(activeView === "characters" ? { characterTableTarget: undefined } : {}) }),
+  openTableCharacter: (roomId, tableSeatId) => set({ activeView: "characters", characterTableTarget: { roomId, tableSeatId } }),
   setRelayUrl: (relayUrl) => set({ relayUrl }),
   setParserProvider: (parserProvider) => set({ parserProvider }),
   setCodexModel: (codexModel) => set({ codexModel }),

@@ -706,6 +706,25 @@ def test_cache_reuses_validated_fragment_and_never_contains_key(tmp_path: Path) 
     assert secret not in cache_text
 
 
+def test_evidence_scene_links_survive_different_world_stage_labels() -> None:
+    from coc_module_parser.models import ClueV1, SuggestedCheckV1, CheckDifficulty
+    fragment = ModuleFragmentV1(
+        scenes=[SceneV1(id="office", title="Office", clue_ids=["Old newspaper"], suggested_check_ids=["心理学普通成功"]),
+                SceneV1(id="warehouse", title="Warehouse", suggested_check_ids=["普通心理学成功"])],
+        clues=[ClueV1(id="report", title="Accident report", content="Read without a roll", scene_ids=["office"])],
+        suggested_checks=[SuggestedCheckV1(id="office-psych", skill="心理学", scene_id="office", success="Only knows he is hiding something"),
+                          SuggestedCheckV1(id="warehouse-psych", skill="心理学", scene_id="warehouse", difficulty=CheckDifficulty.HARD, success="Different person's reaction")],
+    )
+    result = ModuleParser(SequenceExtractor([fragment])).parse(ParseConfig(source_text="test", mock=True))
+    office, warehouse = result.module.scenes
+    assert office.clue_ids == [result.module.clues[0].id]
+    checks = {check.id: check for check in result.module.suggested_checks}
+    assert len(checks) == 2
+    assert [checks[id].success for id in office.suggested_check_ids] == ["Only knows he is hiding something"]
+    assert [checks[id].success for id in warehouse.suggested_check_ids] == ["Different person's reaction"]
+    assert checks[warehouse.suggested_check_ids[0]].difficulty == CheckDifficulty.HARD
+
+
 def test_non_cacheable_extractor_never_reuses_an_implicit_provider_default(
     tmp_path: Path,
 ) -> None:

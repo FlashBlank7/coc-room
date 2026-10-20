@@ -189,6 +189,8 @@ function validateEnvelope(
     ? "角色草稿生成失败，未创建替代内容"
     : route === "npc-stats-draft"
       ? "NPC 属性草稿生成失败，未修改人物"
+      : route === "keeper-guide"
+        ? "主持引导生成失败，已整理资料仍保留"
       : route === "image-generation"
         ? "图片生成失败，未产生草稿"
         : route === "image-capabilities"
@@ -205,6 +207,8 @@ function validateEnvelope(
 
 function publicHttpErrorMessage(code: string): string {
   switch (code) {
+    case "INVALID_BRIDGE_SESSION": return "本地 AI 开发会话已过期，请刷新页面后重新生成。（INVALID_BRIDGE_SESSION）";
+    case "BRIDGE_INTERNAL_ERROR": return "本地 AI 服务发生内部错误，请重试；若仍失败，请反馈错误码 BRIDGE_INTERNAL_ERROR。";
     case "LOCAL_AI_BUSY": return "已有本地 AI 任务正在运行";
     case "DEEPSEEK_KEY_MISSING": return "请先在桌面设置中保存 DeepSeek Key";
     case "CODEX_NOT_FOUND": return "未找到本机 Codex CLI";

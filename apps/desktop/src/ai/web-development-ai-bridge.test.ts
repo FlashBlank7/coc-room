@@ -122,6 +122,21 @@ describe("web development AI bridge client", () => {
       .rejects.toThrow("开发会话");
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [403, "INVALID_BRIDGE_SESSION", "刷新页面后重新生成"],
+    [500, "BRIDGE_INTERNAL_ERROR", "本地 AI 服务发生内部错误"],
+  ])("explains HTTP %s (%s) without exposing upstream details", async (status, code, instruction) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code, message: "PRIVATE_PROMPT_OR_CREDENTIAL" },
+    }), { status })));
+    const error = await runWebDevelopmentAiTask("character-draft", request, new AbortController().signal)
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(WebDevelopmentAiBridgeError);
+    expect(error).toMatchObject({ code, message: expect.stringContaining(instruction) });
+    expect((error as Error).message).toContain(code);
+    expect((error as Error).message).not.toContain("PRIVATE_PROMPT_OR_CREDENTIAL");
+  });
 });
 
 function resultEvent() {

@@ -13,6 +13,11 @@ import { isRoomHostAvailable } from "../lib/room-availability";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
+import { CharacterCreationGuidance } from "../components/characters/CharacterCreationGuidance";
+import { CharacterSkillAllocationFields, CharacterSkillBudgetEditor } from "../components/characters/CharacterSkillAllocation";
+import { allocateExistingSkillValues, applyOccupationProfile, enableSkillAllocation, occupationProfiles, recalculateAllocatedSkills, updateLinkedSkillBases } from "../lib/character-skill-allocation";
+import { auditCharacterCreation, characterPromptWithBriefing, currentCharacterBriefing } from "../lib/character-creation-guidance";
+import { cardForTable, prepareGeneratedCharacter } from "../lib/table-seating";
 import { createCoccharPackage, parseCoccharPackage } from "../lib/cocchar-package";
 import { downloadBytesInBrowser } from "../lib/browser-download";
 import {
@@ -89,13 +94,8 @@ interface RecoverableCharacterDraftV1 {
   baseRoomUpdatedAt?: string | null | "unknown";
 }
 
-export interface HostCharacterDraftRequest {
-  jobId: string;
-  requesterSeatId: string;
-  requesterName: string;
-  playerName: string;
-  prompt: string;
-}
+export type { HostCharacterDraftRequest } from "../components/characters/HostCharacterRequests";
+import { HostCharacterRequests, type HostCharacterDraftRequest } from "../components/characters/HostCharacterRequests";
 
 export function CharactersView({
   session,
@@ -120,6 +120,9 @@ export function CharactersView({
 }) {
   const events = useAppStore((state) => state.events);
   const currentRoom = useAppStore((state) => state.currentRoom);
+  const characterTableTarget = useAppStore((state) => state.characterTableTarget);
+  const targetTableId = characterTableTarget?.roomId === currentRoom?.id ? characterTableTarget?.tableSeatId : undefined;
+  const targetTableSeat = targetTableId ? worldV2?.tableSeats?.get(targetTableId) : undefined;
   const participants = useAppStore((state) => state.participants);
   const paths = useAppStore((state) => state.paths);
   const sessionV2 = session instanceof RoomSessionV2 ? session : undefined;
@@ -130,7 +133,7 @@ export function CharactersView({
     ? currentRoom?.localSeatId ?? sessionV2?.localSeat.seatId
     : currentRoom?.localPeerId;
   const effectiveLocalOwnerId = localOwnerId ?? personalDraftOwnerRef.current;
-  const draftStorageScope = characterDraftStorageScope(currentRoom?.id, localOwnerId);
+  const draftStorageScope = characterDraftStorageScope(currentRoom?.id, localOwnerId) + (targetTableId ? `:table:${targetTableId}` : "");
   const draftStorageKey = characterDraftStorageKey(draftStorageScope);
   const displayName = sessionV2?.localSeat.displayName ?? sessionV1?.participant.displayName ?? "调查员";
   const roomCharacters = useMemo(() => {
@@ -143,20 +146,28 @@ export function CharactersView({
   }, [events, isV2, worldV2]);
   const [personalCharacters, setPersonalCharacters] = useState<PersonalCharacterV2[]>([]);
   const [personalLibraryReady, setPersonalLibraryReady] = useState(false);
+  const [personalLibraryReadError, setPersonalLibraryReadError] = useState<string>();
   const characters = useMemo(() => {
     const merged = new Map(personalCharacters.map((record) => [record.characterId, record.character]));
     for (const character of roomCharacters) merged.set(character.id, character);
     return [...merged.values()];
   }, [personalCharacters, roomCharacters]);
-  const ownRoomCharacter = roomCharacters.find((character) => character.ownerPeerId === localOwnerId);
+  const ownRoomCharacter = targetTableId
+    ? roomCharacters.find((character) => character.id === targetTableSeat?.characterId)
+    : roomCharacters.find((character) => character.ownerPeerId === localOwnerId && (!worldV2?.tableSeats?.size || [...worldV2.tableSeats.values()].some((seat) => seat.characterId === character.id)));
   const own = ownRoomCharacter
-    ?? personalCharacters.find((record) => record.character.ownerPeerId === localOwnerId)?.character;
+    ?? (targetTableId ? undefined : personalCharacters.find((record) => record.character.ownerPeerId === localOwnerId)?.character);
   const [draft, setDraft] = useState<Coc7Character>(() => own ?? createCharacter(
     effectiveLocalOwnerId,
     displayName,
   ));
   const [draftContextScope, setDraftContextScope] = useState(draftStorageScope);
-  const [privateNotes, setPrivateNotes] = useState("");
+  const [privateNotes, setPrivateNotesState] = useState("");
+  const privateNotesInitializedRef = useRef(false);
+  const setPrivateNotes = (value: string) => {
+    privateNotesInitializedRef.current = true;
+    setPrivateNotesState(value);
+  };
   const [cleanSnapshot, setCleanSnapshot] = useState<string | undefined>(() => characterDraftSnapshot(draft, ""));
   const [pendingRoomSnapshot, setPendingRoomSnapshot] = useState<string>();
   const [error, setError] = useState<string>();
@@ -273,14 +284,24 @@ export function CharactersView({
     }
   };
   const selectedRoomCharacter = roomCharacters.find((character) => character.id === draft.id);
+  const [skillEditMode, setSkillEditMode] = useState<"creation" | "current">();
+  useEffect(() => setSkillEditMode(undefined), [draft.id, targetTableId]);
+  const roomCardStillUsesCreationValues = selectedRoomCharacter?.creation && selectedRoomCharacter.skills.every((skill) => {
+    const points = selectedRoomCharacter.creation!.allocations[skill.id];
+    return skill.value === skill.baseValue + (points?.occupation ?? 0) + (points?.interest ?? 0);
+  });
+  const editingCreation = !selectedRoomCharacter || (skillEditMode ?? (targetTableId && roomCardStillUsesCreationValues ? "creation" : "current")) === "creation";
+  const needsTablePlacement = Boolean(worldV2?.tableSeats?.size && !targetTableSeat
+    && ![...worldV2.tableSeats.values()].some((seat) => seat.characterId === draft.id));
   const isLocallyOwnedDraft = !currentRoom
+    || Boolean(targetTableSeat && sessionV2?.isHost)
     || draft.ownerPeerId === effectiveLocalOwnerId
     || draft.ownerPeerId === localOwnerId
     || Boolean(selectedPersonalRecord);
   const roomSnapshot = selectedRoomCharacter ? roomCharacterSnapshot(selectedRoomCharacter) : undefined;
   const roomNeedsSync = Boolean(
     currentRoom
-      && roomCharacterSnapshot(draft) !== (pendingRoomSnapshot ?? roomSnapshot),
+      && (roomCharacterSnapshot(draft) !== (pendingRoomSnapshot ?? roomSnapshot) || (targetTableSeat && targetTableSeat.characterId !== draft.id)),
   );
   const roomVersionConflict = Boolean(
     currentRoom
@@ -306,7 +327,9 @@ export function CharactersView({
     && skill.name.trim() !== "新技能"
     && skill.value > 0
   ));
-  const characterReady = identityReady && attributesReady && skillsReady;
+  const characterBriefing = currentCharacterBriefing(worldV2);
+  const characterAudit = auditCharacterCreation(draft, characterBriefing);
+  const characterReady = identityReady && attributesReady && skillsReady && characterAudit.issues.length === 0;
   const backgroundStarted = Object.values(draft.background).some((value) => value.trim().length > 0);
   const hasActiveStatus = Object.values(draft.status).some(Boolean);
   const awaitingPersonalLibrary = Boolean(
@@ -333,6 +356,7 @@ export function CharactersView({
       ? { href: "#character-attributes", label: "检查九项属性", detail: "按本团采用的车卡方式填写数值。" }
       : !skillsReady
         ? { href: "#character-skills", label: "添加常用技能", detail: "至少添加一项你最常使用的技能。" }
+        : characterAudit.issues.length > 0 ? { href: "#character-group-guidance", label: "先完成本团车卡要求", detail: characterAudit.issues[0]! }
         : {
             href: "#character-save-actions",
             label: currentRoom ? "可以带入房间" : "基本资料可以保存",
@@ -342,7 +366,9 @@ export function CharactersView({
   const roomPaused = Boolean(
     currentRoom && sessionV1 && !isRoomHostAvailable(currentRoom, participants, paths[currentRoom.hostPeerId]),
   );
-  const hasEditPermission = !currentRoom || isLocallyOwnedDraft || Boolean(session && !roomPaused && session.isHost);
+  const hasEditPermission = targetTableId
+    ? Boolean(targetTableSeat && (sessionV2?.isHost || targetTableSeat.occupantSeatId === localOwnerId))
+    : !currentRoom || isLocallyOwnedDraft || Boolean(session && !roomPaused && session.isHost);
   const canEdit = hasEditPermission && !recoverableDraft && savingTarget === undefined;
 
   const refreshPersonalLibrary = async () => {
@@ -353,15 +379,25 @@ export function CharactersView({
     return records;
   };
 
-  useEffect(() => {
-    void refreshPersonalLibrary().catch((cause) => {
-      setPersonalLibraryReady(true);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    });
-  }, []);
+  const loadInitialPersonalLibrary = async () => {
+    setPersonalLibraryReadError(undefined);
+    try {
+      const records = await refreshPersonalLibrary();
+      const record = records.find((item) => item.characterId === draft.id);
+      if (!record || privateNotesInitializedRef.current || liveDraftRef.current.id !== draft.id || recoverableDraft) return;
+      setPrivateNotes(record.privateNotes);
+      setCleanSnapshot((current) => current === characterDraftSnapshot(draft, "")
+        ? characterDraftSnapshot(draft, record.privateNotes)
+        : current);
+    } catch (cause) {
+      setPersonalLibraryReadError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  useEffect(() => { void loadInitialPersonalLibrary(); }, []);
 
   useEffect(() => {
-    if (!personalLibraryReady || !currentRoom || autoSelectedForRoomRef.current === currentRoom.id) return;
+    if (targetTableId || !personalLibraryReady || !currentRoom || autoSelectedForRoomRef.current === currentRoom.id) return;
     autoSelectedForRoomRef.current = currentRoom.id;
     if (session?.isHost || selectedRoomCharacter || selectedPersonalRecord || dirty) return;
     const recent = personalCharacters[0];
@@ -372,7 +408,7 @@ export function CharactersView({
     setPendingRoomSnapshot(undefined);
     setRoomEditBaseUpdatedAt(roomCharacters.find((character) => character.id === recent.characterId)?.updatedAt ?? null);
     setError(undefined);
-  }, [currentRoom, dirty, personalCharacters, personalLibraryReady, roomCharacters, selectedPersonalRecord, selectedRoomCharacter, session?.isHost]);
+  }, [currentRoom, dirty, personalCharacters, personalLibraryReady, roomCharacters, selectedPersonalRecord, selectedRoomCharacter, session?.isHost, targetTableId]);
 
   useEffect(() => {
     draftStorageKeyRef.current = draftStorageKey;
@@ -548,10 +584,10 @@ export function CharactersView({
   };
 
   const updateCharacteristic = (key: CharacteristicKey, value: number) => {
-    editDraft((current) => ({
-      ...current,
-      characteristics: { ...current.characteristics, [key]: value },
-    }), true);
+    editDraft((current) => {
+      const updated = { ...current, characteristics: { ...current.characteristics, [key]: value } };
+      return editingCreation ? updateLinkedSkillBases(updated) : updated;
+    }, true);
   };
 
   const updateCurrentResource = (key: CurrentResourceKey, value: number) => {
@@ -586,16 +622,17 @@ export function CharactersView({
   };
 
   const updateSkill = (id: string, update: (skill: Skill) => Skill) => {
-    editDraft((current) => ({
-      ...current,
-      skills: current.skills.map((skill) => skill.id === id ? update(skill) : skill),
-    }), true);
+    editDraft((current) => {
+      const next = { ...current, skills: current.skills.map((skill) => skill.id === id ? update(skill) : skill) };
+      return editingCreation && next.skills.find((skill) => skill.id === id)?.baseValue !== current.skills.find((skill) => skill.id === id)?.baseValue ? recalculateAllocatedSkills(next, id) : next;
+    }, true);
   };
 
   const removeSkill = (id: string) => {
     editDraft((current) => ({
       ...current,
       skills: current.skills.filter((skill) => skill.id !== id),
+      ...(current.creation ? { creation: { ...current.creation, occupationSkillIds: current.creation.occupationSkillIds.filter((skillId) => skillId !== id), allocations: Object.fromEntries(Object.entries(current.creation.allocations).filter(([skillId]) => skillId !== id)) } } : {}),
     }), true);
   };
 
@@ -649,7 +686,7 @@ export function CharactersView({
   };
 
   const saveToPersonalLibrary = async () => {
-    if (saveInFlightRef.current) return;
+    if (saveInFlightRef.current || !personalLibraryReady) return;
     const submittedSnapshot = characterDraftSnapshot(draft, privateNotes);
     checkpointCurrentDraft();
     saveInFlightRef.current = true;
@@ -676,19 +713,24 @@ export function CharactersView({
   };
 
   const saveToCurrentRoom = async () => {
-    if (saveInFlightRef.current) return;
+    if (saveInFlightRef.current || !personalLibraryReady) return;
     const submittedSnapshot = characterDraftSnapshot(draft, privateNotes);
     checkpointCurrentDraft();
     saveInFlightRef.current = true;
     setSavingTarget("room");
     try {
       if (!currentRoom || !session) throw new Error("当前没有可加入的房间");
+      if (needsTablePlacement) throw new Error("请先保存到我的角色库，再回到现场选择座位放卡。");
+      if (targetTableId && (!targetTableSeat || (!session.isHost && targetTableSeat.occupantSeatId !== localOwnerId))) throw new Error("这个座位已不属于你，请回到现场重新选择座位。");
       if (roomPaused) throw new Error("房主当前离线，房间已暂停");
       if (!session.isHost && !isLocallyOwnedDraft) throw new Error("玩家只能把自己的角色带入房间");
       if (roomVersionConflict) throw new Error("房间里的角色卡已经更新，不能用旧编辑稿直接覆盖。请先备份草稿，再改用房间最新版。");
-      if (!selectedRoomCharacter && !characterReady) throw new Error("请先填写姓名、职业、属性和至少一项常用技能");
-      const character = prepareCharacterForSave(true);
-      if (sessionV2) {
+      if (!selectedRoomCharacter && !characterReady) throw new Error(characterAudit.issues[0] ?? "请先填写姓名、职业、属性和至少一项常用技能");
+      const prepared = prepareCharacterForSave(true);
+      const character = targetTableSeat && worldV2 ? cardForTable(prepared, targetTableSeat, worldV2) : prepared;
+      if (sessionV2 && targetTableSeat) {
+        await sessionV2.submitConfirmed({ type: "table.seat.character.assigned", audience: { kind: "room" }, payload: { tableSeatId: targetTableSeat.tableSeatId, character } });
+      } else if (sessionV2) {
         await sessionV2.submitConfirmed({
           type: "character.updated",
           audience: { kind: "room" },
@@ -710,7 +752,7 @@ export function CharactersView({
       setRoomEditBaseUpdatedAt(character.updatedAt);
       dirtyRef.current = false;
       setError(undefined);
-      if (!session.isHost) {
+      if (!session.isHost || targetTableSeat) {
         saveInFlightRef.current = false;
         setSavingTarget(undefined);
         useAppStore.getState().setActiveView("room");
@@ -744,7 +786,7 @@ export function CharactersView({
       setAiBusy(true);
       setError(undefined);
       setAiDraftNotice(undefined);
-      const generated = coc7CharacterSchema.parse(await requestCharacterDraft(aiPrompt, displayName));
+      const generated = prepareGeneratedCharacter(await requestCharacterDraft(characterPromptWithBriefing(aiPrompt, characterBriefing), displayName), characterBriefing);
       setDraft(generated);
       setPrivateNotes("");
       setCleanSnapshot(undefined);
@@ -873,7 +915,9 @@ export function CharactersView({
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-[.3em] text-brass">调查员档案</p>
-              <h1 className="mt-2 font-serif text-3xl">我的调查员</h1>
+              <h1 className="mt-2 font-serif text-3xl">{targetTableSeat ? `${targetTableSeat.name} · 调查员` : "我的调查员"}</h1>
+              {targetTableSeat && <p className="mt-2 text-sm text-zinc-400">完成后可保存到这个座位，同时保留在你的角色库。只保存到角色库时，座位上的卡不会改变。</p>}
+              {targetTableId && !hasEditPermission && <p role="alert" className="mt-2 text-sm text-amber-300">这个座位已不属于你，请回到现场选择座位。未保存的编辑稿仍保留在本机。</p>}
               <p className="mt-1 text-sm text-zinc-400">
                 先填姓名、属性和常用技能，再按本团规则与 KP 核对；背景与装备可以边玩边补。
               </p>
@@ -1005,24 +1049,9 @@ export function CharactersView({
               </details>
             )}
 
-            {isV2 && sessionV2?.isHost && hostCharacterRequests.length > 0 && (
-              <Section title="AI 车卡申请" description="玩家想借用你这台机器的 AI 生成角色卡。同意后立即开始生成，结果直接交给玩家；生成出什么样的角色由玩家自己决定。">
-                <div className="grid gap-2">{hostCharacterRequests.map((request) => <div key={request.jobId} className="grid gap-2 rounded-lg border border-amber-900/60 bg-amber-950/10 p-3 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <b>{request.requesterName}{request.playerName !== request.requesterName ? `（${request.playerName}）` : ""}</b>
-                    <div className="flex gap-2">
-                      <Button onClick={() => onApproveHostCharacterRequest?.(request.jobId)}>同意并开始生成</Button>
-                      <Button variant="ghost" onClick={() => onRejectHostCharacterRequest?.(request.jobId)}>拒绝</Button>
-                    </div>
-                  </div>
-                  <details>
-                    <summary className="cursor-pointer text-xs text-zinc-500">想生成：{Array.from(request.prompt).slice(0, 80).join("")}{Array.from(request.prompt).length > 80 ? "…" : ""}</summary>
-                    <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-zinc-400">{request.prompt}</p>
-                  </details>
-                </div>)}</div>
-              </Section>
-            )}
+            {isV2 && sessionV2?.isHost && <HostCharacterRequests requests={hostCharacterRequests} onApprove={onApproveHostCharacterRequest} onReject={onRejectHostCharacterRequest} />}
 
+            {!editingCreation ? <details className="rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-xs text-zinc-400">查看车卡时的点数参考</summary><p className="my-2 text-xs text-zinc-400">当前值可能包含成长或剧情变化。以下按当前属性核算，不限制本次修改。</p><CharacterCreationGuidance character={draft} briefing={characterBriefing} /></details> : <CharacterCreationGuidance character={draft} briefing={characterBriefing} />}
             <Section id="character-identity" title="1. 我是谁">
               {(avatarUrl || portraitAuthorization) && <div className="mb-4 flex flex-wrap items-start gap-4 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
                 {avatarUrl
@@ -1126,6 +1155,8 @@ export function CharactersView({
             </Section>
 
             <Section id="character-skills" title="3. 常用技能" description="先添加跑团中最常用的技能即可；克苏鲁神话技能会自动降低最大理智。">
+              {selectedRoomCharacter && <div className="mb-4 grid gap-2 rounded border border-zinc-700 p-3 text-sm"><label>技能编辑方式<select aria-label="技能编辑方式" className="ml-2 rounded bg-zinc-900 p-2" disabled={!canEdit} value={editingCreation ? "creation" : "current"} onChange={(event) => setSkillEditMode(event.target.value as "creation" | "current")}><option value="creation">车卡分配 · 调整职业点与兴趣点</option><option value="current">跑团当前值 · 记录成长与剧情变化</option></select></label><p className="text-xs text-zinc-400">切换不会改变现有数值。调整车卡投入会重算对应技能；有成长记录时，请保留当前值或核对后再调整。</p></div>}
+              {editingCreation && <CharacterSkillBudgetEditor character={draft} briefing={characterBriefing} disabled={!canEdit} onChange={(character) => editDraft(() => character, true)} />}
               <div className="grid gap-3">
                 {draft.skills.map((skill) => (
                   <div key={skill.id} className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 md:grid-cols-2 xl:grid-cols-[minmax(9rem,1.5fr)_minmax(8rem,1fr)_7rem_7rem_auto_auto] xl:items-end">
@@ -1147,11 +1178,11 @@ export function CharactersView({
                         })}
                       />
                     </Field>
-                    <Field label="基础值">
-                      <Input disabled={!canEdit} type="number" min={0} max={100} value={skill.baseValue} onChange={(event) => updateSkill(skill.id, (current) => ({ ...current, baseValue: clampInteger(Number(event.target.value), 0, 100) }))} />
+                    <Field label="基础值" hint={skill.baseSource ? `随${skill.baseSource === "edu" ? "教育" : "敏捷的一半"}更新；手动填写后按房规保留` : undefined}>
+                      <Input disabled={!canEdit} type="number" min={0} max={100} value={skill.baseValue} onChange={(event) => updateSkill(skill.id, (current) => { const { baseSource: _linked, ...manual } = current; return { ...manual, baseValue: clampInteger(Number(event.target.value), 0, 100) }; })} />
                     </Field>
                     <Field label="当前值">
-                      <Input disabled={!canEdit} type="number" min={0} max={100} value={skill.value} onChange={(event) => updateSkill(skill.id, (current) => ({ ...current, value: clampInteger(Number(event.target.value), 0, 100) }))} />
+                      <Input disabled={!canEdit || (Boolean(draft.creation) && editingCreation)} type="number" min={0} max={100} value={skill.value} onChange={(event) => updateSkill(skill.id, (current) => ({ ...current, value: clampInteger(Number(event.target.value), 0, 100) }))} />
                     </Field>
                     <label className="flex h-10 items-center gap-2 text-sm text-zinc-300">
                       <input disabled={!canEdit} type="checkbox" checked={skill.checked} onChange={(event) => updateSkill(skill.id, (current) => ({ ...current, checked: event.target.checked }))} />
@@ -1160,6 +1191,7 @@ export function CharactersView({
                     <Button disabled={!canEdit} type="button" variant="ghost" className="px-3 text-red-300" aria-label={`删除技能 ${skill.name}`} onClick={() => removeSkill(skill.id)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
+                    {editingCreation && <CharacterSkillAllocationFields character={draft} skillId={skill.id} disabled={!canEdit} onChange={(character) => editDraft(() => character, true)} />}
                   </div>
                 ))}
                 {draft.skills.length === 0 && (
@@ -1242,7 +1274,7 @@ export function CharactersView({
             <Section title="只给自己看的笔记" description="不会发给房主或其他玩家；备份角色时会一起保存。" collapsible defaultOpen={privateNotes.trim().length > 0}>
               <Field label="仅自己可见">
                 <Textarea
-                  disabled={!canEdit || !isLocallyOwnedDraft}
+                  disabled={!canEdit || !isLocallyOwnedDraft || !personalLibraryReady}
                   maxLength={100_000}
                   className="min-h-40"
                   value={privateNotes}
@@ -1257,7 +1289,7 @@ export function CharactersView({
                   <Button
                     variant={currentRoom ? "secondary" : "primary"}
                     onClick={() => void saveToPersonalLibrary()}
-                    disabled={!canEdit || !personalNeedsSave}
+                    disabled={!canEdit || !personalNeedsSave || !personalLibraryReady}
                   >
                     {savingTarget === "personal" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}{savingTarget === "personal" ? "正在保存到角色库…" : "保存到我的角色库"}
                   </Button>
@@ -1265,10 +1297,10 @@ export function CharactersView({
                 {currentRoom && (
                   <Button
                     onClick={() => void saveToCurrentRoom()}
-                    disabled={!canEdit || !session || roomPaused || roomVersionConflict || !roomNeedsSync || (!selectedRoomCharacter && !characterReady)}
+                    disabled={!canEdit || !session || roomPaused || roomVersionConflict || needsTablePlacement || !roomNeedsSync || !personalLibraryReady || (!selectedRoomCharacter && !characterReady)}
                   >
                     {savingTarget === "room" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                    {savingTarget === "room" ? "正在等待房间确认…" : selectedRoomCharacter
+                    {savingTarget === "room" ? "正在等待房间确认…" : targetTableSeat ? "保存到座位并回到现场" : selectedRoomCharacter
                       ? session && !session.isHost && isLocallyOwnedDraft ? "更新并回到现场" : "更新当前房间角色卡"
                       : session && !session.isHost ? "带入并回到现场" : "带入当前房间"}
                   </Button>
@@ -1276,11 +1308,15 @@ export function CharactersView({
                 {dirty && canEdit && <span className="text-sm text-amber-200">有尚未保存的修改</span>}
                 {error && <span className="max-w-2xl text-sm text-red-400">{error}</span>}
               </div>
+              {!personalLibraryReady && (personalLibraryReadError
+                ? <div role="alert" className="text-sm text-amber-200">本机角色库读取失败，当前修改仍保留：{personalLibraryReadError}<Button variant="secondary" onClick={() => void loadInitialPersonalLibrary()}>重试读取角色库</Button></div>
+                : <p role="status" className="text-sm text-zinc-400">正在读取本机角色库；读取完成后即可保存。</p>)}
               {currentRoom && isLocallyOwnedDraft && (
                 <p className="text-xs text-zinc-500">
                   “保存到我的角色库”只存本机；“{selectedRoomCharacter ? "更新房间角色卡" : "带入房间"}”会让团友看到角色卡，但私密笔记始终只留给你。
                 </p>
               )}
+              {needsTablePlacement && <p className="text-sm text-brass">这张卡尚未选择座位。先保存到我的角色库，再回到现场，在座位上选择这张卡即可。</p>}
             </div>
           </Panel>
         </div>
@@ -1401,6 +1437,7 @@ function commonInvestigationSkills(dexterity: number): Skill[] {
     id: `skill-${crypto.randomUUID()}`,
     name,
     baseValue: value,
+    ...(name === "闪避" ? { baseSource: "half-dex" as const } : {}),
     value,
     checked: false,
   }));

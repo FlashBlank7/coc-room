@@ -198,6 +198,11 @@ class SceneV1(StrictModel):
     id: str = Field(pattern=ENTITY_ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
     summary: str = Field(default="", max_length=100_000)
+    player_description: str | None = Field(
+        default=None,
+        max_length=8_000,
+        description="Player-safe opening draft: only immediately perceptible facts, never the plot summary, secrets, future events or NPC motives. Null if unsupported.",
+    )
     location_ids: list[str] = Field(default_factory=list)
     npc_ids: list[str] = Field(default_factory=list)
     clue_ids: list[str] = Field(default_factory=list)

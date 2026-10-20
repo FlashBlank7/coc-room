@@ -1,0 +1,509 @@
+{
+  "generatedAt": "2026-10-11T23:16:15.947307+00:00",
+  "method": "Live provider generation plus independent automated reading, not human playtest.",
+  "note": "All retained runs included. Resumed runs can contain earlier prompts. Acceptance snapshots are independent of later checkpoint updates. Completed-call seconds exclude failed/cancelled calls and are not token usage or billing.",
+  "runs": [
+    {
+      "run": "butterfly-final",
+      "stage": "draft",
+      "runStatus": {
+        "at": "2026-10-11T23:08:24.4006434Z",
+        "reason": "User requested two simpler modes for KP reference; stopped further repeat validation and retained completed material.",
+        "kind": "stopped-after-scope-change"
+      },
+      "sourceSceneCount": 14,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": false,
+      "checkpointSha256": "147db404387b958cbc48799e959ba15e1e4d59eeb7e64b9f8a890b819bdcd3a9",
+      "recordedCompletedCalls": 8,
+      "completedCallSeconds": 1397.9,
+      "repairCalls": 1,
+      "patchCalls": 1,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 3,
+      "acceptance": [
+        {
+          "path": "butterfly-final/acceptance-opening/report.json",
+          "passed": 5,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "11d0658512b0aaf21edc8d95ed7d35081d500634f56f2e57e396412c631f5c39"
+        }
+      ]
+    },
+    {
+      "run": "butterfly-fresh",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 14,
+      "preparedSceneCount": 14,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "1b06b4c2181cb9324a0e74bd58f92b5340399011646159b751977b278ea6d43e",
+      "recordedCompletedCalls": 34,
+      "completedCallSeconds": 4946.3,
+      "repairCalls": 7,
+      "patchCalls": 3,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 4,
+      "acceptance": [
+        {
+          "path": "butterfly-fresh/acceptance/report.json",
+          "passed": 9,
+          "total": 10,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": false,
+          "failures": [
+            {
+              "id": "truth",
+              "passed": false,
+              "reason": "遗漏召唤失败时借调查员公开姐姐悲剧与吉原黑暗的退路；参考已有该信息。"
+            }
+          ],
+          "readerInputSha256": "a1f2fdc21834be9fad4c88bbc43c7cd6bb6b3e68165b98aab5407ece5ff3c84f"
+        },
+        {
+          "path": "butterfly-fresh/acceptance-book-patch/report.json",
+          "passed": 10,
+          "total": 10,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "edf05e9467d175cb0916f32e469f7d1369b6c49ae3837070550814e08648655a"
+        },
+        {
+          "path": "butterfly-fresh/acceptance-book-patch-opening/report.json",
+          "passed": 5,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "c34aec56de861f8e23d9b5c00230193e0618e0474bfa8510d5c890bada769989"
+        },
+        {
+          "path": "butterfly-fresh/acceptance-opening/report.json",
+          "passed": 3,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": false,
+          "failures": [
+            {
+              "id": "reverse-route",
+              "passed": false,
+              "reason": "正确保留祝福与猫咪幻境的限制，补救也标为建议；但未给出柳生、花簪等实际调查接续，并坦承普通调查细节缺失，未达到可直接主持的要求。"
+            },
+            {
+              "id": "psychology",
+              "passed": false,
+              "reason": "正确保留真实悲伤及只能察觉隐瞒的公开限制；但将“全部是真的”缩限为案情陈述，拆开否认认识男人的回答，未保留原文与合谋事实的矛盾，也未将这种处理标为主持建议。"
+            }
+          ],
+          "readerInputSha256": "0fcbb7ec895307e9acd4042aa09de58dec38c3f90242a6af83a3a8a61506f2ed"
+        },
+        {
+          "path": "butterfly-fresh/acceptance-opening-final/report.json",
+          "passed": 4,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": true,
+          "failures": [
+            {
+              "id": "opening",
+              "passed": false,
+              "reason": "朗读段、死者不在场及不提前呈现失踪痕迹均正确，但将弥生和教授是否在场说成未说明，未明确他们只是恩客信息、初见时不在场，现场裁定不完整。"
+            }
+          ],
+          "readerInputSha256": "9065b067bda75eb27ea7f1b760262151602bfdd8a1321e648faf57e37cd955d9"
+        },
+        {
+          "path": "butterfly-fresh/acceptance-opening-followup/report.json",
+          "passed": 1,
+          "total": 1,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "837d8b3ec6e5324ff7d705fb7cd2191f185e0a0442034dbcef2f240e36b5417f"
+        }
+      ]
+    },
+    {
+      "run": "butterfly-r1",
+      "stage": "repair",
+      "runStatus": {
+        "status": "diagnostic-run-stopped",
+        "reason": "This old-input run diagnosed and verified the HTTP timeout fix, including a successful 600-second repair response. Stopped after four committed scenes to avoid a third duplicate full run; butterfly-r2 and butterfly-fresh continue for full content acceptance.",
+        "notACompletedQualitySample": true
+      },
+      "sourceSceneCount": 13,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": false,
+      "checkpointSha256": "25dd1aba3ffc9981a3b89b7a7073a89144d4d9afca31eebf7d48711277950663",
+      "recordedCompletedCalls": 11,
+      "completedCallSeconds": 2340.0,
+      "repairCalls": 1,
+      "patchCalls": 0,
+      "errorCount": 2,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 9,
+      "acceptance": []
+    },
+    {
+      "run": "butterfly-r2",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 13,
+      "preparedSceneCount": 13,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "182385f5324436f92890aa63851212612d38c30b1d270d4abbe9f7b169f0f35f",
+      "recordedCompletedCalls": 39,
+      "completedCallSeconds": 6253.7,
+      "repairCalls": 10,
+      "patchCalls": 2,
+      "errorCount": 3,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 9,
+      "acceptance": [
+        {
+          "path": "butterfly-r2/acceptance/report.json",
+          "passed": 9,
+          "total": 10,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": false,
+          "failures": [
+            {
+              "id": "alias",
+              "passed": false,
+              "reason": "身份披露门槛正确，但遗漏父亲是漆器匠这一家庭出身信息；姐姐继承手艺不能替代明确交代父亲职业。"
+            }
+          ],
+          "readerInputSha256": "e136f5d84c467bff3d42a1a40000a2e4ecbae4599a24d6bdaa62f215cc98cea5"
+        },
+        {
+          "path": "butterfly-r2/acceptance-opening/report.json",
+          "passed": 3,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": false,
+          "failures": [
+            {
+              "id": "opening",
+              "passed": false,
+              "reason": "朗读稿添加“同样受邀前来的几人”，暗示另有受邀者在场；原文的“几人见面”未提供这些额外人物。其余人物状态及失踪后痕迹的时序正确。"
+            },
+            {
+              "id": "reverse-route",
+              "passed": false,
+              "reason": "正确保留祝福与猫咪幻境限制，也标明了补救建议，但只笼统说核对桃子案件，未给出通过柳生、花簪等实际调查继续推进的可主持接续。"
+            }
+          ],
+          "readerInputSha256": "fa7a380c1a79301338bb0d65cd2060f5d011578c2034bdb2674bdf816c0f9608"
+        },
+        {
+          "path": "butterfly-r2/acceptance-opening-final/report.json",
+          "passed": 5,
+          "total": 5,
+          "readingScope": "start page and opening scene",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "3e4db7ca4aabee551e8356159fdcc62133be077cb801f7f7bc449cef79301282"
+        }
+      ]
+    },
+    {
+      "run": "tide-r1",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "b8ebbe825542df8e5b4ec39edb0acede6a3a0db4c9205657cd2f27a5a40db115",
+      "recordedCompletedCalls": 9,
+      "completedCallSeconds": 1184.6,
+      "repairCalls": 1,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 2,
+      "acceptance": [
+        {
+          "path": "tide-r1/acceptance/report.json",
+          "passed": 7,
+          "total": 9,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [
+            {
+              "id": "alias",
+              "passed": false,
+              "reason": "公开称呼和心理学限制正确，但遗漏真实身份不是解案或通关条件这一关键说明。"
+            },
+            {
+              "id": "accounting",
+              "passed": false,
+              "reason": "免费数量差异与会计成功结论区分正确，但额外要求先取得同日药单才能核对，原文没有设定这个检定前提，会新增线索门槛。"
+            }
+          ],
+          "readerInputSha256": "ca73d4ee695a0802f4bf63072319842e97b4e2cf3672411f2376a90bfea26b4d"
+        }
+      ]
+    },
+    {
+      "run": "tide-r2",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "7709f1cbd4d996fe0e96b207a7a1a21707e6b7faabfc099af212330e03d6ce25",
+      "recordedCompletedCalls": 9,
+      "completedCallSeconds": 1278.7,
+      "repairCalls": 1,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 2,
+      "acceptance": [
+        {
+          "path": "tide-r2/acceptance/report.json",
+          "passed": 8,
+          "total": 9,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [
+            {
+              "id": "truth",
+              "passed": false,
+              "reason": "船工、医生及账目骗局交代正确，但“盐的异常须与账目造假分开判断”未明确保住盐的非人来源不能证明顾舟知情这一关键限制。"
+            }
+          ],
+          "readerInputSha256": "e3a914c6aef15adf6108ab360ff56a6933da803899d4f3c814d0a4d206207df5"
+        },
+        {
+          "path": "tide-r2/acceptance-truth-followup/report.json",
+          "passed": 1,
+          "total": 1,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "14c182486591ff4c1ae647fade44af4ed3949f8be72a820afc7519ca08c88fed"
+        }
+      ]
+    },
+    {
+      "run": "tide-r3",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "84f7b4f2cfc1444a55a6e8ca2708d01f2ec049aa5c8d68635f8ad4cecc6ee393",
+      "recordedCompletedCalls": 13,
+      "completedCallSeconds": 1691.6,
+      "repairCalls": 2,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 4,
+      "acceptance": [
+        {
+          "path": "tide-r3/acceptance/report.json",
+          "passed": 7,
+          "total": 9,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": false,
+          "failures": [
+            {
+              "id": "stealth-failure",
+              "passed": false,
+              "reason": "失败后的免检正门路线正确，但将书面保证交换说成取走原账仍必须采用的方式；原文只允许这一途径，没有规定它是唯一方式。"
+            },
+            {
+              "id": "accounting",
+              "passed": false,
+              "reason": "正确保留免费数量差异，但额外要求先有同日药单编号才能尝试会计，增加了原作未规定的强制门槛；所引条件也无原文支持。"
+            }
+          ],
+          "readerInputSha256": "15ffd764f6b6590d90495e4cf471fa8d442d21da808da67b9796f0e4ae65cae7"
+        },
+        {
+          "path": "tide-r3/acceptance-current/report.json",
+          "passed": 9,
+          "total": 9,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "e09b51497952fd70f46f78ddd5fb1995903f404f2ce8a66dd4872c7ec8328798"
+        }
+      ]
+    },
+    {
+      "run": "tide-r4",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "9a37d81255e4e3998aca328bc066a7358124181bf15961d1d29f7f2ace37f6cb",
+      "recordedCompletedCalls": 7,
+      "completedCallSeconds": 862.9,
+      "repairCalls": 0,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 1,
+      "acceptance": [
+        {
+          "path": "tide-r4/acceptance/report.json",
+          "passed": 9,
+          "total": 9,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "9dc31591103dfac9b6bcb512ca4a134c8f03d293cce8cb141a2072eaaba82f43"
+        }
+      ]
+    },
+    {
+      "run": "train-r1",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "562ea8b81e4c44e94ec944447237ebbbc02024aea078f552de5404a2662bd212",
+      "recordedCompletedCalls": 7,
+      "completedCallSeconds": 861.2,
+      "repairCalls": 0,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 2,
+      "acceptance": [
+        {
+          "path": "train-r1/acceptance/report.json",
+          "passed": 5,
+          "total": 8,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [
+            {
+              "id": "truth",
+              "passed": false,
+              "reason": "遗漏赵衡制造事故是为骗取补助这一关键动机；“伪造事故害死报务员、抹供词时唤醒回声”也无expected依据。"
+            },
+            {
+              "id": "no-key",
+              "passed": false,
+              "reason": "无钥匙时隔门叫姓名并提林青的接续正确，但遗漏凭值班表指出行踪即可免检取得钥匙的路线。"
+            },
+            {
+              "id": "repair-failure",
+              "passed": false,
+              "reason": "失败后十分钟取筒、损坏范围和播放条件正确，但未说明不会维修者也可直接选择花十分钟拆面板。"
+            }
+          ],
+          "readerInputSha256": "b6e21384c178a139c9ddb8431a8da30d263f464092ef6221564d708eb1c7f158"
+        },
+        {
+          "path": "train-r1/acceptance-v2/report.json",
+          "passed": 7,
+          "total": 8,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [
+            {
+              "id": "truth",
+              "passed": false,
+              "reason": "主要真相与广播后果正确，但声称参考未说明周岑的知情程度不准确：原文明示他发现供词、没看过赵衡的供词，并能提供调查方向；不能将这些明确限制说成参考缺失。"
+            }
+          ],
+          "readerInputSha256": "2bb739d96f6862e22bee8315afcbab2663089d4d76f9c9c7fbcf14faaea41dad"
+        }
+      ]
+    },
+    {
+      "run": "train-r2",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "279bd110af27d8dd9747b98b35d258f7d2b5efc4e5c9bfd1052b7680d4004330",
+      "recordedCompletedCalls": 14,
+      "completedCallSeconds": 1565.6,
+      "repairCalls": 2,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 1,
+      "acceptance": [
+        {
+          "path": "train-r2/acceptance/report.json",
+          "passed": 8,
+          "total": 8,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "66556c0b0b9a24d7e3296d4522ba6be8958910ec9428847e5b2347472967e66a"
+        }
+      ]
+    },
+    {
+      "run": "train-r3",
+      "stage": "needs-review",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "a57f0bb654cd1bb4405ee7adbc4c87d3f48a0cb4e328e0924270c13e2af11641",
+      "recordedCompletedCalls": 12,
+      "completedCallSeconds": 1319.2,
+      "repairCalls": 1,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 1,
+      "acceptance": [
+        {
+          "path": "train-r3/acceptance-current/report.json",
+          "passed": 8,
+          "total": 8,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "53fdf54179457b2d9db06dd705db4c38d8267f09014f904462c978028ea5bd1f"
+        }
+      ]
+    },
+    {
+      "run": "train-r4",
+      "stage": "complete",
+      "runStatus": null,
+      "sourceSceneCount": 4,
+      "preparedSceneCount": 4,
+      "hasFinalArtifact": true,
+      "checkpointSha256": "f892982fa02ffe313fa8c4fdaa2573c320d742bffce05ab45b82068ebf3dd8cf",
+      "recordedCompletedCalls": 7,
+      "completedCallSeconds": 770.2,
+      "repairCalls": 0,
+      "patchCalls": 0,
+      "errorCount": 0,
+      "uncertainFindingCount": 0,
+      "uncertainFacts": 0,
+      "acceptance": [
+        {
+          "path": "train-r4/acceptance/report.json",
+          "passed": 8,
+          "total": 8,
+          "readingScope": "complete preparation",
+          "evaluatesCurrentPreparation": true,
+          "failures": [],
+          "readerInputSha256": "c8c1ae226ac78e7db4fabcfd4b759a8dbaf010ad7eeaa6cc5027ade30f1ed365"
+        }
+      ]
+    }
+  ]
+}

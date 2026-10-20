@@ -16,7 +16,10 @@ import { describeParserFailure, describeParserProgress, getModuleParserProvenanc
 import type { RoomSession } from "../network/RoomSession";
 import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
-import { KeeperGuidePanelV2 } from "../components/modules/KeeperGuidePanelV2";
+import { KeeperPreparationReader } from "../components/modules/KeeperPreparationReader";
+import { prepareKeeperGuide } from "../ai/keeper-preparation";
+import { hasCompleteScenePublications } from "../lib/scene-publications";
+import { guideNotes } from "../ai/keeper-guide-context";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Textarea } from "../components/ui/Field";
 import { Panel } from "../components/ui/Panel";
@@ -47,11 +50,13 @@ import {
 
 type ModuleRoomSession = RoomSession | RoomSessionV2;
 type PreparationStage = "source" | "parse" | "review" | "saved" | "room";
+type PreparationMode = "play-aid" | "keeper-reference";
 type WorkflowError = { step: Exclude<PreparationStage, "saved">; message: string };
-type ActiveParseTask = { id: number; controller: AbortController; stopped: boolean };
+type ActiveParseTask = { id: number; controller: AbortController; stopped: boolean; hasParsedResult?: boolean };
 type SwitchModuleOptions = { returnToRoom?: boolean };
 const ACTIVE_MODULE_DRAFT_ID = "active-module-editor";
 type RetainedParserPreparation = {
+  preparationMode: PreparationMode;
   sourceName: string;
   sourceText: string;
   sourcePath?: string;
@@ -85,6 +90,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   const setPendingRoomModule = useAppStore((state) => state.setPendingRoomModule);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const [sourceName, setSourceName] = useState(() => restoredPreparation?.sourceName ?? "新模组.md");
+  const [preparationMode, setPreparationMode] = useState<PreparationMode>(() => restoredPreparation?.preparationMode ?? "play-aid");
   const [sourceText, setSourceText] = useState(() => restoredPreparation?.sourceText ?? "");
   const [sourcePath, setSourcePath] = useState<string | undefined>(() => restoredPreparation?.sourcePath);
   const [sourceFile, setSourceFile] = useState<File | undefined>(() => restoredPreparation?.sourceFile);
@@ -92,6 +98,11 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   const [pdfPageSelection, setPdfPageSelection] = useState(() => restoredPreparation?.pdfPageSelection ?? "1");
   const [pdfVisualPages, setPdfVisualPages] = useState<PdfVisualPage[]>(() => restoredPreparation?.pdfVisualPages ?? []);
   const [draft, setDraft] = useState("");
+  const draftValueRef = useRef(draft);
+  draftValueRef.current = draft;
+  const guideTaskRef = useRef<AbortController>();
+  const [guideBusy, setGuideBusy] = useState(false);
+  const [guideError, setGuideError] = useState<string>();
   const [draftSourceText, setDraftSourceText] = useState("");
   const [draftDirty, setDraftDirty] = useState(false);
   const [draftOrigin, setDraftOrigin] = useState<"parsed" | "mock" | "stored">("stored");
@@ -117,6 +128,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   const parseTaskIdRef = useRef(0);
   const activeParseTaskRef = useRef<ActiveParseTask>();
   const draftRecoveryGenerationRef = useRef(0);
+  const draftRecoveryWriteRef = useRef<Promise<void>>(Promise.resolve());
   const sessionV2 = session instanceof RoomSessionV2 ? session : undefined;
   const sessionV1 = session && !(session instanceof RoomSessionV2) ? session : undefined;
   const canManageRoomModule = currentRoom?.localRole === "host" && session?.isHost === true;
@@ -127,7 +139,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   const hasSource = Boolean(sourceText.trim() || sourcePath || sourceFile);
   const alternateParserProvider = parserProvider === "codex" ? "deepseek" : "codex";
   const canSwitchParserProvider = alternateParserProvider === "codex" || !hasPdfSource;
-  const hasUnsavedWork = draftDirty || parsing || (sourcePending && hasSource);
+  const hasUnsavedWork = draftDirty || parsing || guideBusy || (sourcePending && hasSource);
   const unsavedWorkRef = useRef(hasUnsavedWork);
   const unsavedWorkMessageRef = useRef("");
   const parsedDraft = useMemo(() => {
@@ -207,12 +219,33 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     !draftDirty || window.confirm(`你还有尚未保存的模组修改。${nextAction}会丢失这些修改，确认继续吗？`)
   ), [draftDirty]);
 
+  const persistDraftRecovery = useCallback((value: StoredModuleDraft) => {
+    const generation = draftRecoveryGenerationRef.current;
+    const write = draftRecoveryWriteRef.current.then(async () => {
+      if (generation !== draftRecoveryGenerationRef.current) return;
+      const repository = await getRepository();
+      if (generation !== draftRecoveryGenerationRef.current) return;
+      await repository.saveModuleDraft(value);
+    });
+    // Keep later saves usable after a failed write, but let the caller report it.
+    draftRecoveryWriteRef.current = write.catch(() => undefined);
+    return write;
+  }, []);
+
   const invalidateDraftRecovery = useCallback(async () => {
-    draftRecoveryGenerationRef.current += 1;
-    const repository = await getRepository();
-    await repository.deleteModuleDraft(ACTIVE_MODULE_DRAFT_ID);
-    setRecoveryDraft(undefined);
-    setDraftRecoveryNotice(undefined);
+    const generation = ++draftRecoveryGenerationRef.current;
+    // A save already in progress must settle before deletion. Queued snapshots
+    // from the previous generation are skipped, so they cannot revive a draft.
+    const remove = draftRecoveryWriteRef.current.then(async () => {
+      const repository = await getRepository();
+      await repository.deleteModuleDraft(ACTIVE_MODULE_DRAFT_ID);
+    });
+    draftRecoveryWriteRef.current = remove.catch(() => undefined);
+    await remove;
+    if (generation === draftRecoveryGenerationRef.current) {
+      setRecoveryDraft(undefined);
+      setDraftRecoveryNotice(undefined);
+    }
   }, []);
 
   const refreshLibrary = useCallback(async () => {
@@ -240,6 +273,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     setWarnings(moduleSourceWarnings(stored.package));
     setError(undefined);
     setWorkflowError(undefined);
+    setGuideError(undefined);
   }, []);
 
   const openModule = useCallback(async (modulePackage: ModulePackageV1) => {
@@ -283,10 +317,12 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       ? draftRecoveryNotice?.startsWith("草稿恢复点已保存")
         ? "这份草稿已在本机留下恢复点，但还没有进入正式模组库。现在离开后可回来恢复，确定暂时离开吗？"
         : "AI 整理结果或模组修改还没有正式保存，本机恢复点也可能尚未写完。现在离开可能丢失最近修改，确定继续吗？"
+      : guideBusy
+        ? "主持引导仍在整理中。现在离开会中断引导，已有资料保留，确定继续吗？"
       : parsing
         ? "模组仍在整理中。现在离开会中断本次整理，确定继续吗？"
         : "已经放入的模组原文还没有整理或保存。离开会丢失本次准备，确定继续吗？";
-  }, [draftDirty, draftRecoveryNotice, hasUnsavedWork, parsing]);
+  }, [draftDirty, draftRecoveryNotice, hasUnsavedWork, parsing, guideBusy]);
 
   useEffect(() => {
     const unsubscribe = useAppStore.subscribe((state, previous) => {
@@ -312,6 +348,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   }, []);
 
   useEffect(() => () => {
+    guideTaskRef.current?.abort();
     const task = activeParseTaskRef.current;
     if (!task) return;
     activeParseTaskRef.current = undefined;
@@ -348,15 +385,14 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
     const recoveryGeneration = draftRecoveryGenerationRef.current;
     const timer = globalThis.setTimeout(() => {
       if (recoveryGeneration !== draftRecoveryGenerationRef.current) return;
-      void getRepository()
-        .then((repository) => repository.saveModuleDraft({
+      void persistDraftRecovery({
           draftId: ACTIVE_MODULE_DRAFT_ID,
           package: modulePackage,
           sourceText: draftSourceText,
           sourceName,
           warnings,
           updatedAt: new Date().toISOString(),
-        }))
+        })
         .then(() => {
           if (recoveryGeneration === draftRecoveryGenerationRef.current) {
             setDraftRecoveryNotice("草稿恢复点已保存到本机");
@@ -369,7 +405,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
         });
     }, 500);
     return () => globalThis.clearTimeout(timer);
-  }, [draftDirty, draftSourceText, isMockDraft, parsedDraft, recoveryChecked, recoveryDraft, sourceName, warnings]);
+  }, [draftDirty, draftSourceText, isMockDraft, parsedDraft, persistDraftRecovery, recoveryChecked, recoveryDraft, sourceName, warnings]);
 
   const restoreRecoveryDraft = () => {
     if (!recoveryDraft) return;
@@ -482,6 +518,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
 
   const openParserSettings = () => {
     retainedParserPreparation = {
+      preparationMode,
       sourceName,
       sourceText,
       sourcePath,
@@ -514,7 +551,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
   };
 
   const runParser = async (mock = false) => {
-    if (activeParseTaskRef.current) return;
+    if (activeParseTaskRef.current || guideTaskRef.current) return;
     if (!mock && !localAiAvailable) {
       return setWorkflowError({ step: "parse", message: "当前网页没有本地 AI 安全桥，不能执行真实模组整理。你仍可导入已整理的 .cocmod，或使用下面的模拟结果检查界面。" });
     }
@@ -531,7 +568,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       stopped: false,
     };
     activeParseTaskRef.current = task;
-    setBusy(true); setParsing(true); setParseStopping(false); setParserNotice(undefined); setWorkflowError(undefined); setProgress([]); setWarnings([]);
+    setBusy(true); setParsing(true); setParseStopping(false); setParserNotice(undefined); setWorkflowError(undefined); setProgress([]); setWarnings([]); setGuideError(undefined);
     try {
       const messages = await parseModule(
         {
@@ -597,22 +634,84 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
       setSelectedModuleId(result.module.moduleId);
       setSelectedRevision(result.module.revision);
       setWorkspaceMode("browse");
+      task.hasParsedResult = true;
+      if (!mock && preparationMode === "keeper-reference" && (!moduleWithVisualSelection.keeperGuide?.preparation || moduleWithVisualSelection.keeperGuide.preparation.scenes.length < moduleWithVisualSelection.scenes.length || moduleWithVisualSelection.keeperGuide.preparation.cast.length < moduleWithVisualSelection.npcs.length || moduleWithVisualSelection.scenes.some((scene) => !hasCompleteScenePublications(moduleWithVisualSelection, scene.id, moduleWithVisualSelection.keeperGuide?.preparation?.scenes.find((entry) => entry.sceneId === scene.id)?.publicEntities)))) {
+        const normalizedText = result.normalizedText ?? sourceText;
+        // Keep the successful extraction recoverable before the second AI task starts.
+        await persistDraftRecovery({
+          draftId: ACTIVE_MODULE_DRAFT_ID, package: moduleWithVisualSelection,
+          sourceText: normalizedText, sourceName, warnings: result.warnings ?? [], updatedAt: new Date().toISOString(),
+        });
+        if (task.stopped || activeParseTaskRef.current !== task) return;
+        setGuideBusy(true);
+        try {
+          let expectedDraft = JSON.stringify(moduleWithVisualSelection, null, 2);
+          await prepareKeeperGuide({ modulePackage: moduleWithVisualSelection, sourceText: normalizedText, provider: parserProvider, model, signal: task.controller.signal,
+            onPartial: async (guide) => {
+              if (task.stopped || activeParseTaskRef.current !== task) throw new Error("主持引导已停止");
+              if (draftValueRef.current !== expectedDraft) throw new Error("资料在生成期间已改变，请基于当前内容继续整理；你的修改没有被覆盖。");
+              const prepared = { ...moduleWithVisualSelection, keeperGuide: guide };
+              expectedDraft = JSON.stringify(prepared, null, 2);
+              draftValueRef.current = expectedDraft;
+              setDraft(expectedDraft);
+              await persistDraftRecovery({ draftId: ACTIVE_MODULE_DRAFT_ID, package: prepared, sourceText: normalizedText, sourceName, warnings: result.warnings ?? [], updatedAt: new Date().toISOString() });
+            },
+          });
+        } catch (cause) {
+          if (activeParseTaskRef.current === task) setGuideError(task.stopped
+            ? "主持引导已停止；提取完成的资料与原文已保留，可以稍后补全。"
+            : `资料已保留，主持引导未完成：${cause instanceof Error ? cause.message : String(cause)}`);
+        } finally { if (activeParseTaskRef.current === task) setGuideBusy(false); }
+      }
     } catch (cause) {
       if (activeParseTaskRef.current !== task) return;
       if (task.stopped || task.controller.signal.aborted) {
         setProgress([]);
         setWorkflowError(undefined);
-        setParserNotice("已停止本次整理；没有生成或保存新草稿，已选择的原文仍保留在这里。");
+        setParserNotice(task.hasParsedResult
+          ? "已停止主持引导；提取完成的资料和原文仍保留在这里。"
+          : "已停止本次整理；没有生成或保存新草稿，已选择的原文仍保留在这里。");
       } else {
         setWorkflowError({ step: "parse", message: cause instanceof Error ? cause.message : String(cause) });
       }
     } finally {
       if (activeParseTaskRef.current === task) {
+        if (task.stopped && task.hasParsedResult) setParserNotice("已停止主持引导；提取完成的资料和原文仍保留在这里。");
         activeParseTaskRef.current = undefined;
         setBusy(false);
         setParsing(false);
         setParseStopping(false);
       }
+    }
+  };
+
+  const prepareCurrentModule = async () => {
+    if (!parsedDraft?.success || busy || guideTaskRef.current) return;
+    setPreparationMode("keeper-reference");
+    const originalDraft = draft;
+    const modulePackage = parsedDraft.data;
+    const controller = new AbortController();
+    guideTaskRef.current = controller;
+    setGuideBusy(true);
+    setGuideError(undefined);
+    try {
+      let expectedDraft = originalDraft;
+      await prepareKeeperGuide({ modulePackage, sourceText: draftSourceText, provider: parserProvider, model, signal: controller.signal,
+        onPartial: async (keeperGuide) => {
+          if (controller.signal.aborted) throw new Error("主持引导已停止");
+          if (draftValueRef.current !== expectedDraft) throw new Error("资料在生成期间已改变，请基于当前内容继续整理；你的修改没有被覆盖。");
+          const prepared = { ...modulePackage, keeperGuide };
+          expectedDraft = JSON.stringify(prepared, null, 2);
+          draftValueRef.current = expectedDraft;
+          setDraft(expectedDraft);
+          setDraftDirty(true);
+          if (!recoveryDraft) await persistDraftRecovery({ draftId: ACTIVE_MODULE_DRAFT_ID, package: prepared, sourceText: draftSourceText, sourceName, warnings, updatedAt: new Date().toISOString() });
+        },
+      });
+    } catch (cause) {
+      if (!controller.signal.aborted) setGuideError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (guideTaskRef.current === controller) { guideTaskRef.current = undefined; setGuideBusy(false); }
     }
   };
 
@@ -1024,6 +1123,17 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
         <div className="grid gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
           <div className="grid content-start gap-5">
             <Panel aria-label="模组解析步骤" className="grid gap-4">
+              <fieldset aria-label="整理模式" disabled={busy || guideBusy} className="grid gap-2">
+                <legend className="mb-2 text-sm font-semibold">整理模式</legend>
+                <label className={`cursor-pointer rounded-lg border p-3 ${preparationMode === "play-aid" ? "border-brass bg-brass/5" : "border-zinc-800"}`}>
+                  <span className="flex items-center gap-2 text-sm font-medium"><input type="radio" name="preparation-mode" aria-label="跑团辅助" checked={preparationMode === "play-aid"} onChange={() => setPreparationMode("play-aid")} />跑团辅助</span>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">整理委托与调查目标、场景、人物、线索和地图资料，供熟悉模组的 KP 查阅和使用。</p>
+                </label>
+                <label className={`cursor-pointer rounded-lg border p-3 ${preparationMode === "keeper-reference" ? "border-brass bg-brass/5" : "border-zinc-800"}`}>
+                  <span className="flex items-center gap-2 text-sm font-medium"><input type="radio" name="preparation-mode" aria-label="主持参考" checked={preparationMode === "keeper-reference"} onChange={() => setPreparationMode("keeper-reference")} />主持参考</span>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">包含跑团辅助的全部资料，再补真相、开场、人物扮演和逐幕建议，帮助不熟悉模组的 KP 备团。</p>
+                </label>
+              </fieldset>
               <input
                 ref={browserSourceRef}
                 type="file"
@@ -1165,7 +1275,6 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">{modulePackage.scenes.length} 场景 · {modulePackage.locations.length} 地点 · {modulePackage.npcs.length} NPC</div>
                     <ModuleLibraryEntityDirectory modulePackage={modulePackage} />
-                    <KeeperGuidePanelV2 modulePackage={modulePackage} onSaved={refreshLibrary} />
                     <div className="mt-3 flex flex-wrap gap-1">
                       <Button variant="secondary" className="h-8 px-2" onClick={() => void openModule(modulePackage)}>
                         <BookOpen className="mr-1.5 h-3.5 w-3.5" />查看资料
@@ -1217,14 +1326,14 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     <div className="flex items-center gap-2">
                       <span className="grid h-7 w-7 place-items-center rounded-full bg-amber-300 text-sm font-bold text-zinc-950">3</span>
                       <h2 className="font-semibold text-amber-100">
-                        {isMockDraft ? "模拟结果 · 未调用 Codex 或 DeepSeek" : draftOrigin === "parsed" ? "AI 已整理完成 · 等你确认" : "修改尚未保存"}
+                        {isMockDraft ? "模拟结果 · 未调用 Codex 或 DeepSeek" : guideBusy ? "资料提取完成 · 正在整理主持引导" : guideError ? "资料已保留 · 主持参考尚未完成" : parsedDraft?.success && parsedDraft.data.keeperGuide?.workflow?.stage === "needs-review" ? "主持参考已生成 · 有待核对项" : draftOrigin === "parsed" ? "AI 已整理完成 · 等你确认" : "修改尚未保存"}
                       </h2>
                     </div>
                     <p className="mt-2 text-sm text-zinc-300">
                       {isMockDraft
                         ? "这是离线模拟结果（未调用 Codex 或 DeepSeek）。可以直接保存使用，也可以返回左侧做真实整理。"
                         : draftOrigin === "parsed"
-                          ? "先看下方的“开团前检查”，确认开场、关键人物和线索没有明显遗漏；有问题就点“检查并修正”。"
+                          ? "先读下方的“第一次带这个模组”，理解故事和第一幕怎么开；再按“开团前检查”核对关键资料，有问题可直接修正。"
                           : "确认这次修改没有误删内容，再保存。旧内容会自动保留，可以随时找回。"}
                     </p>
                     {parsedDraft?.success && (
@@ -1234,7 +1343,7 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
                     )}
                     {!isMockDraft && draftRecoveryNotice && <p role="status" className="mt-2 text-xs text-emerald-300">{draftRecoveryNotice}</p>}
                   </div>
-                  <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || savingDraft}>
+                  <Button onClick={() => void saveDraft()} disabled={!parsedDraft?.success || savingDraft || guideBusy}>
                     {savingDraft ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                     {savingDraft ? "正在保存" : draftOrigin === "parsed" ? "确认并保存备团资料" : "保存修改"}
                   </Button>
@@ -1350,6 +1459,41 @@ export function ModulesView({ session }: { session?: ModuleRoomSession }) {
 
             {draft && workspaceMode === "browse" && parsedDraft?.success && (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                {parsedDraft.data.keeperGuide || preparationMode === "keeper-reference" || guideBusy ? <KeeperPreparationReader
+                  key={parsedDraft.data.moduleId}
+                  modulePackage={parsedDraft.data} sourceText={draftSourceText} busy={guideBusy} error={guideError}
+                  onGenerate={() => void prepareCurrentModule()}
+                  onStop={() => {
+                    if (guideTaskRef.current) {
+                      guideTaskRef.current.abort();
+                      setGuideError("主持引导已停止；已完成的参考仍保留，可稍后继续整理。");
+                    } else stopParser();
+                  }}
+                  onChangeNote={(original, next) => {
+                    const currentGuide = parsedDraft.data.keeperGuide;
+                    if (!currentGuide) return;
+                    const index = guideNotes(currentGuide).indexOf(original);
+                    const updated = JSON.parse(JSON.stringify(parsedDraft.data)) as ModulePackageV1;
+                    const target = guideNotes(updated.keeperGuide!)[index];
+                    if (!target) return;
+                    Object.assign(target, next);
+                    if (original === currentGuide.preparation?.truth) updated.keeperGuide!.truth = next.text;
+                    if (original === currentGuide.preparation?.hook) updated.keeperGuide!.hook = next.text;
+                    setDraft(JSON.stringify(updated, null, 2));
+                    setDraftDirty(true);
+                  }}
+                  onApplyOpening={(sceneId, text) => {
+                    setDraft(JSON.stringify({ ...parsedDraft.data, scenes: parsedDraft.data.scenes.map((scene) => scene.id === sceneId ? { ...scene, playerDescription: text } : scene) }, null, 2));
+                    setDraftDirty(true);
+                  }}
+                  onApplyClue={(clueId, text) => {
+                    setDraft(JSON.stringify({ ...parsedDraft.data, clues: parsedDraft.data.clues.map((clue) => clue.id === clueId ? { ...clue, revealText: text } : clue) }, null, 2));
+                    setDraftDirty(true);
+                  }}
+                /> : <section aria-label="补充主持参考" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-800 p-4">
+                  <p className="text-sm text-zinc-400">跑团资料已就绪。需要真相梳理和逐幕建议时，可直接在这些资料上补充。</p>
+                  <Button variant="secondary" disabled={busy || guideBusy || isMockDraft || !localAiAvailable} onClick={() => void prepareCurrentModule()}>补充主持参考</Button>
+                </section>}
                 <ModuleSourceAssetsPanel
                   modulePackage={parsedDraft.data}
                   sourceFile={sourceFile}

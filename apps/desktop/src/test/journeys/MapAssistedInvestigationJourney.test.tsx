@@ -305,6 +305,7 @@ describe("segmented task journey: map-assisted investigation (not browser E2E)",
       />,
     );
     expect(screen.getByRole("status", { name: "调查员进入了另一个场景" }).textContent).toContain(miniInvestigator.name);
+    await waitFor(() => expect(screen.getByLabelText("玩家可见的开场描述").hasAttribute("disabled")).toBe(false));
     fireEvent.change(screen.getByLabelText("玩家可见的开场描述"), {
       target: { value: mapInvestigation.publicOpening },
     });
@@ -324,8 +325,11 @@ describe("segmented task journey: map-assisted investigation (not browser E2E)",
         session={mockSession(authority.world, miniHostSeat, locationSubmit)}
       />,
     );
+    const locationIntroduction = screen.getByLabelText(`玩家可见介绍：${mapModule.locations[0]!.name}`) as HTMLTextAreaElement;
+    await waitFor(() => expect(locationIntroduction.disabled).toBe(false));
+    fireEvent.change(locationIntroduction, { target: { value: mapInvestigation.publicLocation } });
     fireEvent.click(screen.getByRole("button", { name: "让地点在当前情境登场" }));
-    await waitFor(() => expect(locationSubmit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(locationSubmit).toHaveBeenCalledTimes(1));
     expect(serializedCalls(locationSubmit)).toContain(mapInvestigation.publicLocation);
     expect(serializedCalls(locationSubmit)).not.toContain(mapInvestigation.secrets.location);
     authority.commitCalls(miniHostSeat, locationSubmit);
@@ -340,8 +344,11 @@ describe("segmented task journey: map-assisted investigation (not browser E2E)",
         session={mockSession(authority.world, miniHostSeat, npcSubmit)}
       />,
     );
+    const npcIntroduction = screen.getByLabelText(`玩家可见介绍：${mapModule.npcs[0]!.name}`) as HTMLTextAreaElement;
+    await waitFor(() => expect(npcIntroduction.disabled).toBe(false));
+    fireEvent.change(npcIntroduction, { target: { value: mapInvestigation.publicNpc } });
     fireEvent.click(screen.getByRole("button", { name: "让 NPC 在当前情境登场" }));
-    await waitFor(() => expect(npcSubmit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(npcSubmit).toHaveBeenCalledTimes(1));
     expect(serializedCalls(npcSubmit)).toContain(mapInvestigation.publicNpc);
     expect(serializedCalls(npcSubmit)).not.toContain(mapInvestigation.secrets.npc);
     expect(serializedCalls(npcSubmit)).not.toContain("board.item.upserted");

@@ -47,6 +47,8 @@ export const moduleChapterSchema = z
 
 export const moduleSceneSchema = moduleEntityBase
   .extend({
+    // A scene summary is keeper-only. Never use it as fallback public copy.
+    playerDescription: z.string().max(8_000).optional(),
     synopsis: z.string().max(100_000),
     locationIds: z.array(entityIdSchema).max(100),
     npcIds: z.array(entityIdSchema).max(200),
@@ -155,6 +157,60 @@ function uniqueEntityIds(
  * ending conditions, and pacing advice. Generated after parsing (增量, no
  * re-parse) and keeper-only.
  */
+export const keeperGuideNoteSchema = z.object({
+  title: z.string().min(1).max(240),
+  text: z.string().min(1).max(8_000),
+  kind: z.enum(["source", "advice", "uncertain"]),
+  sources: z.array(z.object({
+    sourceId: entityIdSchema,
+    excerpt: z.string().min(1).max(2_000),
+  }).strict()).max(12),
+}).strict();
+
+/** Per-scene disclosure, never a global biography or a location's entire history. */
+export const scenePublicEntitySchema = z.object({
+  kind: z.enum(["npc", "location"]),
+  entityId: entityIdSchema,
+  name: z.string().max(240).optional(),
+  text: z.string().max(8_000),
+  when: keeperGuideNoteSchema,
+}).strict();
+export type ScenePublicEntityV1 = z.infer<typeof scenePublicEntitySchema>;
+
+export const keeperPreparationSchema = z.object({
+  truth: keeperGuideNoteSchema,
+  hook: keeperGuideNoteSchema,
+  essentials: z.array(keeperGuideNoteSchema).min(1).max(12),
+  playerBriefing: keeperGuideNoteSchema,
+  publicClues: z.array(z.object({
+    clueId: entityIdSchema,
+    text: z.string().min(1).max(8_000),
+    when: keeperGuideNoteSchema,
+  }).strict()).max(200).optional(),
+  timeline: z.array(keeperGuideNoteSchema).max(50),
+  endings: z.array(keeperGuideNoteSchema).max(20),
+  cast: z.array(z.object({
+    npcId: entityIdSchema,
+    notes: z.array(keeperGuideNoteSchema).min(1).max(8),
+  }).strict()).max(100),
+  scenes: z.array(z.object({
+    sceneId: entityIdSchema,
+    purpose: keeperGuideNoteSchema,
+    openingDraft: z.string().max(8_000),
+    publicEntities: z.array(scenePublicEntitySchema).max(300).optional(),
+    actions: z.array(z.object({
+      intent: z.string().min(1).max(500),
+      response: keeperGuideNoteSchema,
+      checkId: entityIdSchema.optional(),
+    }).strict()).max(12),
+    exits: z.array(keeperGuideNoteSchema).max(12),
+    pitfalls: z.array(keeperGuideNoteSchema).max(8),
+  }).strict()).max(100),
+}).strict();
+
+export type KeeperGuideNoteV1 = z.infer<typeof keeperGuideNoteSchema>;
+export type KeeperPreparationV1 = z.infer<typeof keeperPreparationSchema>;
+
 export const keeperGuideStepSchema = z
   .object({
     sceneId: entityIdSchema.optional(),
@@ -169,6 +225,74 @@ export const keeperGuideStepSchema = z
     ifStuck: z.string().max(4_000),
   })
   .strict();
+
+export const keeperEvidenceSchema = z.object({
+  facts: z.array(z.object({
+    id: entityIdSchema,
+    category: z.enum(["truth", "route", "disclosure", "check", "timing", "contradiction"]),
+    sceneIds: z.array(entityIdSchema).max(2_000),
+    note: keeperGuideNoteSchema,
+  }).strict()).min(1).max(300),
+}).strict();
+
+export const keeperPlanSchema = z.object({
+  scenes: z.array(z.object({
+    sceneId: entityIdSchema,
+    factIds: z.array(entityIdSchema).max(300),
+    purpose: z.string().min(1).max(2_000),
+    alternativeRoutes: keeperGuideNoteSchema,
+  }).strict()).max(2_000),
+}).strict();
+
+export const keeperReviewSchema = z.object({
+  checks: z.array(z.object({
+    factId: entityIdSchema,
+    verdict: z.enum(["covered", "issue", "not-applicable"]),
+    reason: z.string().min(1).max(2_000),
+  }).strict()).max(300),
+  findings: z.array(z.object({
+    severity: z.enum(["error", "uncertain"]),
+    sceneIds: z.array(entityIdSchema).max(2_000),
+    field: z.string().min(1).max(500),
+    note: keeperGuideNoteSchema,
+  }).strict()).max(100),
+}).strict();
+
+export const keeperWorkflowSchema = z.object({
+  version: z.literal(1),
+  inputHash: z.string().length(64),
+  contentHash: z.string().length(64),
+  provider: z.enum(["codex", "deepseek"]),
+  model: z.string().max(100),
+  stage: z.enum(["extract", "plan", "draft", "review", "repair", "audit", "complete", "needs-review"]),
+  restartFromBeginning: z.boolean().optional(),
+  evidence: keeperEvidenceSchema.optional(),
+  plan: keeperPlanSchema.optional(),
+  pending: z.object({
+    key: z.string().max(20_000),
+    preparation: keeperPreparationSchema,
+    repairs: z.number().int().min(0).max(1),
+    review: keeperReviewSchema.optional(),
+  }).strict().optional(),
+  reviews: z.array(z.object({
+    key: z.string().max(20_000),
+    review: keeperReviewSchema,
+  }).strict()).max(2_000),
+  audit: keeperReviewSchema.optional(),
+  finalRepair: z.object({
+    remaining: z.array(z.object({
+      key: z.string().max(20_000),
+      sceneIds: z.array(entityIdSchema).max(2_000),
+      castIds: z.array(entityIdSchema).max(5_000),
+      scope: z.enum(["opening", "scene-batch", "scene-publications"]),
+    }).strict()).max(2_000),
+  }).strict().optional(),
+}).strict();
+
+export type KeeperEvidence = z.infer<typeof keeperEvidenceSchema>;
+export type KeeperPlan = z.infer<typeof keeperPlanSchema>;
+export type KeeperReview = z.infer<typeof keeperReviewSchema>;
+export type KeeperWorkflow = z.infer<typeof keeperWorkflowSchema>;
 
 export const keeperGuideSchema = z
   .object({
@@ -186,6 +310,8 @@ export const keeperGuideSchema = z
       outcome: z.string().max(4_000),
     }).strict()).max(20),
     pacing: z.string().max(10_000),
+    preparation: keeperPreparationSchema.optional(),
+    workflow: keeperWorkflowSchema.optional(),
   })
   .strict();
 
@@ -271,6 +397,15 @@ export const modulePackageSchema = z
     modulePackage.chapters.forEach((chapter, index) => {
       validateRefs(chapter.sceneIds, sceneIds, ["chapters", index, "sceneIds"]);
     });
+
+    const preparation = modulePackage.keeperGuide?.preparation;
+    if (preparation) {
+      validateRefs(preparation.scenes.map((scene) => scene.sceneId), sceneIds, ["keeperGuide", "preparation", "scenes"]);
+      validateRefs(preparation.cast.map((npc) => npc.npcId), npcIds, ["keeperGuide", "preparation", "cast"]);
+      validateRefs((preparation.publicClues ?? []).map((clue) => clue.clueId), clueIds, ["keeperGuide", "preparation", "publicClues"]);
+      preparation.scenes.forEach((scene, index) => validateRefs(scene.actions.flatMap((action) => action.checkId ? [action.checkId] : []), checkIds, ["keeperGuide", "preparation", "scenes", index, "actions"]));
+      preparation.scenes.forEach((scene, index) => (scene.publicEntities ?? []).forEach((entry, entryIndex) => validateRefs([entry.entityId], entry.kind === "npc" ? npcIds : locationIds, ["keeperGuide", "preparation", "scenes", index, "publicEntities", entryIndex])));
+    }
 
     modulePackage.scenes.forEach((scene, index) => {
       validateRefs(scene.locationIds, locationIds, ["scenes", index, "locationIds"]);

@@ -1471,6 +1471,8 @@ pub fn run() {
             npc_reply::cancel_character_draft,
             npc_reply::run_npc_stats_draft,
             npc_reply::cancel_npc_stats_draft,
+            npc_reply::run_keeper_guide,
+            npc_reply::cancel_keeper_guide,
             select_module_source,
             run_module_parser,
             cancel_module_parse

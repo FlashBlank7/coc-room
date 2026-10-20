@@ -896,6 +896,7 @@ interface RunSidecarOptions {
 function isFixedAiAction(action: unknown): boolean {
   return action === "generate_character_draft"
     || action === "generate_npc_stats_draft"
+    || action === "generate_keeper_guide"
     || action === "generate_npc_reply";
 }
 
@@ -919,6 +920,8 @@ export function sanitizeSidecarMessage(
     ? "角色草稿生成失败，未创建替代内容"
     : action === "generate_npc_stats_draft"
       ? "NPC 属性草稿生成失败，未修改人物"
+      : action === "generate_keeper_guide"
+        ? "主持引导生成失败，已整理资料仍保留"
       : "NPC 回复生成失败，未发布替代内容";
   return {
     protocol_version: "1.0",
@@ -975,6 +978,14 @@ export function createBridgeSidecarEnvironment(
   };
 }
 
+/** Transport activity only: never extends the sidecar's fixed execution deadline. */
+export function keepFixedAiResponseAlive(requestId: string, writeMessage: (message: Record<string, unknown>) => void): () => void {
+  const send = () => writeMessage({ protocol_version: "1.0", request_id: requestId, type: "progress", stage: "waiting", message: "本地 AI 正在处理" });
+  send();
+  const timer = setInterval(send, 30_000);
+  return () => clearInterval(timer);
+}
+
 async function streamSidecar(response: ServerResponse, options: RunSidecarOptions): Promise<void> {
   let started = false;
   const buffered = isFixedAiAction(options.payload.action);
@@ -988,23 +999,32 @@ async function streamSidecar(response: ServerResponse, options: RunSidecarOption
     }
     response.write(`${JSON.stringify(sanitizeSidecarMessage(message, options.payload.action))}\n`);
   };
+  // Keep validated results buffered, but send safe transport activity while a
+  // long model call runs. Waiting for the final result before any headers made
+  // otherwise healthy requests hit the client's five-minute header timeout.
+  const stopHeartbeat = buffered ? keepFixedAiResponseAlive(String(options.payload.id), (message) => {
+    if (!response.destroyed && !response.writableEnded) writeMessage(message);
+  }) : () => {};
   try {
     const messages = await runSidecar(options, buffered ? undefined : writeMessage);
     if (buffered) messages.forEach(writeMessage);
     response.end();
   } catch (error) {
-    if (started && error instanceof BridgeHttpError && !response.destroyed && !response.writableEnded) {
+    if (started && !response.destroyed && !response.writableEnded) {
+      const failure = error instanceof BridgeHttpError ? error : new BridgeHttpError(500, "BRIDGE_INTERNAL_ERROR", "本地 AI 服务发生内部错误");
       response.write(`${JSON.stringify({
         protocol_version: "1.0",
         request_id: String(options.payload.id ?? "unknown"),
         type: "error",
-        message: error.message,
-        error: { code: error.code, message: error.message, retryable: false },
+        message: failure.message,
+        error: { code: failure.code, message: failure.message, retryable: false },
       })}\n`);
       response.end();
       return;
     }
     throw error;
+  } finally {
+    stopHeartbeat();
   }
 }
 
@@ -1038,6 +1058,7 @@ async function runSidecar(
       ? MAX_FIXED_AI_STDOUT_BYTES
       : MAX_PARSE_STDOUT_BYTES;
   let stderrBytes = 0;
+  let diagnosticBuffer = "";
   let settled = false;
 
   return await new Promise((resolvePromise, rejectPromise) => {
@@ -1080,6 +1101,18 @@ async function runSidecar(
     child.on("error", () => void fail(new BridgeHttpError(503, "PYTHON_UNAVAILABLE", "未找到可用的 Python 3.12 模组解析环境")));
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.byteLength;
+      // Only forward our fixed exception-category lines; provider stderr may
+      // contain credentials, prompts or local paths and must never be echoed.
+      diagnosticBuffer = (diagnosticBuffer + chunk.toString("utf8")).slice(-4096);
+      let newline = diagnosticBuffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = diagnosticBuffer.slice(0, newline).trim();
+        diagnosticBuffer = diagnosticBuffer.slice(newline + 1);
+        if (/^module-parser character draft internal error: [A-Za-z][A-Za-z0-9_]{0,79}$/u.test(line)) {
+          process.stderr.write(`[local-ai] ${line}\n`);
+        }
+        newline = diagnosticBuffer.indexOf("\n");
+      }
       if (stderrBytes > MAX_STDERR_BYTES) void fail(new BridgeHttpError(502, "PARSER_STDERR_LIMIT", "模组解析器错误输出超过安全上限"));
     });
     child.stdout.setEncoding("utf8");

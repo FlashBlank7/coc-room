@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { coc7CharacterSchema } from "@coc-room/protocol";
+import { prepareGeneratedCharacter } from "../lib/table-seating";
+import { auditSkillAllocation, updateLinkedSkillBases } from "../lib/character-skill-allocation";
 import {
   BrowserDeepSeekError,
   generateBrowserDeepSeekCharacterDraft,
@@ -79,6 +81,32 @@ describe("generateBrowserDeepSeekCharacterDraft", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(character.name).toBe("陈默");
+  });
+
+  it("preserves an AI allocation through the table, house-rule checks and linked attribute changes", async () => {
+    const draft = { ...providerDraft, occupation: "记者", skills: [
+      { name: "图书馆使用", specialization: null, baseValue: 20, value: 70, checked: false },
+      { name: "聆听", specialization: null, baseValue: 20, value: 35, checked: false },
+      { name: "母语", specialization: "汉语", baseValue: 80, value: 85, baseSource: "edu", checked: false },
+    ], creation: { occupationFormula: "edu4", occupationBudget: null, interestBudget: null, creditMin: null, creditMax: null, occupationSkillIndexes: [0, 2], allocations: [
+      { skillIndex: 0, occupation: 40, interest: 10 }, { skillIndex: 1, occupation: 0, interest: 15 }, { skillIndex: 2, occupation: 5, interest: 0 },
+    ] } };
+    const fetchImpl = vi.fn(async () => jsonResponse({ status: "completed", output_text: JSON.stringify(draft) }));
+    const generated = await generateBrowserDeepSeekCharacterDraft({ prompt: "按自定义职业技能车卡", playerName: "Alice", ownerSeatId: "seat-player-1", apiKey: "sk-test", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const card = prepareGeneratedCharacter(generated, { text: "自定义房规", recommendedSkills: [], skillPointMode: "occupation-interest" });
+    expect(card.creation).toEqual(generated.creation);
+    expect(card.creation!.origin).toBe("ai");
+    expect(card.creation!.occupationSkillIds).toEqual([card.skills[0]!.id, card.skills[2]!.id]);
+    expect(auditSkillAllocation(card)).toMatchObject({ occupation: 320, interest: 150, occupationSpent: 45, interestSpent: 25, issues: [] });
+    expect(auditSkillAllocation(card, { text: "更紧的房规", recommendedSkills: [], occupationBudget: 40, interestBudget: 20 }).issues).toEqual(["职业点超出 5 点，请减少职业投入。", "兴趣点超出 5 点，请减少兴趣投入。"]);
+    expect(updateLinkedSkillBases({ ...card, characteristics: { ...card.characteristics, edu: 85 } }).skills[2]).toMatchObject({ baseValue: 85, value: 90 });
+    expect(coc7CharacterSchema.parse(JSON.parse(JSON.stringify(card))).creation).toEqual(card.creation);
+  });
+
+  it("rejects duplicate or missing skill allocation references before creating a card", async () => {
+    const creation = { occupationFormula: "edu4", occupationSkillIndexes: [0], allocations: [{ skillIndex: 0, occupation: 40, interest: 10 }, { skillIndex: 0, occupation: 0, interest: 5 }] };
+    const fetchImpl = vi.fn(async () => jsonResponse({ status: "completed", output_text: JSON.stringify({ ...providerDraft, creation }) }));
+    await expect(generateBrowserDeepSeekCharacterDraft({ prompt: "p", playerName: "Alice", ownerSeatId: "seat-player-1", apiKey: "sk-test", fetchImpl: fetchImpl as unknown as typeof fetch })).rejects.toThrow("每个技能都需要一条独立分配记录");
   });
 
   it("reports a bad key in plain words", async () => {

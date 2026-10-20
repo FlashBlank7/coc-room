@@ -5,7 +5,7 @@ import type {
   RoomInvitationPayloadV2,
   SeatV2,
 } from "@coc-room/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { MemoryRepository, type RoomRecord } from "../data/repository";
 import { saveLocalSeatSecret } from "../lib/seat-credentials";
@@ -14,6 +14,7 @@ import { RoomTransport } from "./RoomTransport";
 
 const relayOrigin = process.env.COC_ROOM_LIVE_RELAY_URL?.replace(/\/$/u, "");
 const liveDescribe = relayOrigin ? describe : describe.skip;
+const useDefaultTransport = process.env.COC_ROOM_LIVE_DEFAULT_TRANSPORT === "1";
 
 interface CreatedRelayRoom {
   protocolVersion: 1;
@@ -24,7 +25,69 @@ interface CreatedRelayRoom {
   websocketUrl: string;
 }
 
-liveDescribe("RoomSessionV2 live forced-relay integration", () => {
+liveDescribe(`RoomSessionV2 live ${useDefaultTransport ? "automatic relay fallback" : "forced-relay"} integration`, () => {
+  it("recovers an interrupted socket and a restarted KP while retaining public scene state and redacting missed private events", async () => {
+    if (!relayOrigin) throw new Error("COC_ROOM_LIVE_RELAY_URL is required");
+    const NativeWebSocket = WebSocket;
+    const sockets: WebSocket[] = [];
+    vi.stubGlobal("WebSocket", class extends NativeWebSocket {
+      constructor(url: string | URL, protocols?: string | string[]) { super(url, protocols); sockets.push(this); }
+    });
+    const created = await createRelayRoom(relayOrigin, "recovery-live-host-peer");
+    const hostRoom = hostRoomRecord(created, "recovery-live-host-seat");
+    const hostRepository = new MemoryRepository();
+    const playerRepository = new MemoryRepository();
+    let host = createSession(hostRoom, "Recovery Keeper", hostRepository);
+    let player: RoomSessionV2 | undefined;
+    const errors: string[] = [];
+    const paths: string[] = [];
+    const recordError = (message: string) => { if (!message.startsWith("中继节点连接已断开")) errors.push(message); };
+    host.onError = recordError;
+    try {
+      await host.start();
+      const invite = await host.issueSeatInvitation("Recovery Player", "recovery-live-player-seat");
+      await saveLocalSeatSecret(created.roomId, invite.seatId, invite.seatSecret);
+      const joinedRoom = playerRoomRecord(invite, "recovery-live-player-peer");
+      player = createSession(joinedRoom, "Recovery Player", playerRepository);
+      player.onError = recordError;
+      player.onPathChange = (_peer, path) => paths.push(path);
+      await player.start();
+      await waitUntil(() => player!.isAuthenticated, errors, "player did not authenticate");
+      const scene = { schemaVersion: 2 as const, entityId: "recovery-scene", revision: 1, kind: "scene" as const, name: "Waiting room", description: "The door is closed.", artifactIds: [], audience: { kind: "room" as const }, data: {}, extensions: {} };
+      await host.submitConfirmed({ type: "entity.upserted", audience: scene.audience, payload: { entity: scene } });
+      await host.submitConfirmed({ type: "scene.focused", audience: scene.audience, payload: { sceneEntityId: scene.entityId } });
+      await waitForSequence([player], 2, errors);
+
+      // Close only the real player's WebSocket. Keep its RoomSession running
+      // so this exercises automatic transport recovery, not a manual reconnect.
+      sockets[1]!.close(4001, "recovery test");
+      await waitUntil(() => !player!.isAuthenticated, errors, "relay-only player did not pause");
+      expect(paths.at(-1)).toBe("offline");
+      await host.submitConfirmed({ type: "chat.message", audience: { kind: "host" }, payload: { message: "MISSED_KEEPER_SECRET", format: "plain" } });
+      await host.submitConfirmed({ type: "entity.upserted", audience: scene.audience, payload: { entity: { ...scene, revision: 2, description: "The door is now open." } } });
+      await waitUntil(() => player!.isAuthenticated && player!.lastContiguousSequence === 4, errors, "automatic socket recovery did not catch up");
+      expect(player.world.entities.get(scene.entityId)?.description).toBe("The door is now open.");
+      expect((await playerRepository.listEventViewsV2(created.roomId))[2]?.view).toBe("redacted");
+      expect(JSON.stringify(await playerRepository.listEventViewsV2(created.roomId))).not.toContain("MISSED_KEEPER_SECRET");
+      await player.submitConfirmed({ type: "chat.message", audience: { kind: "room" }, payload: { message: "I can act after automatic recovery", format: "plain" } });
+
+      host.stop();
+      await waitUntil(() => !player!.isAuthenticated, errors, "player did not pause while KP restarted");
+      host = createSession(hostRoom, "Recovery Keeper", hostRepository);
+      host.onError = recordError;
+      await host.start();
+      await waitUntil(() => player!.isAuthenticated, errors, "player did not reauthenticate after KP restart");
+      expect(host.world.activeSceneEntityId).toBe(scene.entityId);
+      expect(host.world.entities.get(scene.entityId)?.description).toBe("The door is now open.");
+      await player.submitConfirmed({ type: "chat.message", audience: { kind: "room" }, payload: { message: "KP has returned", format: "plain" } });
+      await waitForSequence([host, player], 6, errors);
+      expect(paths).toContain("relay");
+      expect(paths).not.toContain("direct");
+      expect(JSON.stringify(await playerRepository.listEventViewsV2(created.roomId))).not.toContain("MISSED_KEEPER_SECRET");
+      expect(errors).toEqual([]);
+    } finally { player?.stop(); host.stop(); vi.unstubAllGlobals(); }
+  }, 30_000);
+
   it("authenticates independent seats, redacts secrets, and catches up a reconnecting seat", async () => {
     if (!relayOrigin) throw new Error("COC_ROOM_LIVE_RELAY_URL is required");
     if (typeof WebSocket === "undefined") {
@@ -200,6 +263,36 @@ liveDescribe("RoomSessionV2 live forced-relay integration", () => {
       expect(relayPaths.some((entry) => entry.endsWith(":direct"))).toBe(false);
       expect(errors).toEqual([]);
 
+      const briefing = { text: "Public premise: investigate a missing orchestra.", recommendedSkills: ["Listen"], skillBudget: 300, skillPointMode: "occupation-interest" as const };
+      await host.submitConfirmed({ type: "room.settings.updated", audience: { kind: "room" }, payload: { defaultVisibility: "public", characterBriefing: briefing } });
+      await waitUntil(() => alice.world.characterBriefing?.skillBudget === 300 && bob?.world.characterBriefing?.skillBudget === 300, errors, "public character requirements did not reach both players");
+      const character = liveCharacter(host.localSeat.seatId, "character-keeper-direct", "Alice Ward", "Alice", "Reporter");
+      character.creation = { origin: "ai", occupationFormula: "edu4", occupationSkillIds: ["skill-listen"], allocations: { "skill-listen": { occupation: 40, interest: 10 } } };
+      await host.submitConfirmed({ type: "table.seat.updated", audience: { kind: "room" }, payload: { tableSeatId: "table-seat-alice", name: "Reporter seat" } });
+      await host.submitConfirmed({ type: "table.seat.character.assigned", audience: { kind: "room" }, payload: { tableSeatId: "table-seat-alice", character } });
+      await waitUntil(() => bob?.world.latestCharacters.get(character.id)?.creation?.allocations["skill-listen"]?.interest === 10, errors, "character skill allocations did not reach the other player");
+      await alice.submitConfirmed({ type: "table.seat.claimed", audience: { kind: "room" }, payload: { tableSeatId: "table-seat-alice" } });
+      await waitUntil(() => alice.world.latestCharacters.get(character.id)?.ownerPeerId === aliceInvitation.seatId && bob?.world.tableSeats.get("table-seat-alice")?.occupantSeatId === aliceInvitation.seatId, errors, "claim did not transfer card control to Alice");
+      await alice.submitConfirmed({ type: "character.updated", audience: { kind: "room" }, payload: { character: { ...alice.world.latestCharacters.get(character.id)!, occupation: "Investigative reporter" } } });
+      await waitUntil(() => host.world.latestCharacters.get(character.id)?.occupation === "Investigative reporter", errors, "player could not adjust the prepared card");
+      await host.submitConfirmed({ type: "check.requested", audience: { kind: "room" }, payload: { requestId: "check-keeper-direct", characterId: character.id, characterName: character.name, skillName: "Listen", proposedTarget: 60, reason: "Listen at the door" } });
+      await host.submitConfirmed({ type: "check.authorized", audience: { kind: "room" }, payload: { requestId: "check-keeper-direct", target: 60, requiredDifficulty: "regular", bonusDice: 0, penaltyDice: 0, note: "Keeper initiated" } });
+      await waitUntil(() => alice.world.checkAuthorizations.get("check-keeper-direct")?.requesterSeatId === aliceInvitation.seatId, errors, "keeper check did not become rollable by the investigator");
+      await alice.rollDice({ expression: "1d100", reason: "Listen at the door", target: 60, requiredDifficulty: "regular", bonusDice: 0, penaltyDice: 0, checkRequestId: "check-keeper-direct" });
+      await waitUntil(() => host.world.checkAuthorizations.get("check-keeper-direct")?.resolvedByEventId !== undefined, errors, "keeper-initiated roll was not recorded");
+      const tableSequence = host.world.lastSequence;
+      await waitForSequence([alice, bob], tableSequence, errors);
+      alice.stop();
+      const returnedAlice = createSession(playerRoomRecord(aliceInvitation, "live-v2-alice-return"), "Live Alice", aliceRepository);
+      aliceForCleanup = returnedAlice;
+      returnedAlice.onError = (message) => errors.push(`returned Alice: ${message}`);
+      await returnedAlice.start();
+      await waitUntil(() => returnedAlice.isAuthenticated && returnedAlice.world.lastSequence === tableSequence, errors, "seated player failed to reconnect");
+      expect(returnedAlice.world.tableSeats.get("table-seat-alice")?.occupantSeatId).toBe(aliceInvitation.seatId);
+      expect(returnedAlice.world.latestCharacters.get(character.id)?.creation).toEqual(character.creation);
+      expect(returnedAlice.world.latestCharacters.get(character.id)).toMatchObject({ ownerPeerId: aliceInvitation.seatId, occupation: "Investigative reporter" });
+      expect(errors).toEqual([]);
+
     } finally {
       aliceForCleanup?.stop();
       bob?.stop();
@@ -261,16 +354,24 @@ liveDescribe("RoomSessionV2 live forced-relay integration", () => {
         "Bob Doctor",
         "Emergency physician",
       );
+      await host.submitConfirmed({ type: "table.seat.updated", audience: roomAudience, payload: { tableSeatId: "chair-live-alice", name: "Reporter" } });
+      await host.submitConfirmed({ type: "table.seat.updated", audience: roomAudience, payload: { tableSeatId: "chair-live-bob", name: "Doctor" } });
+      await waitUntil(() => alice?.world.tableSeats.size === 2 && bob?.world.tableSeats.size === 2, errors, "table seats did not reach players");
+      await alice.submitConfirmed({ type: "table.seat.claimed", audience: roomAudience, payload: { tableSeatId: "chair-live-alice" } });
+      await bob.submitConfirmed({ type: "table.seat.claimed", audience: roomAudience, payload: { tableSeatId: "chair-live-bob" } });
       await alice.submitConfirmed({
-        type: "character.updated",
+        type: "table.seat.character.assigned",
         audience: roomAudience,
-        payload: { character: aliceCharacter },
+        payload: { tableSeatId: "chair-live-alice", character: aliceCharacter },
       });
       await bob.submitConfirmed({
-        type: "character.updated",
+        type: "table.seat.character.assigned",
         audience: roomAudience,
-        payload: { character: bobCharacter },
+        payload: { tableSeatId: "chair-live-bob", character: bobCharacter },
       });
+      await waitUntil(() => host.world.tableSeats.get("chair-live-alice")?.characterId === aliceCharacter.id
+        && alice?.world.tableSeats.get("chair-live-bob")?.characterId === bobCharacter.id
+        && bob?.world.latestCharacters.get(aliceCharacter.id)?.name === aliceCharacter.name, errors, "assigned cards did not reach all clients");
       await host.submitConfirmed({
         type: "module.switched",
         audience: roomAudience,
@@ -634,7 +735,7 @@ function createSession(
     relayUrl: room.relayUrl,
     participant: participant(room, displayName),
     hostPeerId: room.hostPeerId,
-    forceRelay: true,
+    forceRelay: !useDefaultTransport,
   });
   return new RoomSessionV2({ room, displayName, repository, transport });
 }

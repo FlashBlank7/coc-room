@@ -42,7 +42,32 @@ CHARACTER_DRAFT_INSTRUCTIONS = (
     "field. Use plausible CoC 7e characteristics and skills, but treat the result as a draft for "
     "human review rather than a rules-lawyer guarantee. Return only the JSON object required by "
     "the output schema. Include every required field; use null for an absent specialization and "
-    "empty strings or arrays where the prompt provides no basis."
+    "empty strings or arrays where the prompt provides no basis. "
+    "For a new investigator, always return a non-null creation plan: the occupation point "
+    "formula, credit range, zero-based occupationSkillIndexes referencing skills, and one "
+    "allocation per skillIndex separating occupation and interest purchases. Include every "
+    "skill exactly once, even those with zero purchases. Occupation points can only buy "
+    "selected occupation skills; interest points can also buy occupation skills. Standard "
+    "occupations normally select eight occupation skills plus Credit Rating; custom house "
+    "rules may differ. Use the occupation's formula rather than guessing from its display name. "
+    "The plan is reviewable, not a claim of verified occupational rules. Set custom occupationBudget "
+    "only for an explicit fixed budget or custom occupation; use null otherwise. Interest "
+    "defaults to INT times 2: use null for interestBudget unless explicitly changed by house rules. "
+    "Respect the keeperConfirmedPublicBriefing's fixed budgets, skill caps and attribute limits "
+    "when present in the prompt. Do not invent a higher budget or base value to hide overspending. "
+    "For each skill, value equals baseValue plus its occupation and interest allocation. "
+    "For attribute-linked bases set baseSource to edu (Own Language) or half-dex (Dodge); "
+    "use null for fixed bases. Name language/art/craft/science specializations explicitly. "
+    "Do not buy Cthulhu Mythos unless explicitly allowed. Spend the intended budgets without "
+    "exceeding them; leave unused points only when constraints prevent a sensible allocation. "
+    "Keep numerical accounting in the structured plan rather than repeating it in narrative notes."
+    " When referenceOccupationProfiles is provided in the prompt, choose a matching "
+    "creation.occupationProfile and follow its formula, creditMin/creditMax, required skills "
+    "and choice instructions exactly. Skill tuples contain name, base (edu means EDU), and "
+    "optional specialization. Preserve the specified names/specializations for required skills. "
+    "An era-appropriate display occupation such as a town doctor does not authorize lowering "
+    "that profile's credit range. Explicit house rules take precedence; use null for the "
+    "profile when customizing its formula, credit range or mandatory skill choices."
 )
 
 
@@ -115,7 +140,44 @@ class SkillDraftV1(StrictModel):
         serialization_alias="baseValue",
     )
     value: int = Field(ge=0, le=100)
+    base_source: Literal["edu", "half-dex"] | None = Field(
+        default=None, validation_alias=AliasChoices("baseSource", "base_source"), serialization_alias="baseSource",
+    )
     checked: bool = False
+
+
+class SkillAllocationDraftV1(StrictModel):
+    skillIndex: int = Field(ge=0, le=199)
+    occupation: int = Field(ge=0, le=100)
+    interest: int = Field(ge=0, le=100)
+
+
+class CharacterCreationDraftV1(StrictModel):
+    occupationProfile: Literal["作家", "记者", "教授", "医生"] | None = None
+    occupationFormula: Literal["edu4", "edu2-str2", "edu2-dex2", "edu2-app2", "edu2-pow2", "custom"]
+    occupationBudget: int | None = Field(default=None, ge=0, le=10_000)
+    interestBudget: int | None = Field(default=None, ge=0, le=10_000)
+    creditMin: int | None = Field(default=None, ge=0, le=99)
+    creditMax: int | None = Field(default=None, ge=0, le=99)
+    occupationSkillIndexes: list[int] = Field(max_length=200)
+    allocations: list[SkillAllocationDraftV1] = Field(max_length=200)
+
+
+class SkillAllocationWireV1(StrictModel):
+    occupation: int = Field(ge=0, le=100)
+    interest: int = Field(ge=0, le=100)
+
+
+class CharacterCreationWireV1(StrictModel):
+    origin: Literal["ai"] = "ai"
+    occupationProfile: Literal["作家", "记者", "教授", "医生"] | None = None
+    occupationFormula: Literal["edu4", "edu2-str2", "edu2-dex2", "edu2-app2", "edu2-pow2", "custom"]
+    occupationBudget: int | None = Field(default=None, ge=0, le=10_000)
+    interestBudget: int | None = Field(default=None, ge=0, le=10_000)
+    creditMin: int | None = Field(default=None, ge=0, le=99)
+    creditMax: int | None = Field(default=None, ge=0, le=99)
+    occupationSkillIds: list[str] = Field(max_length=200)
+    allocations: dict[str, SkillAllocationWireV1]
 
 
 class InventoryDraftV1(StrictModel):
@@ -199,9 +261,23 @@ class CharacterDraftProviderOutputV1(StrictModel):
     birthplace: str = Field(default="", max_length=240)
     characteristics: CharacteristicDraftV1
     skills: list[SkillDraftV1] = Field(default_factory=list, max_length=200)
+    creation: CharacterCreationDraftV1 | None = None
     inventory: list[InventoryDraftV1] = Field(default_factory=list, max_length=500)
     background: BackgroundDraftV1
     notes: str = Field(default="", max_length=20_000)
+
+    @model_validator(mode="after")
+    def validate_creation_references(self) -> "CharacterDraftProviderOutputV1":
+        if self.creation is None:
+            return self
+        indexes = set(range(len(self.skills)))
+        occupation = self.creation.occupationSkillIndexes
+        if len(set(occupation)) != len(occupation) or not set(occupation).issubset(indexes):
+            raise ValueError("occupation skill references must be unique valid skill indexes")
+        allocations = self.creation.allocations
+        if len(allocations) != len(indexes) or {item.skillIndex for item in allocations} != indexes:
+            raise ValueError("creation must allocate every skill exactly once")
+        return self
 
 
 class DerivedStatsV1(StrictModel):
@@ -311,6 +387,7 @@ class Coc7CharacterWireV1(StrictModel):
     characteristics: CharacteristicDraftV1
     derived: DerivedStatsV1
     skills: list[Coc7SkillWireV1] = Field(max_length=200)
+    creation: CharacterCreationWireV1 | None = None
     status: CharacterStatusV1
     inventory: list[Coc7InventoryWireV1] = Field(max_length=500)
     background: BackgroundDraftV1
@@ -638,6 +715,18 @@ def _to_wire_character(
     task: GenerateCharacterDraftTaskV1,
     draft: CharacterDraftProviderOutputV1,
 ) -> Coc7CharacterWireV1:
+    skills = [
+        Coc7SkillWireV1(id=f"skill:{uuid.uuid4()}", **skill.model_dump(mode="python"))
+        for skill in draft.skills
+    ]
+    creation = None
+    if draft.creation is not None:
+        plan = draft.creation
+        creation = CharacterCreationWireV1(
+            **plan.model_dump(exclude={"occupationSkillIndexes", "allocations"}),
+            occupationSkillIds=[skills[index].id for index in plan.occupationSkillIndexes],
+            allocations={skills[item.skillIndex].id: SkillAllocationWireV1(occupation=item.occupation, interest=item.interest) for item in plan.allocations},
+        )
     return Coc7CharacterWireV1(
         id=f"character:{uuid.uuid4()}",
         ownerPeerId=task.owner_seat_id,
@@ -649,10 +738,8 @@ def _to_wire_character(
         birthplace=draft.birthplace,
         characteristics=draft.characteristics,
         derived=_derive_stats(draft.characteristics, draft.age, draft.skills),
-        skills=[
-            Coc7SkillWireV1(id=f"skill:{uuid.uuid4()}", **skill.model_dump(mode="python"))
-            for skill in draft.skills
-        ],
+        skills=skills,
+        creation=creation,
         status=CharacterStatusV1(),
         inventory=[
             Coc7InventoryWireV1(id=f"item:{uuid.uuid4()}", **item.model_dump(mode="python"))

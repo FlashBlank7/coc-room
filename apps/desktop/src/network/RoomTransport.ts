@@ -170,6 +170,7 @@ export class RoomTransport {
           this.relayPeerIds.delete(message.peer.peerId);
           if (!this.hasOpenDirectLink(message.peer.peerId)) {
             this.participants.delete(message.peer.peerId);
+            if (!this.links.has(message.peer.peerId)) this.setPath(message.peer.peerId, "offline");
           }
         } else {
           this.relayPeerIds.add(message.peer.peerId);
@@ -229,19 +230,28 @@ export class RoomTransport {
     const existing = this.links.get(peerId);
     if (existing) return existing;
 
-    if (this.options.forceRelay) {
-      const relayLink: PeerLink = { pendingCandidates: [], path: "connecting" };
-      this.links.set(peerId, relayLink);
+    const link: PeerLink = { pendingCandidates: [], path: "connecting" };
+    this.links.set(peerId, link);
+    if (this.options.forceRelay || typeof RTCPeerConnection === "undefined") {
       this.setPath(peerId, "relay");
-      return relayLink;
+      return link;
     }
+    try {
+      await this.initializeDirectPeer(peerId, link, initiator);
+    } catch {
+      // The relay is already authenticated. A browser refusing WebRTC, or an
+      // offer failing, must not reject the presence callback or lose this peer.
+      this.fallBackFromDirect(peerId, link);
+    }
+    return link;
+  }
 
+  private async initializeDirectPeer(peerId: string, link: PeerLink, initiator: boolean): Promise<void> {
     const connection = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
       bundlePolicy: "max-bundle",
     });
-    const link: PeerLink = { connection, pendingCandidates: [], path: "connecting" };
-    this.links.set(peerId, link);
+    link.connection = connection;
     this.setPath(peerId, "connecting");
 
     connection.onicecandidate = ({ candidate }) => {
@@ -257,7 +267,7 @@ export class RoomTransport {
       if (connection.connectionState === "failed" || connection.connectionState === "disconnected") {
         this.setPath(peerId, "relay");
       }
-      if (connection.connectionState === "closed") this.setPath(peerId, "offline");
+      if (connection.connectionState === "closed") this.setPath(peerId, this.relayConnected && this.relayPeerIds.has(peerId) ? "relay" : "offline");
     };
     connection.ondatachannel = ({ channel }) => this.attachChannel(peerId, link, channel);
 
@@ -267,16 +277,41 @@ export class RoomTransport {
       const assetChannel = connection.createDataChannel("coc-room-assets-v1", { ordered: false });
       this.attachChannel(peerId, link, assetChannel);
       const offer = await connection.createOffer();
+      if (this.stopped || this.links.get(peerId) !== link) return;
       await connection.setLocalDescription(offer);
+      if (this.stopped || this.links.get(peerId) !== link) return;
       if (!this.sendSocket({ kind: "signal", targetPeerId: peerId, data: { type: "offer", description: offer } })) {
         this.setPath(peerId, "relay");
       }
     }
 
     globalThis.setTimeout(() => {
+      if (this.stopped || this.links.get(peerId) !== link) return;
       if (link.channel?.readyState !== "open" && link.path === "connecting") this.setPath(peerId, "relay");
     }, this.iceTimeoutMs);
-    return link;
+  }
+
+  private fallBackFromDirect(peerId: string, link: PeerLink): void {
+    if (this.links.get(peerId) !== link) return;
+    if (link.connection) {
+      link.connection.onicecandidate = null;
+      link.connection.onconnectionstatechange = null;
+      link.connection.ondatachannel = null;
+    }
+    for (const channel of [link.channel, link.assetChannel]) {
+      if (!channel) continue;
+      channel.onopen = null;
+      channel.onclose = null;
+      channel.onerror = null;
+      channel.onmessage = null;
+      channel.close();
+    }
+    link.connection?.close();
+    link.connection = undefined;
+    link.channel = undefined;
+    link.assetChannel = undefined;
+    link.pendingCandidates = [];
+    this.setPath(peerId, this.relayConnected && this.relayPeerIds.has(peerId) ? "relay" : "offline");
   }
 
   private attachChannel(peerId: string, link: PeerLink, channel: RTCDataChannel): void {
@@ -321,7 +356,7 @@ export class RoomTransport {
     try {
       const link = await this.createPeer(fromPeerId, false);
       const connection = link.connection;
-      if (connection === undefined) throw new Error("WebRTC connection was not initialized");
+      if (connection === undefined) return;
       if (signal.type === "offer") {
         await connection.setRemoteDescription(signal.description);
         await this.flushPendingCandidates(link);
@@ -338,7 +373,8 @@ export class RoomTransport {
         else link.pendingCandidates.push(signal.candidate);
       }
     } catch (error) {
-      this.setPath(fromPeerId, "relay");
+      const link = this.links.get(fromPeerId);
+      if (link) this.fallBackFromDirect(fromPeerId, link);
       this.onError?.(`直连协商失败，已切换中继：${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -525,6 +561,7 @@ export class RoomTransport {
     this.setRelayConnected(false);
     this.relayPeerIds.clear();
     const reachablePeerIds = new Set([this.options.participant.peerId]);
+    const knownLinks = new Set(this.links.keys());
     for (const [peerId, link] of [...this.links]) {
       if (link.channel?.readyState === "open") {
         reachablePeerIds.add(peerId);
@@ -536,7 +573,12 @@ export class RoomTransport {
       this.links.delete(peerId);
     }
     for (const peerId of [...this.participants.keys()]) {
-      if (!reachablePeerIds.has(peerId)) this.participants.delete(peerId);
+      if (!reachablePeerIds.has(peerId)) {
+        // A relay-only receiver may never have constructed an RTC link. Its
+        // last send still reported "relay", so explicitly clear that UI path.
+        if (!knownLinks.has(peerId)) this.setPath(peerId, "offline");
+        this.participants.delete(peerId);
+      }
     }
     this.onPresence?.([...this.participants.values()]);
   }

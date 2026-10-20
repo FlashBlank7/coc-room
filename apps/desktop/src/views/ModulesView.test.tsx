@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoardV1, ModulePackageV1, RoomArtifactV2, RoomEntityV2, RoomEventV1 } from "@coc-room/protocol";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,6 +10,7 @@ import type { RoomSession } from "../network/RoomSession";
 import { RoomSessionV2 } from "../network/RoomSessionV2";
 import { useAppStore } from "../store/app-store";
 import { ModulesView } from "./ModulesView";
+import { miniModule } from "../test/scenarios/mini-investigation";
 
 // Desktop-mode tests drive the Tauri IPC surface directly; only `invoke` and
 // `listen` are replaced so the plugin modules keep their real exports.
@@ -31,6 +32,81 @@ afterEach(async () => {
 });
 
 describe("ModulesView browser import", () => {
+  it.each(["during-import", "after-import"])("adds keeper reference %s without re-parsing or replacing the base material", async (route) => {
+    const modulePackage = createModulePackageWithEntities();
+    modulePackage.scenes = [{ ...miniModule.scenes[0]!, clueIds: [], npcIds: modulePackage.npcs.map((npc) => npc.id), locationIds: modulePackage.locations.map((location) => location.id) }];
+    modulePackage.sourceDocuments = [{ id: "source-original", name: "原文", mediaType: "text/plain" }];
+    const note = { title: "这一切为什么发生", text: "剧院仪式困住了乐团，调查员需要找到曲目单。", kind: "source", sources: [{ sourceId: "source-original", excerpt: "经本地安全桥整理的模组原文" }] };
+    const response = {
+      type: "result", result: { guide: { truth: note.text, hook: "接受委托", clueTrail: [], timeline: [], endings: [], pacing: "",
+        preparation: { truth: note, hook: { ...note, title: "如何介入" }, essentials: [{ ...note, title: "先记住真相" }], playerBriefing: { ...note, title: "玩家背景" }, timeline: [], endings: [], cast: modulePackage.npcs.map((npc) => ({ npcId: npc.id, notes: [note] })),
+          scenes: modulePackage.scenes.map((scene) => ({ sceneId: scene.id, purpose: note, openingDraft: "门内传来唱针声。", actions: [], exits: [], pitfalls: [] })),
+        },
+      } },
+    };
+    const fetchMock = mockSuccessfulBrowserParse(modulePackage).mockImplementation(async (_input, init) => {
+      const request = JSON.parse(String(init?.body));
+      const digest = JSON.parse(request.digest);
+      const reply = (guide: unknown) => new Response(`${JSON.stringify({ protocol_version: "1.0", request_id: request.id, type: "result", result: { guide } })}\n`, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
+      if (digest.workflowStage === "extract") return reply({ facts: [{ id: "fact-truth", category: "truth", sceneIds: [], note }] });
+      if (digest.workflowStage === "plan") return reply({ scenes: modulePackage.scenes.map((scene) => ({ sceneId: scene.id, factIds: ["fact-truth"], purpose: "调查剧院", alternativeRoutes: note })) });
+      if (digest.workflowStage === "review") return reply({ checks: [{ factId: "fact-truth", verdict: "covered", reason: "已核对" }], findings: [] });
+      if (digest.preparationScope !== "scene-publications") return reply(response.result.guide);
+      const supplementary = { ...response.result.guide, preparation: { ...response.result.guide.preparation, scenes: response.result.guide.preparation.scenes.map((scene) => ({ ...scene, openingDraft: "不应替换已有开场", publicEntities: [
+        { kind: "npc", entityId: "npc-hana", name: "花小路", text: "正在寻找同伴的剧场演员。", when: note },
+        { kind: "location", entityId: "location-theater", name: "观止剧场", text: "门内传来唱针声的剧院。", when: note },
+      ] })) } };
+      return new Response(`${JSON.stringify({ protocol_version: "1.0", request_id: request.id, type: "result", result: { guide: supplementary } })}\n`, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
+    });
+    render(<ModulesView />);
+    if (route === "during-import") fireEvent.click(screen.getByRole("radio", { name: "主持参考" }));
+    fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), { target: { value: "原始输入" } });
+    fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+    if (route === "after-import") {
+      const upgrade = await screen.findByRole("button", { name: "补充主持参考" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(screen.queryByLabelText("第一次带这个模组")).toBeNull();
+      fireEvent.click(upgrade);
+    }
+    await screen.findByRole("button", { name: "每一幕怎么带" }, { timeout: 5_000 });
+    const reader = screen.getByLabelText("第一次带这个模组");
+    expect(within(reader).getByRole("button", { name: "每一幕怎么带" })).toBeTruthy();
+    const second = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(JSON.parse(second.digest).sources[0].text).toBe("经本地安全桥整理的模组原文");
+    expect(useAppStore.getState().modules).toHaveLength(0);
+    await waitFor(async () => expect((await (await getRepository()).getModuleDraft("active-module-editor"))?.package.keeperGuide?.preparation?.truth.text).toBe(note.text));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5), { timeout: 5_000 });
+    expect(fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse(JSON.parse(String(init?.body)).digest).workflowStage)).toEqual(["extract", "plan", "draft", "draft"]);
+    expect(fetchMock.mock.calls.some(([, init]) => JSON.parse(JSON.parse(String(init?.body)).digest ?? "{}").preparationScope === "scene-publications")).toBe(true);
+    await waitFor(async () => {
+      const scene = (await (await getRepository()).getModuleDraft("active-module-editor"))?.package.keeperGuide?.preparation?.scenes[0];
+      expect(scene?.publicEntities).toHaveLength(2);
+      expect(scene?.openingDraft).toBe("门内传来唱针声。");
+      expect((await (await getRepository()).getModuleDraft("active-module-editor"))?.package.keeperGuide?.workflow?.stage).toBe("complete");
+    });
+    const prepared = (await (await getRepository()).getModuleDraft("active-module-editor"))!.package;
+    expect(prepared.scenes).toEqual(modulePackage.scenes);
+    expect(prepared.npcs).toEqual(modulePackage.npcs);
+    expect(prepared.locations).toEqual(modulePackage.locations);
+    expect(prepared.clues).toEqual(modulePackage.clues);
+    expect(prepared.keeperGuide?.workflow?.audit).toBeUndefined();
+  });
+
+  it("keeps the extracted module recoverable when guide generation fails", async () => {
+    const modulePackage = { ...createModulePackageWithEntities(), moduleId: "module-guide-failure" };
+    mockSuccessfulBrowserParse(modulePackage).mockImplementationOnce(async (_input, init) => {
+      const request = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ protocol_version: "1.0", request_id: request.id, type: "error", error: { code: "LOCAL_AI_FAILED", message: "provider unavailable" } }) + "\n", { status: 200 });
+    });
+    render(<ModulesView />);
+    fireEvent.click(screen.getByRole("radio", { name: "主持参考" }));
+    fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), { target: { value: "要保留的输入" } });
+    fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+    await screen.findByText(/资料已保留，主持引导未完成/);
+    expect((await (await getRepository()).getModuleDraft("active-module-editor"))?.package.moduleId).toBe(modulePackage.moduleId);
+    expect((screen.getByRole("button", { name: "确认并保存备团资料" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("keeps real AI disabled on a bridge-less player page while preserving import and mock UI work", async () => {
     render(<ModulesView />);
     fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), {
@@ -47,7 +123,7 @@ describe("ModulesView browser import", () => {
   });
 
   it("guides a parsed draft through review before it enters the module library", async () => {
-    mockSuccessfulBrowserParse(createModulePackageWithEntities());
+    const parse = mockSuccessfulBrowserParse(createModulePackageWithEntities());
     render(<ModulesView />);
 
     const steps = screen.getByLabelText("模组准备进度");
@@ -64,7 +140,10 @@ describe("ModulesView browser import", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
 
     const unsavedDraft = await screen.findByLabelText("未保存的解析草稿");
-    expect(within(unsavedDraft).getByText("AI 已整理完成 · 等你确认")).not.toBeNull();
+    expect(await within(unsavedDraft).findByText("AI 已整理完成 · 等你确认")).not.toBeNull();
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("radio", { name: "跑团辅助" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByLabelText("第一次带这个模组")).toBeNull();
     expect(within(unsavedDraft).getByRole("button", { name: "确认并保存备团资料" })).not.toBeNull();
     expect(useAppStore.getState().modules).toHaveLength(0);
     expect(within(steps).getByText("检查资料").closest("li")?.getAttribute("aria-current")).toBe("step");
@@ -138,6 +217,33 @@ describe("ModulesView browser import", () => {
     await waitFor(() => expect(screen.queryByLabelText("可恢复的模组草稿")).toBeNull());
   });
 
+  it("does not resurrect an old recovery point when its slow write finishes after a formal save", async () => {
+    const repository = await getRepository();
+    const modulePackage = { ...createModulePackageWithEntities(), moduleId: "module-slow-checkpoint" };
+    const saveCheckpoint = repository.saveModuleDraft.bind(repository);
+    let releaseCheckpoint!: () => void;
+    const heldCheckpoint = new Promise<void>((resolve) => { releaseCheckpoint = resolve; });
+    const checkpointSpy = vi.spyOn(repository, "saveModuleDraft")
+      .mockImplementationOnce(saveCheckpoint)
+      .mockImplementationOnce(saveCheckpoint)
+      .mockImplementationOnce(async (value) => { await heldCheckpoint; await saveCheckpoint(value); });
+    const formalSave = vi.spyOn(repository, "saveModule");
+    mockSuccessfulBrowserParse(modulePackage).mockRejectedValue(new Error("provider unavailable"));
+    render(<ModulesView />);
+    fireEvent.click(screen.getByRole("radio", { name: "主持参考" }));
+    fireEvent.change(screen.getByLabelText("粘贴原始模组文本"), { target: { value: "需要保留的原文" } });
+    fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
+    await screen.findByText(/资料已保留，主持引导未完成/);
+    await waitFor(() => expect(checkpointSpy).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole("button", { name: "确认并保存备团资料" }));
+    await waitFor(() => expect(formalSave).toHaveBeenCalledOnce());
+    await act(async () => { releaseCheckpoint(); await heldCheckpoint; });
+    await screen.findByLabelText("模组已保存");
+    expect(await repository.getModuleDraft("active-module-editor")).toBeUndefined();
+    expect((await repository.getModule(modulePackage.moduleId))?.sourceText).toBe("经本地安全桥整理的模组原文");
+    await repository.deleteModule(modulePackage.moduleId);
+  });
+
   it("does not resurrect a discarded recovery after the keeper explicitly opens saved material", async () => {
     const repository = await getRepository();
     const savedModule = {
@@ -206,6 +312,7 @@ describe("ModulesView browser import", () => {
     expect(reminders.textContent).not.toContain("Archive includes");
     expect(screen.getByLabelText("源 ZIP 图片素材").textContent).toContain("不会设成背景，也不会发给玩家");
 
+    await waitFor(() => expect((screen.getByRole("button", { name: "确认并保存备团资料" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "确认并保存备团资料" }));
     await screen.findByLabelText("模组已保存");
     const saved = useAppStore.getState().modules[0];
@@ -310,7 +417,7 @@ describe("ModulesView browser import", () => {
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("整理结果或模组修改还没有正式保存"));
     expect(useAppStore.getState().activeView).toBe("modules");
-    expect(within(unsavedDraft).getByText("AI 已整理完成 · 等你确认")).not.toBeNull();
+    expect(await within(unsavedDraft).findByText("AI 已整理完成 · 等你确认")).not.toBeNull();
 
     const beforeUnload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(beforeUnload);
@@ -751,6 +858,7 @@ describe("ModulesView room publishing controls", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "开始整理模组" }));
     const draftNotice = await screen.findByLabelText("未保存的解析草稿");
+    await waitFor(() => expect((within(draftNotice).getByRole("button", { name: "确认并保存备团资料" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(draftNotice).getByRole("button", { name: "确认并保存备团资料" }));
 
     const saved = await screen.findByLabelText("模组已保存");

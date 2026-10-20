@@ -286,6 +286,9 @@ function normalizeProposal(
     case "chat.message":
     case "character.updated":
     case "check.requested":
+    case "table.seat.claimed":
+    case "table.seat.released":
+    case "table.seat.character.assigned":
       return { ...proposal, audience: { kind: "room" } };
     case "check.closed": {
       const request = state.checkRequests.get(proposal.payload.requestId);
@@ -352,6 +355,12 @@ function authorizeEvent(event: RoomEventV2, state: RoomWorldStateV2): void {
     case "dice.result":
       return;
     case "check.requested":
+      return;
+    case "table.seat.claimed":
+    case "table.seat.released":
+    case "table.seat.character.assigned":
+      // The reducer checks vacancy, occupant identity and card ownership
+      // against the same authoritative state used to sequence the command.
       return;
     case "check.closed": {
       const request = state.checkRequests.get(event.payload.requestId);

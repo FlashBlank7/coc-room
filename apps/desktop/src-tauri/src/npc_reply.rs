@@ -47,6 +47,7 @@ const MAX_PINS: usize = 64;
 const MAX_PIN_CHARS: usize = 400_000;
 const MAX_MESSAGES: usize = 200;
 const MAX_MESSAGE_CHARS: usize = 100_000;
+const MAX_CHARACTER_PROMPT_CHARS: usize = 100_000;
 
 #[derive(Default)]
 pub(crate) struct NpcReplyExecutionState {
@@ -584,21 +585,32 @@ pub(crate) async fn run_npc_stats_draft(
         })
         .map_err(|_| "无法序列化 NPC 属性草稿请求".to_string())?,
     );
+    drop(api_key);
+    run_text_preparation_sidecar(app, &request.id, permit, serialized, deadline).await
+}
+
+async fn run_text_preparation_sidecar(
+    app: tauri::AppHandle,
+    request_id: &str,
+    permit: NpcReplyPermit<'_>,
+    serialized: Zeroizing<String>,
+    deadline: Instant,
+) -> Result<Vec<Value>, String> {
     if serialized.len() > MAX_NPC_REPLY_REQUEST_BYTES {
-        return Err("NPC 属性草稿请求超过安全上限".to_string());
+        return Err("AI 文本任务请求超过安全上限".to_string());
     }
     if permit.cancelled() {
-        return Err("NPC 属性草稿已取消".to_string());
+        return Err("AI 文本任务已取消".to_string());
     }
 
     let sidecar = app
         .shell()
         .sidecar("module-parser")
-        .map_err(|_| "无法加载 NPC 属性草稿 sidecar".to_string())?
+        .map_err(|_| "无法加载 AI 文本任务 sidecar".to_string())?
         .set_raw_out(true);
     let (mut receiver, child) = sidecar
         .spawn()
-        .map_err(|_| "无法启动 NPC 属性草稿 sidecar".to_string())?;
+        .map_err(|_| "无法启动 AI 文本任务 sidecar".to_string())?;
     let mut child = NpcSidecarChildGuard::new(child)?;
     let mut stdin_payload = Zeroizing::new(Vec::with_capacity(serialized.len() + 1));
     stdin_payload.extend_from_slice(serialized.as_bytes());
@@ -613,7 +625,6 @@ pub(crate) async fn run_npc_stats_draft(
     #[cfg(not(target_os = "windows"))]
     child.write(stdin_payload.as_slice())?;
     drop(serialized);
-    drop(api_key);
 
     let mut stdout = Vec::new();
     let mut stdout_cursor = 0;
@@ -621,23 +632,23 @@ pub(crate) async fn run_npc_stats_draft(
     let mut stderr_bytes = 0usize;
     loop {
         if permit.cancelled() {
-            return Err("NPC 属性草稿已取消".to_string());
+            return Err("AI 文本任务已取消".to_string());
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err("NPC 属性草稿超时，已终止执行器".to_string());
+            return Err("AI 文本任务超时，已终止执行器".to_string());
         }
         let poll_deadline = deadline.min(now + CANCEL_POLL_INTERVAL);
         let event = match timeout_at(poll_deadline, receiver.recv()).await {
             Ok(Some(event)) => event,
-            Ok(None) => return Err("NPC 属性草稿 sidecar 通信异常".to_string()),
+            Ok(None) => return Err("AI 文本任务 sidecar 通信异常".to_string()),
             Err(_) => continue,
         };
         match event {
             CommandEvent::Stdout(bytes) => {
                 append_bytes_bounded(&mut stdout, &bytes, MAX_NPC_REPLY_STDOUT_BYTES)?;
                 for message in parse_jsonl_messages(&stdout, &mut stdout_cursor, false)? {
-                    validate_sidecar_message(&message, &request.id)?;
+                    validate_sidecar_message(&message, request_id)?;
                     messages.push(message);
                 }
             }
@@ -645,36 +656,120 @@ pub(crate) async fn run_npc_stats_draft(
                 stderr_bytes = stderr_bytes
                     .checked_add(bytes.len())
                     .filter(|size| *size <= MAX_NPC_REPLY_STDERR_BYTES)
-                    .ok_or_else(|| "NPC 属性草稿 sidecar 错误输出超过安全上限".to_string())?;
+                    .ok_or_else(|| "AI 文本任务 sidecar 错误输出超过安全上限".to_string())?;
             }
-            CommandEvent::Error(_) => return Err("NPC 属性草稿 sidecar 通信异常".to_string()),
+            CommandEvent::Error(_) => return Err("AI 文本任务 sidecar 通信异常".to_string()),
             CommandEvent::Terminated(status) => {
                 child.disarm();
                 if status.code != Some(0) {
                     return Err(if stderr_bytes == 0 {
-                        "NPC 属性草稿 sidecar 异常退出"
+                        "AI 文本任务 sidecar 异常退出"
                     } else {
-                        "NPC 属性草稿 sidecar 异常退出（stderr 已脱敏）"
+                        "AI 文本任务 sidecar 异常退出（stderr 已脱敏）"
                     }
                     .to_string());
                 }
                 break;
             }
-            _ => return Err("NPC 属性草稿 sidecar 返回了未知事件".to_string()),
+            _ => return Err("AI 文本任务 sidecar 返回了未知事件".to_string()),
         }
     }
     for message in parse_jsonl_messages(&stdout, &mut stdout_cursor, true)? {
-        validate_sidecar_message(&message, &request.id)?;
+        validate_sidecar_message(&message, request_id)?;
         messages.push(message);
     }
     if messages.len() != 1 {
-        return Err("NPC 属性草稿 sidecar 必须返回且只返回一个结果".to_string());
+        return Err("AI 文本任务 sidecar 必须返回且只返回一个结果".to_string());
     }
     let message_type = messages[0].get("type").and_then(Value::as_str);
     if !matches!(message_type, Some("result" | "error")) {
-        return Err("NPC 属性草稿 sidecar 返回了非法消息类型".to_string());
+        return Err("AI 文本任务 sidecar 返回了非法消息类型".to_string());
     }
     Ok(messages)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeeperGuideRequest {
+    id: String,
+    provider: String,
+    model: String,
+    digest: String,
+}
+
+#[derive(Serialize)]
+struct SidecarKeeperGuideRequest<'a> {
+    id: &'a str,
+    action: &'static str,
+    provider: &'a str,
+    model: &'a str,
+    digest: &'a str,
+    api_key: Option<&'a str>,
+}
+
+fn validate_keeper_guide_request(request: &KeeperGuideRequest) -> Result<(), String> {
+    validate_request_id(&request.id)?;
+    if !matches!(request.provider.as_str(), "codex" | "deepseek") {
+        return Err("不支持的备团引导提供者".to_string());
+    }
+    if request.model.len() > 100
+        || !request
+            .model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+    {
+        return Err("备团引导模型名称无效".to_string());
+    }
+    validate_text(&request.digest, 1, 300_000, "备团资料")?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn run_keeper_guide(
+    app: tauri::AppHandle,
+    execution: State<'_, NpcReplyExecutionState>,
+    request: KeeperGuideRequest,
+) -> Result<Vec<Value>, String> {
+    validate_keeper_guide_request(&request)?;
+    let permit = execution.acquire(&request.id)?;
+    let api_key = if request.provider == "deepseek" {
+        Some(Zeroizing::new(
+            Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+                .map_err(|_| "无法访问 Windows Credential Manager".to_string())?
+                .get_password()
+                .map_err(|_| "尚未保存 DeepSeek API Key".to_string())?,
+        ))
+    } else {
+        None
+    };
+    let serialized = Zeroizing::new(
+        serde_json::to_string(&SidecarKeeperGuideRequest {
+            id: &request.id,
+            action: "generate_keeper_guide",
+            provider: &request.provider,
+            model: &request.model,
+            digest: &request.digest,
+            api_key: api_key.as_deref().map(String::as_str),
+        })
+        .map_err(|_| "无法序列化备团引导请求".to_string())?,
+    );
+    drop(api_key);
+    run_text_preparation_sidecar(
+        app,
+        &request.id,
+        permit,
+        serialized,
+        Instant::now() + NPC_REPLY_TIMEOUT,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) fn cancel_keeper_guide(
+    execution: State<'_, NpcReplyExecutionState>,
+    request_id: String,
+) -> Result<bool, String> {
+    cancel_text_ai_job(&execution, &request_id)
 }
 
 fn validate_npc_stats_draft_request(request: &NpcStatsDraftRequest) -> Result<(), String> {
@@ -716,7 +811,7 @@ fn validate_character_draft_request(request: &CharacterDraftRequest) -> Result<(
     {
         return Err("角色草稿模型名称无效".to_string());
     }
-    validate_text(&request.prompt, 1, 8_000, "角色草稿描述")?;
+    validate_text(&request.prompt, 1, MAX_CHARACTER_PROMPT_CHARS, "角色草稿描述")?;
     validate_text(&request.player_name, 1, 160, "玩家名称")?;
     validate_identifier(&request.owner_seat_id, "角色归属席位")?;
     Ok(())
@@ -1102,6 +1197,24 @@ impl Drop for NpcSidecarChildGuard {
 mod tests {
     use super::*;
 
+    #[test]
+    fn keeper_guide_accepts_only_bounded_text_and_fixed_provider_fields() {
+        let valid = serde_json::json!({"id":"00000000-0000-4000-8000-000000000004", "provider":"codex", "model":"", "digest":"{\"sources\":[]}"});
+        let request: KeeperGuideRequest = serde_json::from_value(valid.clone()).unwrap();
+        assert!(validate_keeper_guide_request(&request).is_ok());
+        for field in ["command", "source_path", "api_key", "tools", "action"] {
+            let mut candidate = valid.clone();
+            candidate[field] = serde_json::json!("not-allowed");
+            assert!(serde_json::from_value::<KeeperGuideRequest>(candidate).is_err());
+        }
+        let mut oversized = request;
+        oversized.digest = "x".repeat(300_001);
+        assert!(validate_keeper_guide_request(&oversized).is_err());
+        let mut invalid_id: KeeperGuideRequest = serde_json::from_value(valid).unwrap();
+        invalid_id.id = "guide-request-1".to_string();
+        assert!(validate_keeper_guide_request(&invalid_id).is_err());
+    }
+
     fn request() -> NpcReplyRequest {
         NpcReplyRequest {
             id: "00000000-0000-4000-8000-000000000001".to_string(),
@@ -1162,7 +1275,7 @@ mod tests {
 
     #[test]
     fn character_draft_accepts_only_the_five_story_and_provider_fields() {
-        let candidate = CharacterDraftRequest {
+        let mut candidate = CharacterDraftRequest {
             id: "00000000-0000-4000-8000-000000000002".to_string(),
             action: "generate_character_draft".to_string(),
             provider: "codex".to_string(),
@@ -1172,6 +1285,13 @@ mod tests {
             owner_seat_id: "seat-one".to_string(),
         };
         assert!(validate_character_draft_request(&candidate).is_ok());
+
+        // Public module background and house rules share the web/Python limit.
+        // Count Unicode characters, not UTF-8 bytes or UTF-16 code units.
+        candidate.prompt = "🦋".repeat(MAX_CHARACTER_PROMPT_CHARS);
+        assert!(validate_character_draft_request(&candidate).is_ok());
+        candidate.prompt.push('蝶');
+        assert!(validate_character_draft_request(&candidate).is_err());
 
         let unsafe_payload = serde_json::json!({
             "id": "00000000-0000-4000-8000-000000000002",

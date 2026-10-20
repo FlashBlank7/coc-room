@@ -10,6 +10,7 @@ import pytest
 
 from coc_module_parser.character_provider import (
     CharacterDraftProviderOutputV1,
+    CHARACTER_DRAFT_INSTRUCTIONS,
     DeepSeekCharacterDraftProvider,
     GenerateCharacterDraftTaskV1,
     character_draft_output_schema,
@@ -343,7 +344,53 @@ def test_character_provider_schema_is_closed_and_strict() -> None:
         "birthplace",
         "characteristics",
         "skills",
+        "creation",
         "inventory",
         "background",
         "notes",
     }
+
+
+def test_browser_and_sidecar_share_the_character_draft_contract() -> None:
+    root = Path(__file__).resolve().parents[3]
+    contract = json.loads((root / "apps/desktop/src/ai/character-draft-contract.json").read_text(encoding="utf-8"))
+    assert contract == {"instructions": CHARACTER_DRAFT_INSTRUCTIONS, "schema": character_draft_output_schema()}
+
+
+def _draft_with_creation() -> dict[str, object]:
+    draft = _draft_payload()
+    draft["occupation"] = "Custom research doctor"
+    draft["creation"] = {
+        "occupationFormula": "edu4", "occupationBudget": None, "interestBudget": None,
+        "creditMin": 0, "creditMax": 99, "occupationSkillIndexes": [0],
+        "allocations": [{"skillIndex": 0, "occupation": 40, "interest": 10}, {"skillIndex": 1, "occupation": 0, "interest": 5}],
+    }
+    return draft
+
+
+def test_character_points_follow_the_generated_skill_ids_in_the_wire_result() -> None:
+    draft = _draft_with_creation()
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=_completed(json.dumps(draft)))))
+    result = generate_character_draft(_task(), deepseek_client=client).character.model_dump(mode="json", by_alias=True, exclude_none=True)
+    plan = result["creation"]
+    assert plan["origin"] == "ai"
+    assert plan["occupationFormula"] == "edu4"
+    assert plan["occupationSkillIds"] == [result["skills"][0]["id"]]
+    assert plan["allocations"][result["skills"][0]["id"]] == {"occupation": 40, "interest": 10}
+    assert plan["allocations"][result["skills"][1]["id"]] == {"occupation": 0, "interest": 5}
+    assert "occupationBudget" not in plan
+    assert "skillIndex" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("change", [
+    {"occupationSkillIndexes": [2]},
+    {"occupationSkillIndexes": [0, 0]},
+    {"allocations": [{"skillIndex": 0, "occupation": 40, "interest": 10}]},
+    {"allocations": [{"skillIndex": 0, "occupation": 40, "interest": 10}, {"skillIndex": 0, "occupation": 0, "interest": 5}]},
+])
+def test_invalid_creation_references_cannot_attach_points_to_the_wrong_skill(change: dict) -> None:
+    from pydantic import ValidationError
+    draft = _draft_with_creation()
+    draft["creation"].update(change)
+    with pytest.raises(ValidationError):
+        CharacterDraftProviderOutputV1.model_validate(draft)

@@ -39,6 +39,75 @@ const BOB: SeatV2 = {
 const ROOM: AudienceV2 = { kind: "room" };
 
 describe("HostEventSequencerV2", () => {
+  it("prepares a card before arrival, arbitrates competing seat claims, and transfers editing rights on release", () => {
+    const sequencer = deterministicSequencer();
+    let counter = 1100;
+    const commit = (sender: SeatV2, proposal: RoomEventProposalV2) => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, sender, proposal, commandId(counter++)), sender);
+    commit(HOST, { type: "table.seat.updated", audience: ROOM, payload: { tableSeatId: "chair-one", name: "记者座位" } });
+    const prepared = investigator(HOST.seatId);
+    commit(HOST, { type: "table.seat.character.assigned", audience: ROOM, payload: { tableSeatId: "chair-one", character: prepared } });
+    expect(sequencer.world.tableSeats.get("chair-one")?.occupantSeatId).toBeUndefined();
+    commit(ALICE, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-one" } });
+    expect(sequencer.world.latestCharacters.get(prepared.id)?.ownerPeerId).toBe(ALICE.seatId);
+    expect(() => commit(BOB, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-one" } })).toThrow(/已经有人/);
+    expect(() => commit(BOB, { type: "table.seat.character.assigned", audience: ROOM, payload: { tableSeatId: "chair-one", character: null } })).toThrow(/自己座位/);
+    const edited = { ...sequencer.world.latestCharacters.get(prepared.id)!, occupation: "新闻记者" };
+    commit(ALICE, { type: "character.updated", audience: ROOM, payload: { character: edited } });
+    commit(ALICE, { type: "table.seat.released", audience: ROOM, payload: { tableSeatId: "chair-one" } });
+    expect(sequencer.world.latestCharacters.get(prepared.id)).toMatchObject({ ownerPeerId: HOST.seatId, occupation: "新闻记者" });
+    expect(() => commit(ALICE, { type: "character.updated", audience: ROOM, payload: { character: edited } })).toThrow();
+    commit(BOB, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-one" } });
+    const replica = new EventViewReplicaV2(ROOM_ID);
+    for (const view of sequencer.viewsAfter(BOB, 0)) replica.apply(view);
+    expect(replica.deriveWorld().tableSeats).toEqual(sequencer.world.tableSeats);
+    expect(replica.deriveWorld().latestCharacters.get(prepared.id)?.ownerPeerId).toBe(BOB.seatId);
+  });
+
+  it("rejects hidden seat changes, multiple occupied chairs, and assigning somebody else's card", () => {
+    const sequencer = deterministicSequencer();
+    let counter = 1150;
+    const commit = (sender: SeatV2, proposal: RoomEventProposalV2) => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, sender, proposal, commandId(counter++)), sender);
+    expect(() => commit(HOST, { type: "table.seat.updated", audience: { kind: "host" }, payload: { tableSeatId: "chair-one", name: "隐藏" } })).toThrow(/全房间/);
+    for (const id of ["chair-one", "chair-two"]) commit(HOST, { type: "table.seat.updated", audience: ROOM, payload: { tableSeatId: id, name: id } });
+    commit(ALICE, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-one" } });
+    expect(() => commit(ALICE, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-two" } })).toThrow(/已经入座/);
+    commit(BOB, { type: "character.updated", audience: ROOM, payload: { character: investigator(BOB.seatId) } });
+    expect(() => commit(ALICE, { type: "table.seat.character.assigned", audience: ROOM, payload: { tableSeatId: "chair-one", character: investigator(ALICE.seatId) } })).toThrow(/其他玩家/);
+    expect(() => commit(ALICE, { type: "table.seat.updated", audience: ROOM, payload: { tableSeatId: "chair-three", name: "额外" } })).toThrow();
+  });
+
+  it("keeps card ownership stable during a pending roll and transfers its map token after the check closes", () => {
+    const sequencer = deterministicSequencer();
+    let counter = 1190;
+    const commit = (sender: SeatV2, proposal: RoomEventProposalV2) => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, sender, proposal, commandId(counter++)), sender);
+    const card = investigator(HOST.seatId);
+    commit(HOST, { type: "table.seat.updated", audience: ROOM, payload: { tableSeatId: "chair-check", name: "检定座位" } });
+    commit(HOST, { type: "table.seat.character.assigned", audience: ROOM, payload: { tableSeatId: "chair-check", character: card } });
+    commit(HOST, { type: "entity.upserted", audience: ROOM, payload: { entity: roomEntity("token-seated", "character", card.name, { characterId: card.id, ownerSeatId: HOST.seatId }) } });
+    commit(HOST, { type: "entity.upserted", audience: ROOM, payload: { entity: roomEntity("token-other-owner", "character", "Bob's explicit token", { characterId: card.id, ownerSeatId: BOB.seatId }) } });
+    commit(ALICE, { type: "table.seat.claimed", audience: ROOM, payload: { tableSeatId: "chair-check" } });
+    expect(sequencer.world.entities.get("token-seated")).toMatchObject({ revision: 2, data: { ownerSeatId: ALICE.seatId } });
+    expect(sequencer.world.entities.get("token-other-owner")).toMatchObject({ revision: 1, data: { ownerSeatId: BOB.seatId } });
+    expect(sequencer.world.latestCharacters.get(card.id)?.playerName).toBe(ALICE.displayName);
+    commit(HOST, { type: "check.requested", audience: ROOM, payload: { requestId: "check-before-release", characterId: card.id, characterName: card.name, skillName: "Listen", proposedTarget: 50, reason: "Listen at the door" } });
+    expect(() => commit(ALICE, { type: "table.seat.released", audience: ROOM, payload: { tableSeatId: "chair-check" } })).toThrow(/未完成的检定/);
+    expect(() => commit(HOST, { type: "table.seat.character.assigned", audience: ROOM, payload: { tableSeatId: "chair-check", character: null } })).toThrow(/未完成的检定/);
+    commit(HOST, { type: "check.closed", audience: ROOM, payload: { requestId: "check-before-release", outcome: "cancelled", note: "撤回检定" } });
+    commit(ALICE, { type: "table.seat.released", audience: ROOM, payload: { tableSeatId: "chair-check" } });
+    expect(sequencer.world.entities.get("token-seated")).toMatchObject({ revision: 3, data: { ownerSeatId: HOST.seatId } });
+  });
+
+  it("replays keeper-confirmed public character requirements without accepting a player or a hidden publication", () => {
+    const sequencer = deterministicSequencer();
+    const proposal: RoomEventProposalV2 = { type: "room.settings.updated", audience: ROOM, payload: { defaultVisibility: "secret", characterBriefing: { text: "Public premise", recommendedSkills: ["Listen"], skillBudget: 300 } } };
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, proposal, commandId(901)), ALICE)).toThrow();
+    expect(() => sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, { ...proposal, audience: { kind: "host" } }, commandId(902)), HOST)).toThrow(/must be public/);
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, proposal, commandId(903)), HOST);
+    expect(sequencer.world.characterBriefing).toEqual(proposal.payload.characterBriefing);
+    expect(sequencer.viewsAfter(ALICE, 0)[0]).toMatchObject({ view: "full", event: { payload: { characterBriefing: { skillBudget: 300 } } } });
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, { type: "room.settings.updated", audience: ROOM, payload: { defaultVisibility: "public" } }, commandId(904)), HOST);
+    expect(sequencer.world.characterBriefing?.skillBudget).toBe(300);
+  });
   it("applies the room secret default to new player artifacts and redacts the other seat", () => {
     const sequencer = deterministicSequencer();
     sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
@@ -829,7 +898,7 @@ describe("HostEventSequencerV2", () => {
     expect(sequencer.world.clueClaims.has("public-clue")).toBe(false);
   });
 
-  it("binds an authorized check to one requester, one target and one roll", () => {
+  it.each([ALICE, HOST])("binds a check initiated by $role to its investigator, one target and one roll", (initiator) => {
     const values = [4, 2];
     const sequencer = deterministicSequencer(() => values.shift() ?? 0);
     sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
@@ -837,11 +906,12 @@ describe("HostEventSequencerV2", () => {
       audience: ROOM,
       payload: { character: investigator(ALICE.seatId) },
     }, commandId(40)), ALICE);
-    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, ALICE, {
+    sequencer.commitCommand(createRoomCommandV2(ROOM_ID, initiator, {
       type: "check.requested",
       audience: ROOM,
       payload: { requestId: "check-spot", characterId: "character-alice", characterName: "Alice Investigator", skillName: "Spot Hidden", proposedTarget: 60, reason: "Search the phonograph" },
-    }, commandId(41)), ALICE);
+    }, commandId(41)), initiator);
+    expect(sequencer.world.checkRequests.get("check-spot")?.requesterSeatId).toBe(ALICE.seatId);
     sequencer.commitCommand(createRoomCommandV2(ROOM_ID, HOST, {
       type: "check.authorized",
       audience: ROOM,
