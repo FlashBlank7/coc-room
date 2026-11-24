@@ -1,0 +1,11 @@
+{
+  "entries": [
+    {
+      "id": "public-readme-validation-20261124",
+      "path": "2026-11-24-public-readme-validation.md",
+      "baseCommit": "f589d44a4c3be8556b8b3d421b832f51a30d806e",
+      "kind": "direct-observation",
+      "scope": "Windows local browser pair; no native, live AI, cross-device or public network verification"
+    }
+  ]
+}

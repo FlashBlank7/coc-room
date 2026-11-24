@@ -26,9 +26,15 @@ Node.js 22 or newer and pnpm 9 are required by the current Wrangler and Cloudfla
 From the repository root:
 
 ```powershell
-pnpm install
+pnpm install --frozen-lockfile
+pnpm --filter @coc-room/protocol build
+pnpm --filter @coc-room/desktop build
 pnpm --filter @coc-room/relay dev
 ```
+
+The Worker also serves the built web app from `apps/desktop/dist`. Build it once
+before starting a fresh checkout; otherwise Wrangler exits with a missing
+`assets.directory` error. These commands do not compile Tauri or call AI services.
 
 Wrangler uses `http://127.0.0.1:8787` by default. Store this HTTP(S) origin as the desktop client's relay base URL. Generate the host peer ID locally first, then reserve it when creating the room:
 

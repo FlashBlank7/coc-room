@@ -1,8 +1,20 @@
 # CoC Room
 
-一个面向《克苏鲁的呼唤》7 版跑团的本地优先、房主中心式 P2P 桌面应用。项目以“能开团、记录可信、模组可整理”为目标：房主排序房间事件，参与者优先通过 WebRTC DataChannel 直连，失败时退回 Cloudflare Worker WebSocket 中继；各客户端只在本机保存自己收到的记录。
+CoC Room is a virtual tabletop for Call of Cthulhu. To try it without a model API key, follow the [local two-browser walkthrough](#快速开始本机双端体验): host a session, invite a player, roll dice, and export the play log.
 
-> 当前状态：早期开发版。协议、数据库和模组 Schema 仍可能在 `0.x` 期间调整。仓库没有已经部署好的公共 Worker；开发或使用前请启动本地 Worker，或自行部署一份。
+面向《克苏鲁的呼唤》7 版的联机跑团工具：KP（守秘人）创建房间、邀请玩家、逐步公开情境与线索，玩家在同一现场发言、使用角色卡并完成检定。调查记录保存在各自本机，结束后可导出为 Markdown 或离线网页。
+
+项目采用本地优先、房主中心式 P2P 架构，提供 Windows Tauri 桌面端和用于开发体验的浏览器入口。房主排序房间事件，参与者优先通过 WebRTC DataChannel 直连，失败时退回 Cloudflare Worker WebSocket 中继。模组整理、地图和 AI 辅助按需使用，手动开团不要求模型账号或 API Key。
+
+> 当前状态：早期开发版。协议、数据库和模组 Schema 仍可能在 `0.x` 期间调整。仓库默认指向本机 Worker，本 README 不提供可直接使用的公共节点；请启动本地 Worker，或自行部署一份。
+
+| 你想做什么 | 从哪里开始 |
+| --- | --- |
+| 先看看开团和玩家加入流程 | [本机双端体验](#快速开始本机双端体验)，只需 Node.js 与 pnpm |
+| 开发界面、房间逻辑或协议 | [日常开发](#日常开发与可选能力)，浏览器热更新 |
+| 使用 SQLite、系统文件框或打包 Windows 应用 | [桌面原生功能](#桌面原生功能)，另需 Rust 与 Windows 构建工具 |
+| 邀请另一台设备上的朋友 | [公网联机](#公网联机)，先部署自己的信令/中继节点 |
+| 了解数据流、权限和部署方式 | [架构说明](docs/architecture.md)、[开发指南](docs/development.md) |
 
 ## 已实现的核心能力
 
@@ -49,19 +61,46 @@
 - 构建模组解析 sidecar 时再安装 Python 3.12 与 [uv](https://docs.astral.sh/uv/)
 - 真实 Codex 解析还需要已安装并登录的 Codex CLI（`codex login`）
 
-## 快速开始
+## 快速开始：本机双端体验
 
-日常修 Bug 走网页热更新，不走安装包循环：React、TypeScript、CSS、共享协议和房间逻辑都用 `pnpm dev`；需要检查 SQLite、系统文件框等原生边界时，首次运行 `pnpm dev:tauri:first`，以后保持 `pnpm dev:tauri` 不关，前端修改同样会在 Tauri 窗口内热更新。只有 Rust/Tauri 配置、桌面内嵌 Python sidecar 或正式 NSIS 发布需要原生重编译或重启。详见[开发与发布指南](docs/development.md#2-本地开发)。
-
-安装 JavaScript 依赖：
+以下命令从全新 clone 开始，示例使用 PowerShell。先安装 Node.js 22（仓库 `.node-version` 为 22.23.2）和 pnpm 9.15.4；如使用 Corepack，可用 `corepack pnpm` 替代下方的 `pnpm`。已有多个 Node 版本时，先确认当前终端选中了 22.x，双端启动器会拒绝旧版本。
 
 ```powershell
-corepack enable
-corepack prepare pnpm@9.15.4 --activate
+git clone https://github.com/FlashBlank7/coc-room.git
+cd coc-room
+node --version
+pnpm --version
 pnpm install --frozen-lockfile
+pnpm --filter @coc-room/protocol build
+pnpm --filter @coc-room/desktop build
+pnpm dev:web:duo
 ```
 
-仓库提供 `.node-version`；如果本机有多个 Node，请先确认 `node --version` 为 22.x。双端开发启动器会拒绝旧 Node，并直接说明应切换版本。
+**首次启动前的两次构建不能省略。** 协议包提供类型入口；当前 Worker 配置同时托管 `apps/desktop/dist`，没有这个目录时，本地中继会报 `assets.directory ... does not exist` 并退出。构建完成后，日常前端开发仍使用热更新，无需每次重建。
+
+启动器会打开 KP `http://127.0.0.1:1420` 和玩家 `http://127.0.0.1:1421`，并启动 `http://127.0.0.1:8787` 的本地信令/中继与协议监视。两个网页使用不同 Origin，各自有独立的 IndexedDB，适合在一台电脑上模拟两名参与者。启动器不会调用模型，按 Ctrl+C 会统一关闭子进程。
+
+1. 在 KP 页选择“我是 KP，开一个新团”，填写称呼、房间名，点击“创建房间并进入”。
+2. 在现场填写“第一位玩家称呼”，点击“生成专属邀请”，复制整段邀请。每位玩家使用自己的邀请。
+3. 在玩家页选择“我是玩家，加入朋友”，填写称呼并粘贴邀请，点击“加入调查”。
+4. 两边在“现场发言”中各发送一条消息，确认对方收到。需要试骰时展开“自由掷骰”，点击“掷骰并记录”。
+5. 房间右上角“…”菜单可以导出文字/网页记录；“返回开始页”后，可从房间卡片选择“只看记录”。
+
+这条路径不需要导入模组、准备地图、安装 Python/Rust 或登录 AI 服务。网页数据保存在该浏览器和 Origin 下，清理网站数据会删除本机记录，请及时导出。
+
+本地中继邀请包含回环地址，**只能用于同一台电脑**。另一台设备不能通过这份邀请连接你的 `127.0.0.1`；跨设备使用请看[公网联机](#公网联机)。本机双端运行也不等于公网或跨网络验证。
+
+端口占用时可指定三个不同的空闲端口：
+
+```powershell
+pnpm dev:web:duo --no-open --kp-port 19240 --player-port 19241 --relay-port 19242
+```
+
+此时手动打开 `http://127.0.0.1:19240` 与 `http://127.0.0.1:19241`。想只检查服务能否启停，可在完成首次构建后运行 `pnpm smoke:web-duo`；它不操作浏览器，也不验证完整开团流程。
+
+## 日常开发与可选能力
+
+### 浏览器热更新
 
 默认开发入口会同时启动本地信令/中继、共享协议监视和 Vite 网页，并自动打开 `http://127.0.0.1:1420`：
 
@@ -75,16 +114,32 @@ pnpm dev
 pnpm dev:web:ui
 ```
 
-`pnpm dev:desktop` 保留为 `dev:web:ui` 的兼容别名。网页右下角会标明运行模式；房间、模组、角色与设置保存在浏览器 IndexedDB，可从设置或开发入口清空。真实 Codex/DeepSeek 模组解析、AI 车卡、NPC 属性草稿、受限上下文 NPC 回复，以及 TXT/Markdown/DOCX/PDF/安全 ZIP 输入都可通过 Vite 同源本地安全桥运行，无需重编译 Tauri；长解析可从界面安全停止，迟到结果不会写入草稿。先在 `services/module-parser` 执行 `uv sync --locked --extra dev --python 3.12`。Codex 复用本机 CLI 登录，DeepSeek Key 使用隐藏终端输入写入 Windows Credential Manager：
+`pnpm dev:desktop` 保留为 `dev:web:ui` 的兼容别名。网页右下角会标明运行模式；房间、模组、角色与设置保存在浏览器 IndexedDB。只有 Rust/Tauri 配置、桌面内嵌 Python sidecar 或正式 NSIS 发布需要原生重编译或重启。详见[开发与发布指南](docs/development.md#2-本地开发)。
 
-KP/玩家双端联调可运行 `pnpm dev:web:duo`：它同时启动本地中继、协议监视、KP 1420 和玩家 1421，两端使用独立 Origin/IndexedDB，Ctrl+C 会统一清理全部子进程。本地 AI 安全桥默认只在 KP 进程启用；玩家页没有桥令牌或桥路由，房间内角色草稿会通过房间消息交给 KP。URL 中的联调角色参数只显示标签，不用于授权。`pnpm smoke:web-duo` 可在随机端口做无浏览器、无 AI 的启停检查。
+### AI 辅助与文档解析（可选）
+
+真实 Codex/DeepSeek 模组解析、AI 车卡、NPC 属性草稿、受限上下文 NPC 回复，以及 TXT/Markdown/DOCX/PDF/安全 ZIP 输入都可通过 Vite 同源本地安全桥运行，无需重编译 Tauri；长解析可从界面安全停止，迟到结果不会写入草稿。先准备 Python 3.12 和 uv，在仓库根目录执行：
+
+```powershell
+Push-Location services/module-parser
+uv sync --locked --extra dev --python 3.12
+Pop-Location
+```
+
+Codex 路径需要本机已安装并登录的 Codex CLI，使用该账号额度；DeepSeek 是显式可选提供者，需要自己的 API Key 并产生 API 费用。DeepSeek Key 使用隐藏终端输入写入 Windows Credential Manager：
 
 ```powershell
 pnpm ai:key:set
 pnpm ai:key:status
 ```
 
-本地桥不接受来自网页的 Key、本机路径、命令、Shell、工具或自定义提供者地址。长任务有宽松的兜底超时（总 12 小时、15 分钟无心跳）；网页刷新、取消或断开会终止 Python/Codex 整个进程树。上传文件只在校验后的系统临时目录中存活到任务结束或取消清理完成。SQLite、原生系统文件对话框和桌面托管资源库仍需在阶段验收时启动 Tauri：
+本地桥不接受来自网页的 Key、本机路径、命令、Shell、工具或自定义提供者地址。长任务有宽松的兜底超时（总 12 小时、15 分钟无心跳）；网页刷新、取消或断开会终止 Python/Codex 整个进程树。上传文件只在校验后的系统临时目录中存活到任务结束或取消清理完成。
+
+双端启动器默认只在 KP 页启用本地 AI 安全桥；玩家页没有桥令牌或桥路由，房间内角色草稿会通过房间消息交给 KP。URL 中的联调角色参数只显示标签，不用于授权。
+
+### 桌面原生功能
+
+按上面的环境要求安装 Rust、Windows 构建工具、WebView2，以及 Python 3.12/uv 后，首次运行：
 
 ```powershell
 pnpm dev:tauri:first # 首次准备 sidecar 并启动
@@ -100,6 +155,8 @@ pnpm smoke:web
 
 准备好 Python 解析环境后，`pnpm smoke:web-bridge` 会在临时端口验证 Vite、HMR、安全桥会话边界和离线 mock 解析，且不会启动或编译 Tauri。
 
+## 公网联机
+
 本地默认中继源为 `http://127.0.0.1:8787`。部署 Worker 后，将 `VITE_RELAY_URL` 设为 Wrangler 输出的 HTTPS **源地址**（不是房间 WebSocket 完整 URL），再启动或构建客户端：
 
 ```powershell
@@ -109,7 +166,9 @@ pnpm dev:tauri
 
 应用内“设置”保存的中继地址会成为后续运行时配置。完整开发、测试、Worker 自部署、sidecar 和 NSIS 打包命令见 [开发指南](docs/development.md)。
 
-当前项目没有公共 Worker。公网使用时，先按开发指南部署自己的 Worker，并用仓库自带的 relay smoke 验收 HTTPS 源地址；房主随后在“设置 → 公网信令/中继节点”中填入该源地址并保存。创建房间后，完整的 WSS 房间地址会写进邀请串，玩家直接粘贴邀请串即可加入，不需要另外配置该 Worker。
+仓库不提供公共节点地址。公网使用时，先按开发指南部署自己的 Worker，并用仓库自带的 relay smoke 验收 HTTPS 源地址；房主随后在“设置 → 公网信令/中继节点”中填入该源地址并保存。创建房间后，完整的 WSS 房间地址会写进邀请串，玩家直接粘贴邀请串即可加入，不需要另外配置该 Worker。
+
+## 模组备团与发布
 
 导入 `.cocmod.json` 后，模组会自动滚动到右侧“检查整理结果”，并以“阅读备团资料”模式打开；概览会直接列出人物和地点名称，点击名称可进入完整资料卡。“检查并修正”用于修正元数据、章节、场景、地点、NPC、线索、手记、检定和主持人笔记，“高级数据 → 编辑底层 JSON”保留完整底层编辑能力。Codex/DeepSeek 会为地点与 NPC 尝试生成保守、无剧透的玩家可见初见稿；无法安全判断时留空，且所有稿件都必须由 KP 审核。已经保存在资料库中的模组可点击左侧卡片的“打开”；浏览器预览持久化到 IndexedDB，Tauri 桌面版持久化到 SQLite。
 
@@ -128,7 +187,7 @@ V1 房间仍可从本机打开和导出，但只读且不会原地升级。V2 �
 - WebRTC DataChannel 使用 DTLS 加密；WSS 能保护客户端到 Worker 的传输。
 - 首版**没有应用层端到端加密**。连接退回 WebSocket 中继时，Cloudflare 和 Worker 运营者理论上能够读取转发中的正文，请勿通过不受信任的公共节点传输敏感内容。
 - Worker 不建立聊天历史或模组正文存储，也不持久化房间元数据或令牌摘要。随机房主令牌通过带域分隔的 SHA-256 派生玩家加入令牌和房间 ID，使 Durable Object 能在不查询服务端房间记录的情况下验证房间、角色和预留的房主 peer ID；未认证 socket 的 15 秒截止 alarm 与在线 WebSocket attachment 不构成可恢复的房间历史。
-- 聊天、角色变化、骰子和已揭示内容保存在每个参与者自己的 SQLite 中。完整模组只应保存在房主本地。
+- 聊天、角色变化、骰子和已揭示内容保存在每个参与者本机：桌面端使用 SQLite，网页开发模式使用 IndexedDB。完整模组只应保存在房主本地。
 - V2 角色卡默认全房间可见；私人笔记只存在个人角色库和 `.cocchar`，不会进入房间事件。已经发出的内容无法撤回，扩大受众会发送新的授权视图。
 - V2 地点、NPC、线索、画板和 NPC 会话都带受众；无权席位只收到脱敏占位。迷雾是协作 UI 遮罩，不是密码学保密。
 - Codex 路径只启动本机已登录的 `codex exec`，不会读取、复制或转发 Codex 登录令牌，也不会开放通用 Codex/HTTP 代理。网页开发时使用的同源本地安全桥仅提供固定任务路由。模组正文仍会经 Codex 发送到 OpenAI；这不是离线推理。

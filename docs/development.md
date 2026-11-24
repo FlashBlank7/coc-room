@@ -60,6 +60,8 @@ Pop-Location
 
 默认采用 web-first 工作流。一条命令会先构建共享协议，然后并行启动协议监视、Vite 和 Wrangler 本地中继，并自动打开浏览器：
 
+全新 checkout 在安装依赖后，先执行一次 `pnpm --filter @coc-room/protocol build` 和 `pnpm --filter @coc-room/desktop build`。当前 Wrangler 配置同时托管 `apps/desktop/dist`；没有该目录时，中继会报 `assets.directory` 不存在并退出。这项首次准备同样适用于 `pnpm dev:web:duo`、`pnpm dev:relay` 和 `pnpm smoke:web-duo`，后续前端修改仍通过热更新生效。
+
 ```powershell
 pnpm dev
 ```
